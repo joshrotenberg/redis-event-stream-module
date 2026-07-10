@@ -20,7 +20,7 @@
 - Backfill. Events that occur while the module is unloaded, disabled, or the server is down are not recoverable. This is a live mirror, not a write-ahead log.
 - Capturing key values or payloads. The notification API delivers only the event name and key; for `expired` the value is already gone.
 - Cluster support in v0.1 (see section 10).
-- Capturing `MISSED`, `NEW`, `LOADED`, or `TRIMMED` class events in v0.1 (outside `REDISMODULE_NOTIFY_ALL`, see section 5).
+- Capturing `LOADED` or `TRIMMED` class events: `LOADED` fires only while the server loads its dataset, when stream writes are unavailable, and `TRIMMED` fires only during cluster reshard trimming, which is unsupported (section 5). `MISSED` and `NEW` are capturable as of the raw-subscription change (section 5).
 
 ## 3. Prior art
 
@@ -89,9 +89,11 @@ destination = <stream-prefix> + sanitize(<event-name>)
 | Expiration / eviction | `expired`, `evicted` | `expired` fires when Redis actually removes the key (lazy access or active expire cycle), not at the nominal TTL instant. |
 | Module-defined | Arbitrary strings via `RM_NotifyKeyspaceEvent`, e.g. `json.set` | The only unbounded source. Any co-loaded module can fire any name under any class within `NOTIFY_ALL` (redismodule-rs's own `examples/events.rs` fires `events.send` under GENERIC), so excluding the MODULE class does not bound custom names. The real bounds are the 128-byte sanitized-name cap and per-stream `maxlen` trimming; total memory grows with distinct names, not event volume. |
 
-Not capturable in v0.1: `keymiss` (MISSED), `new` (NEW, 7.0.1+), `loaded` (LOADED), and TRIMMED-class events. `REDISMODULE_NOTIFY_ALL` excludes all four (verified against the vendored `redismodule.h`: ALL is GENERIC|STRING|LIST|SET|HASH|ZSET|EXPIRED|EVICTED|STREAM|MODULE), and the wrapper's `redis_event_handler!` intersects any requested mask with `RedisModule_GetKeyspaceNotificationFlagsAll()`, which is the server's own NOTIFY_ALL, so requesting them through the `event_handlers:` macro silently strips them. Capturing them later requires calling `raw::RedisModule_SubscribeToKeyspaceEvents` directly (see Future work).
+Subscription mechanism. `REDISMODULE_NOTIFY_ALL` covers GENERIC|STRING|LIST|SET|HASH|ZSET|EXPIRED|EVICTED|STREAM|MODULE but excludes `keymiss` (MISSED), `new` (NEW, 7.0.1+), `loaded` (LOADED), and TRIMMED (verified against the vendored `redismodule.h`), and the wrapper's `event_handlers:` macro intersects any requested mask with the server's NOTIFY_ALL, silently stripping those four. The module therefore does not use that macro: it calls `raw::RedisModule_SubscribeToKeyspaceEvents` directly in `init` with a hand-written callback. This lets it request MISSED and NEW, and makes the FFI boundary panic-safe (below).
 
-Byte-level guarantees: `RM_NotifyKeyspaceEvent` takes a C string, so event names cannot contain NUL. The wrapper's generated callback converts with `CStr::from_ptr(...).to_str().unwrap()` (`src/macros.rs`), so by the time the handler runs the name is valid UTF-8. A non-UTF-8 event name from a hostile module would panic inside the wrapper-generated handler before this module's code executes; this is a redismodule-rs limitation (see Open questions).
+`MISSED` (`keymiss`, one event per read miss) and `NEW` (`new`, one event per newly created key) are high-volume, so they are opt-in: the subscription mask is `NOTIFY_ALL` plus MISSED and/or NEW only when the load-time filter names them (`@missed`, `@new`, or `*`, which subscribes to both). The mask is fixed at load; `RedisModule_SubscribeToKeyspaceEvents` has no unsubscribe, so a runtime `CONFIG SET eventstream.events` that names a MISSED or NEW class the load did not subscribe to is rejected (a bare `*` at runtime is accepted and captures only what is subscribed). `LOADED` and `TRIMMED` remain uncapturable and their `@class` tokens are rejected with a reason: `LOADED` fires only during dataset load, when the not-LOADING gate and the deferred-write API both refuse writes, and `TRIMMED` fires only during cluster reshard trimming (cluster is unsupported, section 10).
+
+Byte-level guarantees and panic safety: `RM_NotifyKeyspaceEvent` takes a C string, so event names cannot contain NUL, but they can be non-UTF-8. The wrapper's macro-generated callback would convert the name with `to_str().unwrap()` and panic on non-UTF-8, which is undefined behavior across the FFI boundary and aborts the server (redismodule-rs#472). The module's hand-written callback avoids this two ways: it decodes the name with `String::from_utf8_lossy` (replacement characters for invalid bytes, so the entry's `event` field is always written), and it wraps the whole handler in `catch_unwind`, counting any caught panic as `handler_panics` (a nonzero value is a bug in this module) rather than letting it unwind into Redis. A non-UTF-8 name is therefore captured, not a crash.
 
 ### Sanitization
 
@@ -179,19 +181,19 @@ Example:
 
 ### Events filter grammar
 
-The subscription mask is fixed at load (the module subscribes to `@ALL`; there is no resubscribe API), so the filter is a module-side predicate evaluated per notification. Class tokens only select; they never change stream naming, which is always per event name.
+The subscription mask is fixed at load (there is no resubscribe API), so the filter is a module-side predicate evaluated per notification. Class tokens only select; they never change stream naming, which is always per event name.
 
 ```
 filter := token ( "," token )*
 token  := "*" | "@" class | event-name
 class  := generic | string | list | set | hash | zset | stream
-        | expired | evicted | module
+        | expired | evicted | module | missed | new
 event-name := any non-empty run of characters except "," and whitespace
 ```
 
 - Whitespace around tokens is trimmed; duplicates ignored.
-- `*` matches every delivered event.
-- `@class` matches the `NotifyEvent` bitmask the wrapper passes to the handler. The class list above is exactly the classes inside `NOTIFY_ALL`; `missed`, `new`, `loaded`, and `trimmed` are outside it and are not accepted (not capturable in v1).
+- `*` matches every delivered event (that is, every event in the subscribed classes).
+- `@class` matches the `NotifyEvent` bitmask passed to the handler. `generic` through `module` are the `NOTIFY_ALL` classes, always subscribed. `missed` and `new` are opt-in and must be named at load (section 5); naming one at runtime that the load did not subscribe to is rejected. `@loaded` and `@trimmed` are always rejected with a reason (section 5).
 - A bare token is an exact, case-sensitive byte comparison against the delivered event name. Bare names are not validated against a closed list because the namespace is open (modules can fire custom names).
 - Unknown `@class` tokens, empty tokens, and the empty string are rejected at `CONFIG SET` time. To pause the module, use `eventstream.enabled no`; an empty filter is a mistake, not a state.
 
@@ -467,10 +469,11 @@ eventstream_skipped_filtered:220
 eventstream_skipped_invalid:0
 eventstream_active_streams:1
 eventstream_control_markers:2
+eventstream_handler_panics:0
 eventstream_last_error_time:1752071011
 ```
 
-`dropped` is the sum of the three `dropped_*` reasons. `active_streams` counts distinct destination streams written since load, excluding the control stream. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. Config values are not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO.
+`dropped` is the sum of the three `dropped_*` reasons. `active_streams` counts distinct destination streams written since load, excluding the control stream. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at the notification-callback FFI boundary (section 5); it should always be 0, and any nonzero value is a bug in this module. Config values are not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO.
 
 Documentation must state plainly: module sections do not appear in default `INFO` or `INFO all`; use `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. This is otherwise a recurring support question.
 
@@ -575,7 +578,7 @@ Each item is additive (new config key, counter, command, or entry field), so not
 - Firehose stream at `<prefix>#firehose` behind a bool config, for one consumer group over all events (the `#` namespace is already protected by the sanitizer).
 - Runtime-mutable `stream-prefix`, with the current-plus-previous-prefix guard and documented old-stream cleanup semantics.
 - Additional entry formats (minimal without `event`, verbose with `class`, JSON) behind an `entry-format` enum config, with a format discriminator and a `dropped_encode_error` counter.
-- `MISSED`/`NEW`/`LOADED`/`TRIMMED` capture via direct `raw::RedisModule_SubscribeToKeyspaceEvents` (bypassing the `event_handlers:` macro, which intersects away anything outside NOTIFY_ALL); a hand-written handler also fixes the non-UTF-8 panic via lossy decode.
+- `MISSED`/`NEW` capture via a direct `raw::RedisModule_SubscribeToKeyspaceEvents` subscription is implemented (section 5); the hand-written handler also fixed the non-UTF-8 panic via lossy decode. `LOADED` and `TRIMMED` remain uncapturable by construction (dataset-load and cluster-reshard only).
 - Cluster support: the slot-pinned per-node hashtag design (section 10, option B), with per-node discovery and reshard handling. A full design proposal is in [docs/cluster-design.md](docs/cluster-design.md), pending maintainer acceptance.
 - Key-name glob filter, per-event maxlen overrides, source-db filter, max-streams cap on distinct event names, an option to disable `verify_oom`, a global monotonic `seq` entry field for cross-stream same-millisecond ordering.
 - Shutdown gap marker via the Shutdown server-event hook, so clean restarts become distinguishable from crashes (section 9 limitation); requires verifying that a write at shutdown-event time still reaches the final RDB save or AOF.
@@ -584,7 +587,7 @@ Each item is additive (new config key, counter, command, or entry field), so not
 
 ## 17. Open questions for the maintainer
 
-1. **Non-UTF-8 module event names panic in the wrapper.** The macro-generated handler calls `to_str().unwrap()` before module code runs (`redismodule-rs/src/macros.rs`). Options: accept and document (no known module fires non-UTF-8 names), subscribe via the raw API with a hand-written handler, or upstream a lossy-decode fix to redismodule-rs. Resolved 2026-07-09: accept and document for v0.1; upstream issue filed as RedisLabsModules/redismodule-rs#472. The raw-API path (Future work, MISSED/NEW capture) absorbs the real fix if upstream does not move first.
+1. **Non-UTF-8 module event names panic in the wrapper.** Resolved. The module no longer uses the wrapper's `event_handlers:` macro; its hand-written raw callback (section 5) decodes the event name with `from_utf8_lossy` and wraps the handler in `catch_unwind`, so a non-UTF-8 name is captured (with replacement characters) rather than crashing the server. The upstream issue RedisLabsModules/redismodule-rs#472 remains filed for the benefit of modules that still use the macro.
 2. **notify-keyspace-events bypass across versions.** Resolved. The integration suite never sets `notify-keyspace-events`, so it only passes if module keyspace subscribers receive events with the setting empty. CI runs the full suite against Redis 7.2.8, 7.4.5, 8.8.0, and Valkey 8.1.6, so every supported server line empirically pins the bypass. Originally verified by reading Redis 7.2 `src/notify.c` (`moduleNotifyKeyspaceEvent()` runs before the config check); now enforced across the matrix rather than asserted.
 3. **Is an immutable `stream-prefix` acceptable for launch?** IMMUTABLE deletes real complexity (dual-prefix guard, cleanup semantics) and relaxing later is non-breaking. Recommendation: keep IMMUTABLE unless there is a concrete need to re-prefix without a restart.
 4. **`module_args_as_configuration` with three config types.** The macro grammar makes each config-type block optional, but the established wrapper guidance says all four sections must be present when module args are enabled. Resolved 2026-07-09 by experiment against the pinned v2.1.3 tag: omitting the enum section fails to compile, but an empty `enum: []` list compiles and works (module loads, `CONFIG GET eventstream.*` lists the real configs, unprefixed module args are applied). The config block uses `enum: []` with a code comment.
