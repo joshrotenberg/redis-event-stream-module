@@ -79,9 +79,10 @@ static LOGGED_OOM: AtomicBool = AtomicBool::new(false);
 static LOGGED_DEFER_ERROR: AtomicBool = AtomicBool::new(false);
 static LOGGED_PANIC: AtomicBool = AtomicBool::new(false);
 
-/// Panics caught at the notification-callback FFI boundary (SPEC.md section 5).
-/// A nonzero value is a bug in this module; the counter exists so it surfaces
-/// in INFO instead of aborting the server.
+/// Panics caught at an FFI boundary, in either the notification callback or a
+/// post-notification job (SPEC.md section 5). A nonzero value is a bug in this
+/// module; the counter exists so it surfaces in INFO instead of aborting the
+/// server.
 static HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
 
 /// Cluster per-node mode (issue #45): true when `eventstream.cluster-streams`
@@ -441,49 +442,72 @@ fn tag_segment_cached() -> Option<String> {
         .map(|t| format!("{{{t}}}"))
 }
 
-/// Find a hash tag whose slot this node owns. Uses
-/// `RedisModule_ClusterCanonicalKeyNameInSlot(slot)` to get a key name that
-/// hashes to a specific slot, then probes ownership with a non-destructive
-/// write: `XADD {tag}#slotprobe NOMKSTREAM * f v`. The slot-ownership check
-/// that rejects a non-local key applies to writes, not reads (a plain read
-/// runs locally and would falsely pass on every node), so the probe must be a
-/// write; `NOMKSTREAM` on a non-existent stream is a no-op that creates
-/// nothing, and this is the same locality rule that governs the real mirrored
-/// writes. Slots are visited in a scattered order (odd stride, coprime with
-/// 16384) so an owned slot is found within a few probes on a typical cluster
-/// while still covering all slots in the worst case. One-time, then cached.
+/// Find a hash tag whose slot this node owns, probing ownership with a
+/// non-destructive write: `XADD {tag}#slotprobe NOMKSTREAM * f v`. The
+/// slot-ownership check that rejects a non-local key applies to writes, not
+/// reads (a plain read runs locally and would falsely pass on every node), so
+/// the probe must be a write; `NOMKSTREAM` on a non-existent stream is a no-op
+/// that creates nothing, and this is the same locality rule that governs the
+/// real mirrored writes. One-time, then cached.
+///
+/// The candidate tag for each slot comes from
+/// `RedisModule_ClusterCanonicalKeyNameInSlot(slot)`, which yields a key name
+/// hashing to a specific slot, so scanning slots has guaranteed coverage. That
+/// API was added after Redis 7.2, though: on 7.2 the bound function pointer is
+/// null (bindgen declares it from the vendored header, but the server does not
+/// provide it), and calling it would panic across the FFI boundary and abort
+/// the server (issue #45). When it is unavailable, fall back to synthetic
+/// candidate tags, which land on an owned slot on any balanced cluster. Slots
+/// are visited in a scattered order (odd stride, coprime with 16384) so an
+/// owned slot is found within a few probes on a typical cluster while still
+/// covering all slots in the worst case.
 #[cfg(not(test))]
 fn select_owned_tag(ctx: &Context) -> Option<String> {
+    let canonical = unsafe { raw::RedisModule_ClusterCanonicalKeyNameInSlot };
     let mut slot: u32 = 0;
-    for _ in 0..SLOT_COUNT {
-        let name_ptr = unsafe { raw::RedisModule_ClusterCanonicalKeyNameInSlot.unwrap()(slot) };
-        if !name_ptr.is_null() {
-            let bytes = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
-            // The canonical name is expected to be simple ASCII with no braces;
-            // guard against anything that would break the hash tag.
-            if !bytes.is_empty() && !bytes.contains(&b'{') && !bytes.contains(&b'}') {
-                let tag = String::from_utf8_lossy(bytes).into_owned();
-                let probe = format!("{{{tag}}}#slotprobe");
-                // Probe with the SAME call options as the real mirrored write:
-                // the replicate flag is what makes RM_Call enforce slot
-                // ownership (a plain call runs locally and passes on every
-                // node). NOMKSTREAM makes it a no-op on a non-existent stream,
-                // so nothing is written. Owned slot -> Ok(nil); non-owned ->
-                // Err (the non-local-key error).
-                let res: CallResult = ctx.call_ext(
-                    "XADD",
-                    &xadd_call_options(),
-                    &[
-                        probe.as_bytes(),
-                        &b"NOMKSTREAM"[..],
-                        &b"*"[..],
-                        &b"f"[..],
-                        &b"v"[..],
-                    ][..],
-                );
-                if res.is_ok() {
-                    return Some(tag);
+    for i in 0..SLOT_COUNT {
+        // A candidate tag whose hash slot we then test for ownership.
+        let candidate: Option<String> = match canonical {
+            Some(canonical_in_slot) => {
+                let name_ptr = unsafe { canonical_in_slot(slot) };
+                if name_ptr.is_null() {
+                    None
+                } else {
+                    let bytes = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
+                    // The canonical name is expected to be simple ASCII with no
+                    // braces; guard against anything that would break the tag.
+                    if bytes.is_empty() || bytes.contains(&b'{') || bytes.contains(&b'}') {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(bytes).into_owned())
+                    }
                 }
+            }
+            // Redis 7.2: no canonical-name API. A synthetic tag hashes to some
+            // slot; scanning enough of them covers an owned slot on a balanced
+            // cluster (a node owning only a handful of slots is the sole gap).
+            None => Some(format!("es{i}")),
+        };
+        if let Some(tag) = candidate {
+            let probe = format!("{{{tag}}}#slotprobe");
+            // Probe with the SAME call options as the real mirrored write: the
+            // replicate flag is what makes RM_Call enforce slot ownership (a
+            // plain call runs locally and passes on every node). NOMKSTREAM
+            // makes it a no-op on a non-existent stream, so nothing is written.
+            // Owned slot -> Ok(nil); non-owned -> Err (the non-local-key error).
+            let res: CallResult = ctx.call_ext(
+                "XADD",
+                &xadd_call_options(),
+                &[
+                    probe.as_bytes(),
+                    &b"NOMKSTREAM"[..],
+                    &b"*"[..],
+                    &b"f"[..],
+                    &b"v"[..],
+                ][..],
+            );
+            if res.is_ok() {
+                return Some(tag);
             }
         }
         slot = (slot + 2609) % SLOT_COUNT;
@@ -618,6 +642,27 @@ fn write_marker(ctx: &Context, control_stream: &str, action: &str, maxlen: i64) 
     }
 }
 
+/// Run a post-notification job body, catching any panic so a bug in module
+/// code cannot unwind across the FFI job trampoline and abort the server. The
+/// redis-module wrapper makes the notification callback panic-safe but not the
+/// post-notification job it schedules; issue #45 found a null optional-API
+/// pointer (`ClusterCanonicalKeyNameInSlot` on Redis 7.2) panicking here and
+/// aborting the node, so the guard belongs with every job body. A caught panic
+/// is counted and logged once, sharing the handler-panic counters.
+fn guard_job(body: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        HANDLER_PANICS.fetch_add(1, Ordering::Relaxed);
+        if LOGGED_PANIC
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            redis_module::logging::log_warning(
+                "eventstream: post-notification job panicked (caught); event dropped",
+            );
+        }
+    }
+}
+
 /// Drain pending gap markers into a marker-writing post-notification job.
 /// Called at the top of the notification callback, ahead of the enabled gate
 /// (markers must flush even while disabled), and gated MASTER/not-LOADING
@@ -638,21 +683,24 @@ fn drain_pending_markers(ctx: &Context) {
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
     let dropped_count = drained.len() as u64;
     let status = ctx.add_post_notification_job(move |ctx| {
-        // Resolve the per-node tag in the job (write-safe context); the control
-        // stream shares the node tag with the event streams so they co-locate.
-        let seg = match tag_segment(ctx) {
-            Some(s) => s,
-            None => {
-                for _ in &drained {
-                    count_no_slot_drop(ctx);
+        guard_job(move || {
+            // Resolve the per-node tag in the job (write-safe context); the
+            // control stream shares the node tag with the event streams so they
+            // co-locate.
+            let seg = match tag_segment(ctx) {
+                Some(s) => s,
+                None => {
+                    for _ in &drained {
+                        count_no_slot_drop(ctx);
+                    }
+                    return;
                 }
-                return;
+            };
+            let control_stream = format!("{prefix_owned}{seg}#control");
+            for action in &drained {
+                write_marker(ctx, &control_stream, action, maxlen);
             }
-        };
-        let control_stream = format!("{prefix_owned}{seg}#control");
-        for action in &drained {
-            write_marker(ctx, &control_stream, action, maxlen);
-        }
+        });
     });
     if !matches!(status, Status::Ok) {
         // One increment per dropped marker (SPEC.md section 9: marker-write
@@ -727,103 +775,105 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
 
     // 7. Deferred write, atomic with the notification.
     let status = ctx.add_post_notification_job(move |ctx| {
-        // All destination streams are consolidated in db 0.
-        let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
-        if rc != raw::REDISMODULE_OK as i32 {
-            count_drop(
-                ctx,
-                &DROPPED_XADD_ERROR,
-                &LOGGED_XADD_ERROR,
-                "SelectDb(0) failed; entry dropped",
-            );
-            return;
-        }
-
-        // In per-node cluster mode, `{tag}` co-locates this node's streams on
-        // an owned slot; empty otherwise. `None` means no owned slot yet.
-        let seg = match tag_segment(ctx) {
-            Some(s) => s,
-            None => {
-                count_no_slot_drop(ctx);
+        guard_job(move || {
+            // All destination streams are consolidated in db 0.
+            let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
+            if rc != raw::REDISMODULE_OK as i32 {
+                count_drop(
+                    ctx,
+                    &DROPPED_XADD_ERROR,
+                    &LOGGED_XADD_ERROR,
+                    "SelectDb(0) failed; entry dropped",
+                );
                 return;
             }
-        };
-        let stream = format!("{prefix_owned}{seg}{suffix}");
-        let registry = format!("{prefix_owned}{seg}#streams");
 
-        // XADD <stream> [MAXLEN ~ <n>] * event <event> key <key> db <db>
-        let maxlen_s = maxlen.to_string();
-        let db_s = db.to_string();
-        let mut args: Vec<&[u8]> = Vec::with_capacity(12);
-        args.push(stream.as_bytes());
-        if maxlen > 0 {
-            args.push(&b"MAXLEN"[..]);
-            args.push(&b"~"[..]);
-            args.push(maxlen_s.as_bytes());
-        }
-        args.push(&b"*"[..]);
-        args.push(&b"event"[..]);
-        args.push(event_owned.as_bytes());
-        args.push(&b"key"[..]);
-        args.push(key_owned.as_slice());
-        args.push(&b"db"[..]);
-        args.push(db_s.as_bytes());
+            // In per-node cluster mode, `{tag}` co-locates this node's streams on
+            // an owned slot; empty otherwise. `None` means no owned slot yet.
+            let seg = match tag_segment(ctx) {
+                Some(s) => s,
+                None => {
+                    count_no_slot_drop(ctx);
+                    return;
+                }
+            };
+            let stream = format!("{prefix_owned}{seg}{suffix}");
+            let registry = format!("{prefix_owned}{seg}#streams");
 
-        // Per-event trace (SPEC.md section 13); the server filters by
-        // loglevel. Key bytes are ASCII-escaped: the wrapper's logger builds
-        // a CString and panics across the FFI boundary on interior NUL, so
-        // raw key bytes (which may contain NUL) must never reach it.
-        ctx.log_debug(&format!(
-            "eventstream: {} key={} -> {}",
-            event_owned,
-            key_owned.escape_ascii(),
-            stream
-        ));
+            // XADD <stream> [MAXLEN ~ <n>] * event <event> key <key> db <db>
+            let maxlen_s = maxlen.to_string();
+            let db_s = db.to_string();
+            let mut args: Vec<&[u8]> = Vec::with_capacity(12);
+            args.push(stream.as_bytes());
+            if maxlen > 0 {
+                args.push(&b"MAXLEN"[..]);
+                args.push(&b"~"[..]);
+                args.push(maxlen_s.as_bytes());
+            }
+            args.push(&b"*"[..]);
+            args.push(&b"event"[..]);
+            args.push(event_owned.as_bytes());
+            args.push(&b"key"[..]);
+            args.push(key_owned.as_slice());
+            args.push(&b"db"[..]);
+            args.push(db_s.as_bytes());
 
-        let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
-        match res {
-            Ok(_) => {
-                FORWARDED.fetch_add(1, Ordering::Relaxed);
-                // First write to a destination stream: register it in the
-                // persistent set at `<prefix>#streams` (replicated, so
-                // EVENTSTREAM.STREAMS survives restart and works on replicas)
-                // and count it. KNOWN_STREAMS is the in-process dedupe cache;
-                // it is cleared on flush (see the flush handler) so a FLUSHALL
-                // that deleted the registry rebuilds it on the next write. The
-                // registry key is under the prefix, so its own SADD
-                // notification is dropped by the feedback guard.
-                let mut known = KNOWN_STREAMS.lock(ctx);
-                if !known.contains(&stream) {
-                    let sadd: CallResult = ctx.call_ext(
-                        "SADD",
-                        &xadd_call_options(),
-                        &[registry.as_bytes(), stream.as_bytes()][..],
-                    );
-                    if sadd.is_ok() {
-                        known.insert(stream.clone());
-                        ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+            // Per-event trace (SPEC.md section 13); the server filters by
+            // loglevel. Key bytes are ASCII-escaped: the wrapper's logger builds
+            // a CString and panics across the FFI boundary on interior NUL, so
+            // raw key bytes (which may contain NUL) must never reach it.
+            ctx.log_debug(&format!(
+                "eventstream: {} key={} -> {}",
+                event_owned,
+                key_owned.escape_ascii(),
+                stream
+            ));
+
+            let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
+            match res {
+                Ok(_) => {
+                    FORWARDED.fetch_add(1, Ordering::Relaxed);
+                    // First write to a destination stream: register it in the
+                    // persistent set at `<prefix>#streams` (replicated, so
+                    // EVENTSTREAM.STREAMS survives restart and works on replicas)
+                    // and count it. KNOWN_STREAMS is the in-process dedupe cache;
+                    // it is cleared on flush (see the flush handler) so a FLUSHALL
+                    // that deleted the registry rebuilds it on the next write. The
+                    // registry key is under the prefix, so its own SADD
+                    // notification is dropped by the feedback guard.
+                    let mut known = KNOWN_STREAMS.lock(ctx);
+                    if !known.contains(&stream) {
+                        let sadd: CallResult = ctx.call_ext(
+                            "SADD",
+                            &xadd_call_options(),
+                            &[registry.as_bytes(), stream.as_bytes()][..],
+                        );
+                        if sadd.is_ok() {
+                            known.insert(stream.clone());
+                            ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_utf8_string().unwrap_or_default();
+                    if msg.starts_with("OOM") {
+                        count_drop(
+                            ctx,
+                            &DROPPED_OOM,
+                            &LOGGED_OOM,
+                            &format!("XADD to '{stream}' refused under maxmemory: {msg}"),
+                        );
+                    } else {
+                        count_drop(
+                            ctx,
+                            &DROPPED_XADD_ERROR,
+                            &LOGGED_XADD_ERROR,
+                            &format!("XADD to '{stream}' failed: {msg}"),
+                        );
                     }
                 }
             }
-            Err(e) => {
-                let msg = e.to_utf8_string().unwrap_or_default();
-                if msg.starts_with("OOM") {
-                    count_drop(
-                        ctx,
-                        &DROPPED_OOM,
-                        &LOGGED_OOM,
-                        &format!("XADD to '{stream}' refused under maxmemory: {msg}"),
-                    );
-                } else {
-                    count_drop(
-                        ctx,
-                        &DROPPED_XADD_ERROR,
-                        &LOGGED_XADD_ERROR,
-                        &format!("XADD to '{stream}' failed: {msg}"),
-                    );
-                }
-            }
-        }
+        });
     });
     if !matches!(status, Status::Ok) {
         count_drop(
