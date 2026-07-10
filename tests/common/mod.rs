@@ -195,7 +195,11 @@ impl TestServer {
     /// create` refuses fewer than 3 nodes, so the slots are assigned directly.
     /// A normal (non-redirecting) client works, since one node owns everything.
     pub fn start_single_shard_cluster(module_args: &[&str]) -> TestServer {
-        let port = next_port();
+        // A cluster node needs its bus port at client-port + 10000, so the
+        // client port must be <= 55535 or the server refuses to start. Draw
+        // from the low cluster band, not `next_port()`, whose OS-assigned
+        // ephemeral port can exceed that ceiling (flaky by platform).
+        let port = next_cluster_base();
         let dir = tempfile::tempdir().expect("tempdir");
         let handle = Self::builder(port, &dir, module_args)
             .extra("cluster-enabled", "yes")
@@ -211,6 +215,14 @@ impl TestServer {
             .arg(16383)
             .query(&mut c)
             .expect("assign all slots");
+        // Redis 7.2 keeps a manually slotted single node in cluster_state:fail
+        // until its config epoch is nonzero; bumping the epoch settles it to ok.
+        // Newer servers reach ok on ADDSLOTSRANGE alone and treat this as a
+        // harmless no-op.
+        let _: () = redis::cmd("CLUSTER")
+            .arg("BUMPEPOCH")
+            .query(&mut c)
+            .expect("bump config epoch");
         wait_until(Duration::from_secs(10), "single-shard cluster ok", || {
             let info: String = redis::cmd("CLUSTER")
                 .arg("INFO")

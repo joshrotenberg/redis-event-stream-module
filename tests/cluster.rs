@@ -189,9 +189,12 @@ fn per_node_single_shard_captures() {
 
 #[test]
 fn invalid_cluster_streams_value_aborts_load() {
-    // A bad cluster-streams value is a malformed module arg and must abort the
-    // node startup, so the cluster does not form.
-    let result = TestCluster::try_start(3, Some(&["cluster-streams", "bogus"]));
+    // A bad cluster-streams value fails config validation, which happens during
+    // module load ahead of the cluster-mode check, so it aborts the load in
+    // plain standalone mode too. Asserting it here (no cluster) keeps the test
+    // fast and independent of cluster formation, which is version-fragile in
+    // the harness on the oldest supported server.
+    let result = TestServer::try_start(&["cluster-streams", "bogus"]);
     assert!(
         result.is_err(),
         "an invalid cluster-streams value must abort load"
