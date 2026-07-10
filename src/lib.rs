@@ -25,11 +25,13 @@
 use lazy_static::lazy_static;
 use redis_module::configuration::ConfigurationContext;
 #[cfg(not(test))]
-use redis_module::{configuration::ConfigurationFlags, redis_module};
+use redis_module::{configuration::ConfigurationFlags, redis_module, InfoContext, RedisResult};
 use redis_module::{
     raw, CallOptions, CallOptionsBuilder, CallResult, ConfigurationValue, Context, ContextFlags,
-    NotifyEvent, RedisError, RedisGILGuard, RedisResult, RedisString, RedisValue, Status,
+    NotifyEvent, RedisError, RedisGILGuard, RedisString, Status,
 };
+#[cfg(not(test))]
+use redis_module_macros::info_command_handler;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -46,6 +48,20 @@ static DROPPED_DEFER_ERROR: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_SELF: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_FILTERED: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_INVALID: AtomicU64 = AtomicU64::new(0);
+static CONTROL_MARKERS: AtomicU64 = AtomicU64::new(0);
+/// Distinct destination streams written since load, excluding the control
+/// stream; the membership set lives in `KNOWN_STREAMS`.
+static ACTIVE_STREAMS: AtomicU64 = AtomicU64::new(0);
+/// Unix seconds of the most recent drop, 0 if none (SPEC.md section 13).
+static LAST_ERROR_TIME: AtomicU64 = AtomicU64::new(0);
+
+/// Previous value of `eventstream.enabled`, used by the on-changed callback to
+/// detect transitions. Initialized to the default so the LoadConfigs-time set
+/// of the default produces no spurious marker (SPEC.md section 13 lifecycle).
+static LAST_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Cheap dirty flag so the notification hot path pays one atomic load unless
+/// a gap marker is actually pending (SPEC.md section 9 delivery mechanics).
+static MARKERS_DIRTY: AtomicBool = AtomicBool::new(false);
 
 // First-failure log latches, one per drop reason (SPEC.md section 13 logging policy).
 static LOGGED_XADD_ERROR: AtomicBool = AtomicBool::new(false);
@@ -254,6 +270,14 @@ lazy_static! {
     static ref PREFIX: PrefixConfig = PrefixConfig {
         value: RedisGILGuard::new("events:".to_owned()),
     };
+    /// Gap markers recorded at lifecycle points and written by the next
+    /// notification callback's post-notification job (SPEC.md section 9).
+    static ref PENDING_MARKERS: RedisGILGuard<Vec<&'static str>> =
+        RedisGILGuard::new(Vec::new());
+    /// Membership set behind `ACTIVE_STREAMS`; only touched on the capture
+    /// path, with the GIL held.
+    static ref KNOWN_STREAMS: RedisGILGuard<HashSet<String>> =
+        RedisGILGuard::new(HashSet::new());
 }
 
 fn xadd_call_options() -> CallOptions {
@@ -267,9 +291,14 @@ fn xadd_call_options() -> CallOptions {
 }
 
 /// Log the first failure per drop reason at warning; subsequent failures are
-/// only counted (SPEC.md section 13).
+/// only counted (SPEC.md section 13). Stamps `LAST_ERROR_TIME`.
 fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool, detail: &str) {
     counter.fetch_add(1, Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LAST_ERROR_TIME.store(now, Ordering::Relaxed);
     if latch
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
@@ -278,10 +307,136 @@ fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool, detail: &s
     }
 }
 
+/// Record a pending gap marker; the next notification callback writes it
+/// (SPEC.md section 9 delivery mechanics).
+fn record_pending_marker<G: redis_module::RedisLockIndicator>(lock: &G, action: &'static str) {
+    PENDING_MARKERS.lock(lock).push(action);
+    MARKERS_DIRTY.store(true, Ordering::Relaxed);
+}
+
+/// `eventstream.enabled` on-changed callback. Cannot write to the keyspace
+/// (the ConfigurationContext has no command capability at v2.1.3), so enable
+/// and disable transitions record pending markers. Also fires during
+/// LoadConfigs inside OnLoad; `LAST_ENABLED` starting at the default makes
+/// that a no-op unless the load args change the value.
+fn enabled_changed(config_ctx: &ConfigurationContext, _name: &str, _val: &'static AtomicBool) {
+    let now = ENABLED.load(Ordering::Relaxed);
+    let before = LAST_ENABLED.swap(now, Ordering::Relaxed);
+    if before != now {
+        // The ConfigurationContext cannot log through a Context; the
+        // module-wide logger works without one (SPEC.md section 13: toggles
+        // log at notice).
+        redis_module::logging::log_notice(format!(
+            "eventstream: enabled set to {}",
+            if now { "yes" } else { "no" }
+        ));
+        record_pending_marker(config_ctx, if now { "enabled" } else { "disabled" });
+    }
+}
+
+/// Write one gap marker to the control stream. Runs where keyspace writes are
+/// safe (a post-notification job or the deinit hook). Same call options,
+/// trimming, and drop accounting as mirrored entries (SPEC.md section 9).
+fn write_marker(ctx: &Context, control_stream: &str, action: &str, maxlen: i64) {
+    let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
+    if rc != raw::REDISMODULE_OK as i32 {
+        count_drop(
+            ctx,
+            &DROPPED_XADD_ERROR,
+            &LOGGED_XADD_ERROR,
+            "SelectDb(0) failed; gap marker dropped",
+        );
+        return;
+    }
+    let maxlen_s = maxlen.to_string();
+    let mut args: Vec<&[u8]> = Vec::with_capacity(10);
+    args.push(control_stream.as_bytes());
+    if maxlen > 0 {
+        args.push(&b"MAXLEN"[..]);
+        args.push(&b"~"[..]);
+        args.push(maxlen_s.as_bytes());
+    }
+    args.push(&b"*"[..]);
+    args.push(&b"action"[..]);
+    args.push(action.as_bytes());
+    args.push(&b"module-version"[..]);
+    args.push(env!("CARGO_PKG_VERSION").as_bytes());
+
+    let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
+    match res {
+        Ok(_) => {
+            CONTROL_MARKERS.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(e) => {
+            let msg = e.to_utf8_string().unwrap_or_default();
+            if msg.starts_with("OOM") {
+                count_drop(
+                    ctx,
+                    &DROPPED_OOM,
+                    &LOGGED_OOM,
+                    &format!("gap marker '{action}' refused under maxmemory: {msg}"),
+                );
+            } else {
+                count_drop(
+                    ctx,
+                    &DROPPED_XADD_ERROR,
+                    &LOGGED_XADD_ERROR,
+                    &format!("gap marker '{action}' failed: {msg}"),
+                );
+            }
+        }
+    }
+}
+
+/// Drain pending gap markers into a marker-writing post-notification job.
+/// Called at the top of the notification callback, ahead of the enabled gate
+/// (markers must flush even while disabled), and gated MASTER/not-LOADING
+/// like every other write (SPEC.md section 9). Enqueued before any mirrored
+/// entry job from the same notification, so markers land first (jobs run in
+/// FIFO order).
+fn drain_pending_markers(ctx: &Context) {
+    let flags = ctx.get_flags();
+    if !flags.contains(ContextFlags::MASTER) || flags.contains(ContextFlags::LOADING) {
+        return;
+    }
+    let drained: Vec<&'static str> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
+    MARKERS_DIRTY.store(false, Ordering::Relaxed);
+    if drained.is_empty() {
+        return;
+    }
+    let control_stream = format!("{}#control", PREFIX.value.lock(ctx).as_str());
+    let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+    let dropped_count = drained.len() as u64;
+    let status = ctx.add_post_notification_job(move |ctx| {
+        for action in &drained {
+            write_marker(ctx, &control_stream, action, maxlen);
+        }
+    });
+    if !matches!(status, Status::Ok) {
+        // One increment per dropped marker (SPEC.md section 9: marker-write
+        // failures follow the same drop-counter policy as mirrored entries).
+        count_drop(
+            ctx,
+            &DROPPED_DEFER_ERROR,
+            &LOGGED_DEFER_ERROR,
+            "failed to register gap-marker job; markers dropped",
+        );
+        if dropped_count > 1 {
+            DROPPED_DEFER_ERROR.fetch_add(dropped_count - 1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Keyspace notification callback. Runs with the GIL held; keyspace writes are
 /// unsafe here, so the XADD is deferred to a post-notification job. Gate order
 /// follows the SPEC.md section 4 diagram.
 fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &[u8]) {
+    // 0. Pending gap markers flush ahead of the enabled gate: the first event
+    // after a disable is exactly the boundary the disabled marker timestamps.
+    if MARKERS_DIRTY.load(Ordering::Relaxed) {
+        drain_pending_markers(ctx);
+    }
+
     // 1. Master switch.
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -357,10 +512,24 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
         args.push(&b"db"[..]);
         args.push(db_s.as_bytes());
 
+        // Per-event trace (SPEC.md section 13); the server filters by loglevel.
+        ctx.log_debug(&format!(
+            "eventstream: {} key={} -> {}",
+            event_owned,
+            String::from_utf8_lossy(&key_owned),
+            stream
+        ));
+
         let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
         match res {
             Ok(_) => {
                 FORWARDED.fetch_add(1, Ordering::Relaxed);
+                // Track distinct destination streams for the INFO section.
+                let mut known = KNOWN_STREAMS.lock(ctx);
+                if !known.contains(&stream) {
+                    known.insert(stream.clone());
+                    ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Err(e) => {
                 let msg = e.to_utf8_string().unwrap_or_default();
@@ -428,39 +597,99 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
         MAXLEN.value.load(Ordering::Relaxed),
         ENABLED.load(Ordering::Relaxed),
     ));
+
+    // Record the loaded gap marker as pending; a direct write here would
+    // abort startup loads when the RDB later loads a persisted control stream
+    // (SPEC.md section 9 delivery mechanics). Clear anything queued by
+    // LoadConfigs-time transitions first: the fresh-load state supersedes
+    // them. If the effective config starts disabled (enabled no as a module
+    // arg), re-queue the disabled state after loaded, otherwise a bare loaded
+    // marker would close the capture gap while every event is being dropped.
+    {
+        let mut pending = PENDING_MARKERS.lock(ctx);
+        pending.clear();
+        pending.push("loaded");
+        if !ENABLED.load(Ordering::Relaxed) {
+            pending.push("disabled");
+        }
+    }
+    MARKERS_DIRTY.store(true, Ordering::Relaxed);
+
     Status::Ok
 }
 
-/// `EVENTSTREAM.STATS`: temporary observability surface. Replaced by the
-/// module INFO section in the observability PR (issue #10); v0.1 ships zero
-/// custom commands per SPEC.md section 8.
-fn stats(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
-    let prefix = PREFIX.value.lock(ctx).clone();
-    let filter = FILTER.raw.lock(ctx).clone();
-    Ok(RedisValue::Array(vec![
-        RedisValue::SimpleStringStatic("enabled"),
-        RedisValue::Integer(ENABLED.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("stream-prefix"),
-        RedisValue::BulkString(prefix),
-        RedisValue::SimpleStringStatic("events"),
-        RedisValue::BulkString(filter),
-        RedisValue::SimpleStringStatic("maxlen"),
-        RedisValue::Integer(MAXLEN.value.load(Ordering::Relaxed)),
-        RedisValue::SimpleStringStatic("forwarded"),
-        RedisValue::Integer(FORWARDED.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("dropped_xadd_error"),
-        RedisValue::Integer(DROPPED_XADD_ERROR.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("dropped_oom"),
-        RedisValue::Integer(DROPPED_OOM.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("dropped_defer_error"),
-        RedisValue::Integer(DROPPED_DEFER_ERROR.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("skipped_self"),
-        RedisValue::Integer(SKIPPED_SELF.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("skipped_filtered"),
-        RedisValue::Integer(SKIPPED_FILTERED.load(Ordering::Relaxed) as i64),
-        RedisValue::SimpleStringStatic("skipped_invalid"),
-        RedisValue::Integer(SKIPPED_INVALID.load(Ordering::Relaxed) as i64),
-    ]))
+/// Module deinit, run inside `MODULE UNLOAD`: the one lifecycle point where a
+/// direct write is safe and no future notification exists to defer to. Writes
+/// the `unloading` gap marker and logs final counters (SPEC.md section 13).
+fn deinit(ctx: &Context) -> Status {
+    let flags = ctx.get_flags();
+    if flags.contains(ContextFlags::MASTER) && !flags.contains(ContextFlags::LOADING) {
+        // Drain pending markers and clear the dirty flag BEFORE any direct
+        // write: the write's own xadd notification re-enters the callback
+        // during OnUnload (Redis does not suppress re-entry there), and a
+        // step-0 drain at that point would register a post-notification job
+        // that fires after the module is dlclosed, a use-after-free. With the
+        // flag cleared, the re-entrant callback falls through to the prefix
+        // guard. Writing the drained markers directly here also preserves
+        // them instead of orphaning them at unload.
+        let drained: Vec<&'static str> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
+        MARKERS_DIRTY.store(false, Ordering::Relaxed);
+        let control_stream = format!("{}#control", PREFIX.value.lock(ctx).as_str());
+        let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+        for action in drained {
+            write_marker(ctx, &control_stream, action, maxlen);
+        }
+        write_marker(ctx, &control_stream, "unloading", maxlen);
+    }
+    ctx.log_notice(&format!(
+        "eventstream unloading: forwarded={} dropped={} skipped_self={} skipped_filtered={} \
+         skipped_invalid={} control_markers={} active_streams={}",
+        FORWARDED.load(Ordering::Relaxed),
+        DROPPED_XADD_ERROR.load(Ordering::Relaxed)
+            + DROPPED_OOM.load(Ordering::Relaxed)
+            + DROPPED_DEFER_ERROR.load(Ordering::Relaxed),
+        SKIPPED_SELF.load(Ordering::Relaxed),
+        SKIPPED_FILTERED.load(Ordering::Relaxed),
+        SKIPPED_INVALID.load(Ordering::Relaxed),
+        CONTROL_MARKERS.load(Ordering::Relaxed),
+        ACTIVE_STREAMS.load(Ordering::Relaxed),
+    ));
+    Status::Ok
+}
+
+/// Module INFO section (SPEC.md section 13). Redis prefixes the section and
+/// every field with the module name: `INFO eventstream` shows
+/// `# eventstream_stats` with `eventstream_forwarded` etc. Module sections do
+/// not appear in plain `INFO`; use `INFO everything` or `INFO eventstream`.
+#[cfg(not(test))]
+#[info_command_handler]
+fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
+    let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
+        + DROPPED_OOM.load(Ordering::Relaxed)
+        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
+    ctx.builder()
+        .add_section("stats")
+        .field("enabled", ENABLED.load(Ordering::Relaxed) as i64)?
+        .field("forwarded", FORWARDED.load(Ordering::Relaxed))?
+        .field("dropped", dropped)?
+        .field(
+            "dropped_xadd_error",
+            DROPPED_XADD_ERROR.load(Ordering::Relaxed),
+        )?
+        .field("dropped_oom", DROPPED_OOM.load(Ordering::Relaxed))?
+        .field(
+            "dropped_defer_error",
+            DROPPED_DEFER_ERROR.load(Ordering::Relaxed),
+        )?
+        .field("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed))?
+        .field("skipped_filtered", SKIPPED_FILTERED.load(Ordering::Relaxed))?
+        .field("skipped_invalid", SKIPPED_INVALID.load(Ordering::Relaxed))?
+        .field("active_streams", ACTIVE_STREAMS.load(Ordering::Relaxed))?
+        .field("control_markers", CONTROL_MARKERS.load(Ordering::Relaxed))?
+        .field("last_error_time", LAST_ERROR_TIME.load(Ordering::Relaxed))?
+        .build_section()?
+        .build_info()?;
+    Ok(())
 }
 
 // The macro installs the Redis allocator as the global allocator, which aborts
@@ -472,9 +701,10 @@ redis_module! {
     allocator: (redis_module::alloc::RedisAlloc, redis_module::alloc::RedisAlloc),
     data_types: [],
     init: init,
-    commands: [
-        ["eventstream.stats", stats, "readonly", 0, 0, 0, ""],
-    ],
+    deinit: deinit,
+    // Zero custom commands (SPEC.md section 8): observability lives in the
+    // module INFO section, configuration in CONFIG GET/SET.
+    commands: [],
     event_handlers: [
         [@ALL: on_keyspace_event],
     ],
@@ -487,7 +717,7 @@ redis_module! {
             ["events", &*FILTER, "expired", ConfigurationFlags::DEFAULT, None],
         ],
         bool: [
-            ["enabled", &ENABLED, true, ConfigurationFlags::DEFAULT, None],
+            ["enabled", &ENABLED, true, ConfigurationFlags::DEFAULT, Some(Box::new(enabled_changed))],
         ],
         // The expansion with module_args_as_configuration requires all four
         // config-type lists (verified against v2.1.3; SPEC.md section 17 Q4).

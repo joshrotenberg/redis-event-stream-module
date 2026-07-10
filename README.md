@@ -47,7 +47,16 @@ Settable at load (`--eventstream.<name> <value>`) and live via `CONFIG SET`:
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
 | `eventstream.format` | enum | `Minimal` | `Minimal` or `Verbose` |
 
-`EVENTSTREAM.STATS` reports current config and the forwarded-event counter.
+The module registers no commands. Configuration is `CONFIG GET/SET
+eventstream.*`; counters (forwarded, dropped and skipped by reason, active
+streams, gap markers) live in a module INFO section: `INFO eventstream` (module
+sections do not appear in plain `INFO`; use `INFO everything` or name the
+section).
+
+Capture-gap boundaries are machine-readable: the module writes markers
+(`loaded`, `disabled`, `enabled`, `unloading`) to a control stream at
+`<prefix>#control`, so consumers can bound reconciliation to known gap windows.
+See SPEC.md section 9.
 
 ## Build and run
 
@@ -80,11 +89,14 @@ See `demo.sh` for a scripted end-to-end run.
 
 - Redis 7.2+ (`RM_AddPostNotificationJob`)
 
-## Known limitations (baseline)
+## Known limitations
 
 - `expired` fires when Redis actually removes the key, not at the TTL instant.
-- Mirrored writes are not replicated to replicas yet.
-- Cluster mode behavior is unspecified; see SPEC.md.
+- Capture is at-most-once: events during unloaded or disabled windows are not
+  recoverable (the control stream makes the windows detectable, not the events).
+- Clean restarts and crashes are indistinguishable in v0.1: neither writes a
+  closing marker (see SPEC.md section 9).
+- Cluster mode is unsupported; the module refuses to load (SPEC.md section 10).
 
 ## License
 
