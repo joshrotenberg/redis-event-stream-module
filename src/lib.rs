@@ -15,8 +15,10 @@
 //!
 //! All destination streams live in database 0; the entry `db` field records the
 //! database where the event fired. The mirrored `XADD` replicates to replicas
-//! and the AOF. Requires Redis 7.2+ (`RM_AddPostNotificationJob`); refuses to
-//! load in cluster mode (SPEC.md section 10).
+//! and the AOF. Requires Redis 7.2+ (`RM_AddPostNotificationJob`). In cluster
+//! mode it refuses to load by default; `eventstream.cluster-streams per-node`
+//! enables per-node capture with slot-pinned hash tags (SPEC.md section 10,
+//! issue #45).
 
 // In test builds the redis_module! macro is compiled out (its global allocator
 // requires a live Redis), which leaves the handlers unreferenced.
@@ -41,6 +43,7 @@ use std::ffi::CStr;
 #[cfg(not(test))]
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Longest stream-key suffix the sanitizer will emit, in bytes (SPEC.md section 5).
 const MAX_EVENT_NAME_LEN: usize = 128;
@@ -80,6 +83,23 @@ static LOGGED_PANIC: AtomicBool = AtomicBool::new(false);
 /// A nonzero value is a bug in this module; the counter exists so it surfaces
 /// in INFO instead of aborting the server.
 static HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
+
+/// Cluster per-node mode (issue #45): true when `eventstream.cluster-streams`
+/// is `per-node` and the server is in cluster mode. Set once in init (the
+/// config is IMMUTABLE), read on the hot path.
+static PER_NODE: AtomicBool = AtomicBool::new(false);
+/// Events dropped in per-node mode because the node owns no slot to pin to
+/// (SPEC.md section 5). Distinct from the write-failure drops.
+static DROPPED_NO_OWNED_SLOT: AtomicU64 = AtomicU64::new(0);
+static LOGGED_NO_OWNED_SLOT: AtomicBool = AtomicBool::new(false);
+/// Redis has 16384 hash slots.
+const SLOT_COUNT: u32 = 16384;
+/// The hash tag this node pins its streams to in per-node cluster mode (issue
+/// #45). `None` until selected: a node owns no slots at load, so selection is
+/// lazy, on the first captured write when slots are known. A plain `Mutex`
+/// (not a `RedisGILGuard`) so the INFO handler, whose context is not a lock
+/// indicator, can read it; the GIL already serializes all access.
+static NODE_TAG: Mutex<Option<String>> = Mutex::new(None);
 
 /// The `MISSED`/`NEW` bits the module subscribed to at load. The keyspace
 /// subscription mask is fixed when the module loads and cannot be widened at
@@ -331,6 +351,36 @@ impl ConfigurationValue<RedisString> for PrefixConfig {
     }
 }
 
+/// `eventstream.cluster-streams` config binding (issue #45): `refuse` (default,
+/// the module refuses to load in cluster mode) or `per-node` (each node pins
+/// its streams to a slot it owns). IMMUTABLE, load-time only, validated in
+/// `set()`.
+struct ClusterStreamsConfig {
+    value: RedisGILGuard<String>,
+}
+
+impl ClusterStreamsConfig {
+    fn is_per_node<G: redis_module::RedisLockIndicator>(&self, ctx: &G) -> bool {
+        self.value.lock(ctx).as_str() == "per-node"
+    }
+}
+
+impl ConfigurationValue<RedisString> for ClusterStreamsConfig {
+    fn get(&self, ctx: &ConfigurationContext) -> RedisString {
+        RedisString::create(None, self.value.lock(ctx).as_str())
+    }
+    fn set(&self, ctx: &ConfigurationContext, val: RedisString) -> Result<(), RedisError> {
+        let s = val.try_as_str()?;
+        if s != "refuse" && s != "per-node" {
+            return Err(RedisError::String(format!(
+                "cluster-streams must be 'refuse' or 'per-node', got '{s}'"
+            )));
+        }
+        *self.value.lock(ctx) = s.to_owned();
+        Ok(())
+    }
+}
+
 lazy_static! {
     static ref FILTER: FilterConfig = FilterConfig {
         raw: RedisGILGuard::new("expired".to_owned()),
@@ -343,6 +393,9 @@ lazy_static! {
     static ref PREFIX: PrefixConfig = PrefixConfig {
         value: RedisGILGuard::new("events:".to_owned()),
     };
+    static ref CLUSTER_STREAMS: ClusterStreamsConfig = ClusterStreamsConfig {
+        value: RedisGILGuard::new("refuse".to_owned()),
+    };
     /// Gap markers recorded at lifecycle points and written by the next
     /// notification callback's post-notification job (SPEC.md section 9).
     static ref PENDING_MARKERS: RedisGILGuard<Vec<&'static str>> =
@@ -351,6 +404,95 @@ lazy_static! {
     /// path, with the GIL held.
     static ref KNOWN_STREAMS: RedisGILGuard<HashSet<String>> =
         RedisGILGuard::new(HashSet::new());
+}
+
+/// The hash-tag segment inserted between the prefix and the rest of a
+/// destination key so all of a node's keys co-locate on a slot it owns (issue
+/// #45). Empty in standalone/refuse mode. In per-node cluster mode, `{tag}`,
+/// selecting the tag lazily on first use (a node owns no slots at load) and
+/// caching it. Returns `None` only in per-node mode when the node currently
+/// owns no slot; the caller drops the event as `dropped_no_owned_slot`.
+///
+/// Must be called from a write-safe context (a post-notification job or a
+/// command), because selection probes the keyspace.
+fn tag_segment(ctx: &Context) -> Option<String> {
+    if !PER_NODE.load(Ordering::Relaxed) {
+        return Some(String::new());
+    }
+    let mut cached = NODE_TAG.lock().unwrap();
+    if cached.is_none() {
+        *cached = select_owned_tag(ctx);
+    }
+    cached.as_ref().map(|t| format!("{{{t}}}"))
+}
+
+/// Find a hash tag whose slot this node owns. Uses
+/// `RedisModule_ClusterCanonicalKeyNameInSlot(slot)` to get a key name that
+/// hashes to a specific slot, then probes ownership with a non-destructive
+/// write: `XADD {tag}#slotprobe NOMKSTREAM * f v`. The slot-ownership check
+/// that rejects a non-local key applies to writes, not reads (a plain read
+/// runs locally and would falsely pass on every node), so the probe must be a
+/// write; `NOMKSTREAM` on a non-existent stream is a no-op that creates
+/// nothing, and this is the same locality rule that governs the real mirrored
+/// writes. Slots are visited in a scattered order (odd stride, coprime with
+/// 16384) so an owned slot is found within a few probes on a typical cluster
+/// while still covering all slots in the worst case. One-time, then cached.
+#[cfg(not(test))]
+fn select_owned_tag(ctx: &Context) -> Option<String> {
+    let mut slot: u32 = 0;
+    for _ in 0..SLOT_COUNT {
+        let name_ptr = unsafe { raw::RedisModule_ClusterCanonicalKeyNameInSlot.unwrap()(slot) };
+        if !name_ptr.is_null() {
+            let bytes = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
+            // The canonical name is expected to be simple ASCII with no braces;
+            // guard against anything that would break the hash tag.
+            if !bytes.is_empty() && !bytes.contains(&b'{') && !bytes.contains(&b'}') {
+                let tag = String::from_utf8_lossy(bytes).into_owned();
+                let probe = format!("{{{tag}}}#slotprobe");
+                // Probe with the SAME call options as the real mirrored write:
+                // the replicate flag is what makes RM_Call enforce slot
+                // ownership (a plain call runs locally and passes on every
+                // node). NOMKSTREAM makes it a no-op on a non-existent stream,
+                // so nothing is written. Owned slot -> Ok(nil); non-owned ->
+                // Err (the non-local-key error).
+                let res: CallResult = ctx.call_ext(
+                    "XADD",
+                    &xadd_call_options(),
+                    &[
+                        probe.as_bytes(),
+                        &b"NOMKSTREAM"[..],
+                        &b"*"[..],
+                        &b"f"[..],
+                        &b"v"[..],
+                    ][..],
+                );
+                if res.is_ok() {
+                    return Some(tag);
+                }
+            }
+        }
+        slot = (slot + 2609) % SLOT_COUNT;
+    }
+    None
+}
+
+// Test builds compile out the raw cluster call; tag selection never runs there.
+#[cfg(test)]
+fn select_owned_tag(_ctx: &Context) -> Option<String> {
+    None
+}
+
+/// Record an event dropped for want of an owned slot (per-node mode), logging
+/// the first occurrence.
+fn count_no_slot_drop(ctx: &Context) {
+    count_drop(
+        ctx,
+        &DROPPED_NO_OWNED_SLOT,
+        &LOGGED_NO_OWNED_SLOT,
+        "this node owns no cluster slot to pin streams to; event dropped \
+         (dropped_no_owned_slot). Static per-node mode does not re-pin; \
+         reload once the node owns slots",
+    );
 }
 
 fn xadd_call_options() -> CallOptions {
@@ -477,10 +619,22 @@ fn drain_pending_markers(ctx: &Context) {
     if drained.is_empty() {
         return;
     }
-    let control_stream = format!("{}#control", PREFIX.value.lock(ctx).as_str());
+    let prefix_owned = PREFIX.value.lock(ctx).as_str().to_owned();
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
     let dropped_count = drained.len() as u64;
     let status = ctx.add_post_notification_job(move |ctx| {
+        // Resolve the per-node tag in the job (write-safe context); the control
+        // stream shares the node tag with the event streams so they co-locate.
+        let seg = match tag_segment(ctx) {
+            Some(s) => s,
+            None => {
+                for _ in &drained {
+                    count_no_slot_drop(ctx);
+                }
+                return;
+            }
+        };
+        let control_stream = format!("{prefix_owned}{seg}#control");
         for action in &drained {
             write_marker(ctx, &control_stream, action, maxlen);
         }
@@ -548,8 +702,10 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     // itself always lives in db 0 (SPEC.md section 6).
     let db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
 
-    let stream = format!("{}{}", prefix.as_str(), suffix);
-    let registry = format!("{}#streams", prefix.as_str());
+    // Names are resolved in the job, not here: in per-node cluster mode the
+    // hash tag is selected lazily (this node may own no slots yet), and that
+    // probe must run in a write-safe context.
+    let prefix_owned = prefix.as_str().to_owned();
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
@@ -567,6 +723,18 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
             );
             return;
         }
+
+        // In per-node cluster mode, `{tag}` co-locates this node's streams on
+        // an owned slot; empty otherwise. `None` means no owned slot yet.
+        let seg = match tag_segment(ctx) {
+            Some(s) => s,
+            None => {
+                count_no_slot_drop(ctx);
+                return;
+            }
+        };
+        let stream = format!("{prefix_owned}{seg}{suffix}");
+        let registry = format!("{prefix_owned}{seg}#streams");
 
         // XADD <stream> [MAXLEN ~ <n>] * event <event> key <key> db <db>
         let maxlen_s = maxlen.to_string();
@@ -714,12 +882,25 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     }
 
     if ctx.get_flags().contains(ContextFlags::CLUSTER) {
-        ctx.log_warning(
-            "eventstream does not support cluster mode in v0.1: keyspace notifications are \
-             node-local and the destination streams hash to slots this node may not own \
-             (SPEC.md section 10); refusing to load",
-        );
-        return Status::Err;
+        // `eventstream.cluster-streams` decides: `refuse` (default) keeps the
+        // historical refusal; `per-node` pins each node's streams to a slot it
+        // owns via a shared hash tag (issue #45).
+        if CLUSTER_STREAMS.is_per_node(ctx) {
+            PER_NODE.store(true, Ordering::Relaxed);
+            ctx.log_notice(
+                "eventstream cluster per-node mode: this node pins its streams to a slot it \
+                 owns via a shared hash tag; the tag is selected on the first captured event \
+                 (issue #45). No dynamic re-pinning yet (#46).",
+            );
+        } else {
+            ctx.log_warning(
+                "eventstream refuses to load in cluster mode (keyspace notifications are \
+                 node-local and a fixed stream name hashes to a slot this node may not own, \
+                 SPEC.md section 10). Set eventstream.cluster-streams per-node to enable \
+                 per-node capture; refusing to load.",
+            );
+            return Status::Err;
+        }
     }
 
     // Subscribe to keyspace events. NOTIFY_ALL always, plus MISSED and NEW only
@@ -796,12 +977,17 @@ fn deinit(ctx: &Context) -> Status {
         // them instead of orphaning them at unload.
         let drained: Vec<&'static str> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
         MARKERS_DIRTY.store(false, Ordering::Relaxed);
-        let control_stream = format!("{}#control", PREFIX.value.lock(ctx).as_str());
-        let maxlen = MAXLEN.value.load(Ordering::Relaxed);
-        for action in drained {
-            write_marker(ctx, &control_stream, action, maxlen);
+        // deinit runs inside MODULE UNLOAD, a write-safe context, so the tag
+        // can be resolved here. If the node owns no slot, skip the markers
+        // rather than fail the unload.
+        if let Some(seg) = tag_segment(ctx) {
+            let control_stream = format!("{}{seg}#control", PREFIX.value.lock(ctx).as_str());
+            let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+            for action in drained {
+                write_marker(ctx, &control_stream, action, maxlen);
+            }
+            write_marker(ctx, &control_stream, "unloading", maxlen);
         }
-        write_marker(ctx, &control_stream, "unloading", maxlen);
     }
     ctx.log_notice(&format!(
         "eventstream unloading: forwarded={} dropped={} skipped_self={} skipped_filtered={} \
@@ -849,6 +1035,15 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
         .field("active_streams", ACTIVE_STREAMS.load(Ordering::Relaxed))?
         .field("control_markers", CONTROL_MARKERS.load(Ordering::Relaxed))?
         .field("handler_panics", HANDLER_PANICS.load(Ordering::Relaxed))?
+        .field(
+            "dropped_no_owned_slot",
+            DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed),
+        )?
+        .field("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64)?
+        .field(
+            "cluster_pinned_tag",
+            NODE_TAG.lock().unwrap().clone().unwrap_or_default(),
+        )?
         .field("last_error_time", LAST_ERROR_TIME.load(Ordering::Relaxed))?
         .build_section()?
         .build_info()?;
@@ -878,7 +1073,7 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 13] = [
+    let pairs: [(&str, i64); 15] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         ("dropped", dropped as i64),
@@ -913,6 +1108,11 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
             HANDLER_PANICS.load(Ordering::Relaxed) as i64,
         ),
         (
+            "dropped_no_owned_slot",
+            DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed) as i64,
+        ),
+        ("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64),
+        (
             "last_error_time",
             LAST_ERROR_TIME.load(Ordering::Relaxed) as i64,
         ),
@@ -931,10 +1131,17 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
 /// append-only log of stream names ever written; a listed stream may since
 /// have been trimmed to empty or deleted, so this is not a liveness check.
 /// Readonly, keyless. The registry lives in db 0, so the command selects db 0
-/// for the read and restores the caller's database.
+/// for the read and restores the caller's database. In per-node cluster mode
+/// this returns only the local node's registry (`<prefix>{tag}#streams`);
+/// cluster-wide fan-out is issue #47.
 #[cfg(not(test))]
 fn cmd_streams(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
-    let registry = format!("{}#streams", PREFIX.value.lock(ctx).as_str());
+    // No owned slot yet in per-node mode: nothing local to report.
+    let seg = match tag_segment(ctx) {
+        Some(s) => s,
+        None => return Ok(RedisValue::Array(vec![])),
+    };
+    let registry = format!("{}{seg}#streams", PREFIX.value.lock(ctx).as_str());
     let orig_db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
     if unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) } != raw::REDISMODULE_OK as i32 {
         return Err(RedisError::Str("failed to select database 0"));
@@ -973,6 +1180,7 @@ redis_module! {
         string: [
             ["stream-prefix", &*PREFIX, "events:", ConfigurationFlags::IMMUTABLE, None],
             ["events", &*FILTER, "expired", ConfigurationFlags::DEFAULT, None],
+            ["cluster-streams", &*CLUSTER_STREAMS, "refuse", ConfigurationFlags::IMMUTABLE, None],
         ],
         bool: [
             ["enabled", &ENABLED, true, ConfigurationFlags::DEFAULT, Some(Box::new(enabled_changed))],

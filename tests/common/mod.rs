@@ -82,6 +82,55 @@ impl TestCluster {
     pub fn num_masters(&self) -> usize {
         self.handle.num_masters() as usize
     }
+
+    pub fn node_ports(&self) -> Vec<u16> {
+        self.handle
+            .node_addrs()
+            .iter()
+            .filter_map(|a| a.rsplit(':').next().and_then(|p| p.parse().ok()))
+            .collect()
+    }
+
+    /// A cluster-aware connection that follows MOVED/ASK redirections, for
+    /// seeding keys across the whole cluster.
+    pub fn cluster_conn(&self) -> redis::cluster::ClusterConnection {
+        let nodes: Vec<String> = self
+            .handle
+            .node_addrs()
+            .iter()
+            .map(|a| format!("redis://{a}/"))
+            .collect();
+        redis::cluster::ClusterClient::new(nodes)
+            .expect("cluster client")
+            .get_connection()
+            .expect("cluster connection")
+    }
+
+    /// Read one numeric field from a specific node's module INFO section.
+    pub fn node_info_field(&self, index: usize, field: &str) -> i64 {
+        let raw = self
+            .node_run(index, &["INFO", "eventstream"])
+            .unwrap_or_default();
+        let prefix = format!("eventstream_{field}:");
+        raw.lines()
+            .find_map(|l| l.strip_prefix(&prefix))
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// The per-node pinned hash tag reported in INFO (empty if unselected).
+    pub fn node_pinned_tag(&self, index: usize) -> String {
+        let raw = self
+            .node_run(index, &["INFO", "eventstream"])
+            .unwrap_or_default();
+        raw.lines()
+            .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
 }
 
 /// Build the module cdylib once per test-binary run and return its path.
@@ -139,6 +188,37 @@ impl TestServer {
             Ok(handle) => Ok(TestServer { handle, port, dir }),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Start a single-node cluster (one master owning all 16384 slots) with the
+    /// module loaded. This is the single-shard case: `redis-cli --cluster
+    /// create` refuses fewer than 3 nodes, so the slots are assigned directly.
+    /// A normal (non-redirecting) client works, since one node owns everything.
+    pub fn start_single_shard_cluster(module_args: &[&str]) -> TestServer {
+        let port = next_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle = Self::builder(port, &dir, module_args)
+            .extra("cluster-enabled", "yes")
+            .extra("cluster-config-file", "nodes.conf")
+            .extra("cluster-node-timeout", "2000")
+            .start()
+            .expect("failed to start cluster-enabled server");
+        let server = TestServer { handle, port, dir };
+        let mut c = server.conn();
+        let _: () = redis::cmd("CLUSTER")
+            .arg("ADDSLOTSRANGE")
+            .arg(0)
+            .arg(16383)
+            .query(&mut c)
+            .expect("assign all slots");
+        wait_until(Duration::from_secs(10), "single-shard cluster ok", || {
+            let info: String = redis::cmd("CLUSTER")
+                .arg("INFO")
+                .query(&mut c)
+                .unwrap_or_default();
+            info.contains("cluster_state:ok")
+        });
+        server
     }
 
     /// Restart on the same working directory (persistence across restarts).
