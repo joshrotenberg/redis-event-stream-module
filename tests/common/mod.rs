@@ -93,13 +93,23 @@ impl TestServer {
     }
 
     fn builder(port: u16, dir: &tempfile::TempDir, module_args: &[&str]) -> RedisServer {
-        RedisServer::new()
+        let mut b = RedisServer::new()
             .port(port)
             .bind("127.0.0.1")
             .dir(dir.path())
             .save(false)
             .enable_module_command("yes")
-            .loadmodule_with_args(module_path(), module_args.iter().map(|s| s.to_string()))
+            .loadmodule_with_args(module_path(), module_args.iter().map(|s| s.to_string()));
+        // The CI version matrix points these at a specific Redis or Valkey
+        // build (issue #14); unset, the wrapper resolves redis-server/redis-cli
+        // from PATH, which is the local-development default.
+        if let Ok(bin) = std::env::var("TEST_REDIS_SERVER_BIN") {
+            b = b.redis_server_bin(bin);
+        }
+        if let Ok(bin) = std::env::var("TEST_REDIS_CLI_BIN") {
+            b = b.redis_cli_bin(bin);
+        }
+        b
     }
 
     pub fn conn(&self) -> redis::Connection {

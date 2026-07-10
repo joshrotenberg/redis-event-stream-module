@@ -28,20 +28,83 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: redis-7.2
+            kind: redis
+            version: 7.2.8
+          - name: redis-7.4
+            kind: redis
+            version: 7.4.5
+          - name: redis-8
+            kind: redis
+            version: 8.8.0
+          - name: valkey-8
+            kind: valkey
+            version: 8.1.6
+    name: integration (${{ matrix.name }})
+    env:
+      SERVER_DIR: ${{ github.workspace }}/.server/${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install Redis from packages.redis.io
+
+      - name: Cache server build
+        id: server-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SERVER_DIR }}
+          key: server-${{ matrix.name }}-${{ matrix.version }}-${{ runner.os }}
+
+      - name: Build ${{ matrix.name }} from source
+        if: steps.server-cache.outputs.cache-hit != 'true'
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y lsb-release curl gpg lsof
-          curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
-          sudo apt-get update
-          sudo apt-get install -y redis-server redis-tools
-          sudo systemctl stop redis-server || true
-          sudo systemctl disable redis-server || true
-          redis-server --version
+          sudo apt-get install -y build-essential pkg-config
+          if [ "${{ matrix.kind }}" = "redis" ]; then
+            URL="https://download.redis.io/releases/redis-${{ matrix.version }}.tar.gz"
+          else
+            URL="https://github.com/valkey-io/valkey/archive/refs/tags/${{ matrix.version }}.tar.gz"
+          fi
+          mkdir -p "$SERVER_DIR"
+          curl -fsSL "$URL" | tar xz -C "$SERVER_DIR" --strip-components=1
+          make -C "$SERVER_DIR" -j"$(nproc)" BUILD_TLS=no
+
+      - name: Resolve binaries and assert version
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.kind }}" = "redis" ]; then
+            SRV="$SERVER_DIR/src/redis-server"
+            CLI="$SERVER_DIR/src/redis-cli"
+          else
+            SRV="$SERVER_DIR/src/valkey-server"
+            CLI="$SERVER_DIR/src/valkey-cli"
+          fi
+          test -x "$SRV" || { echo "server binary missing: $SRV"; exit 1; }
+          test -x "$CLI" || { echo "cli binary missing: $CLI"; exit 1; }
+          echo "TEST_REDIS_SERVER_BIN=$SRV" >> "$GITHUB_ENV"
+          echo "TEST_REDIS_CLI_BIN=$CLI" >> "$GITHUB_ENV"
+          "$SRV" --version
+          # Fail loudly if the built binary is not the matrix version, so a
+          # stray server on PATH cannot silently test the wrong build.
+          "$SRV" --version | grep -q "${{ matrix.version }}" \
+            || { echo "version mismatch: expected ${{ matrix.version }}"; exit 1; }
+
+      - name: Build module
+        run: cargo build --release
+
       - name: Integration tests
         run: cargo test --release --tests
+
+      - name: Upload server instance dirs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-instances-${{ matrix.name }}
+          path: /tmp/.tmp*/
+          if-no-files-found: ignore
+          retention-days: 5

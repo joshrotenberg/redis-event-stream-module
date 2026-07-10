@@ -87,7 +87,20 @@ See `demo.sh` for a scripted end-to-end run.
 
 ## Requirements
 
-- Redis 7.2+ (`RM_AddPostNotificationJob`)
+Redis 7.2 or newer, for `RM_AddPostNotificationJob`. Valkey 8.x works too; it
+shares the module ABI and post-notification-job API. CI runs the full
+integration suite on each server below, so these are verified, not just
+claimed:
+
+| Server | Verified in CI |
+|--------|----------------|
+| Redis 7.2 | 7.2.8 (minimum supported) |
+| Redis 7.4 | 7.4.5 |
+| Redis 8.x | 8.8.0 |
+| Valkey 8.x | 8.1.6 |
+
+Servers below 7.2 are not supported: the module fails to load (see SPEC.md
+section 14 for the exact failure mode).
 
 ## Known limitations
 

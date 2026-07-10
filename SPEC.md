@@ -498,8 +498,9 @@ The safe deferred-write path requires `RedisModule_AddPostNotificationJob`, mapp
 
 | Server | Status |
 |---|---|
-| 8.x, 7.4 | Supported, same code path |
-| 7.2 | Minimum supported |
+| 8.x, 7.4 | Supported, same code path; CI runs the full suite on Redis 7.4.5 and 8.8.0 |
+| 7.2 | Minimum supported; CI runs the full suite on Redis 7.2.8 |
+| Valkey 8.x | Supported; CI runs the full suite on Valkey 8.1.6 (same module ABI and post-notification-job API) |
 | 7.1 and below | Module load fails; on pre-7.2 servers the failure is a process abort at startup, not a clean refusal (below) |
 
 The crate builds with the wrapper's `min-redis-compatibility-version-7-2` feature. Under it, the macro-generated registration path (commands, then configs) unwraps 7.2-only API pointers before `init` ever runs, so on any pre-7.2 server the load panics inside the wrapper and aborts the redis-server process; with `loadmodule` in redis.conf that is a startup abort with the panic in the log, not the polite error message a clean refusal would give (verified against the wrapper source at v2.1.3). The explicit `ctx.get_redis_version()` check in `init` is retained as defense in depth: it is the path that would fire if the wrapper's registration behavior ever becomes graceful, and it documents the requirement in code. Alternatives rejected: writing inside the callback on older servers (documented unsafe, loses atomicity) and buffering through a `DetachedContext` background thread (loses atomicity, can drop on crash, adds GIL contention).
@@ -575,6 +576,6 @@ Each item is additive (new config key, counter, command, or entry field), so not
 ## 17. Open questions for the maintainer
 
 1. **Non-UTF-8 module event names panic in the wrapper.** The macro-generated handler calls `to_str().unwrap()` before module code runs (`redismodule-rs/src/macros.rs`). Options: accept and document (no known module fires non-UTF-8 names), subscribe via the raw API with a hand-written handler, or upstream a lossy-decode fix to redismodule-rs. Resolved 2026-07-09: accept and document for v0.1; upstream issue filed as RedisLabsModules/redismodule-rs#472. The raw-API path (Future work, MISSED/NEW capture) absorbs the real fix if upstream does not move first.
-2. **notify-keyspace-events bypass across versions.** The bypass is verified in Redis 7.2 `src/notify.c`; the integration test in section 15 pins it on 7.2. Recommendation: run that same test against 7.4 and 8.x in CI before claiming the full support matrix, since this is the one behavior the docs assert that depends on server internals rather than the module API.
+2. **notify-keyspace-events bypass across versions.** Resolved. The integration suite never sets `notify-keyspace-events`, so it only passes if module keyspace subscribers receive events with the setting empty. CI runs the full suite against Redis 7.2.8, 7.4.5, 8.8.0, and Valkey 8.1.6, so every supported server line empirically pins the bypass. Originally verified by reading Redis 7.2 `src/notify.c` (`moduleNotifyKeyspaceEvent()` runs before the config check); now enforced across the matrix rather than asserted.
 3. **Is an immutable `stream-prefix` acceptable for the launch customer?** IMMUTABLE deletes real complexity (dual-prefix guard, cleanup semantics) and relaxing later is non-breaking. Recommendation: keep IMMUTABLE unless the customer states a concrete need to re-prefix without a restart.
 4. **`module_args_as_configuration` with three config types.** The macro grammar makes each config-type block optional, but the established wrapper guidance says all four sections must be present when module args are enabled. Resolved 2026-07-09 by experiment against the pinned v2.1.3 tag: omitting the enum section fails to compile, but an empty `enum: []` list compiles and works (module loads, `CONFIG GET eventstream.*` lists the real configs, unprefixed module args are applied). The config block uses `enum: []` with a code comment.
