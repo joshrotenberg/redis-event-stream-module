@@ -1,0 +1,52 @@
+name: Decision
+description: Record a design decision to be made, with options and a recommendation
+labels: ["kind:decision"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project tracks design decisions as issues. SPEC.md section 17
+        holds several filed this way. Capture the options and a recommendation
+        so the decision can be made from the issue alone.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: The question, and why it needs deciding now.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options
+      description: One lettered option per approach, each with its trade-offs.
+      placeholder: |
+        A. ...
+           - pro: ...
+           - con: ...
+        B. ...
+           - pro: ...
+           - con: ...
+    validations:
+      required: true
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: Recommendation
+      description: Which option, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: blocks
+    attributes:
+      label: What this blocks
+      description: Work that cannot proceed until this is decided.
+    validations:
+      required: false
+  - type: input
+    id: spec-ref
+    attributes:
+      label: SPEC.md references
+      placeholder: "sections 6, 9"
+    validations:
+      required: false

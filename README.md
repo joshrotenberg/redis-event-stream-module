@@ -19,6 +19,42 @@ The previous in-server way to do this was a RedisGears / Triggers-and-Functions
 script, which is deprecated. This module is a small, purpose-built replacement
 built on [redismodule-rs](https://github.com/RedisLabsModules/redismodule-rs).
 
+## Choosing a capture approach
+
+The launch use case was a customer replacing a client that periodically scanned
+roughly 10 million keys to find expired entries. They had first tried a pub/sub
+subscriber on `__keyevent@*__`, but it lost events whenever the subscriber
+disconnected or its client output buffer overflowed, so they fell back to
+scanning. The scan is expensive and only finds expirations after the fact, on
+its own schedule.
+
+This module replaces both. It captures each event into a durable stream at the
+moment the keyspace changes, so a consumer reacts per expiration instead of
+scanning, and a disconnected consumer resumes from where it left off.
+
+| | Periodic sweeper scan | Pub/sub keyspace notifications | This module |
+|---|---|---|---|
+| Consumer disconnect | no effect (stateless poll) | events during the gap are lost | entries wait in the stream |
+| Replay after restart | rescan everything | none | `XRANGE` / group from any ID |
+| Server load per detection | full or partial keyspace scan | one pub/sub publish | one `XADD` (plus approximate trim) |
+| Detection latency | up to one scan interval | immediate | immediate |
+| Consumer scaling | manual sharding | fan-out only, no work splitting | consumer groups |
+| Loss detectable | n/a (always rescans) | no | yes (gap markers, counters) |
+| Needs `notify-keyspace-events` | no | yes | no |
+
+Module delivery does not depend on `notify-keyspace-events`: module keyspace
+subscribers receive events regardless of that setting, which only gates pub/sub
+delivery (SPEC.md section 7, verified against Redis `src/notify.c` and enforced
+across the CI matrix). Pub/sub delivery does depend on it.
+
+What this module does not provide: exactly-once delivery (consumers must be
+idempotent on stream name plus entry ID), and backfill of events that occur
+while the module is unloaded, disabled, or the server is down. It is a live
+mirror, not a write-ahead log. See
+[docs/loss-windows.md](docs/loss-windows.md) for the exact windows and how to
+reconcile over them, and [docs/consumer-patterns.md](docs/consumer-patterns.md)
+for consumer recipes.
+
 ## Routing
 
 Events route by event name into `<prefix><event>`. With the default `events:`
@@ -32,20 +68,26 @@ prefix:
 | `DEL` | `events:del` |
 | eviction | `events:evicted` |
 
-Each entry has `event` and `key` fields (binary-safe); `Verbose` format adds a
-`class` field. The stream entry ID supplies the timestamp.
+Each entry has three fields: `event` (the event name), `key` (the affected key,
+binary-safe), and `db` (the database the event fired in). All destination
+streams live in database 0; the `db` field records the origin. The stream entry
+ID supplies the timestamp.
 
 ## Configuration
 
-Settable at load (`--eventstream.<name> <value>`) and live via `CONFIG SET`:
+Set at load (module arguments, or `--eventstream.<name> <value>` on the server
+command line) and, except where noted, live via `CONFIG SET`:
 
 | Config | Type | Default | Meaning |
 |--------|------|---------|---------|
 | `eventstream.enabled` | bool | `yes` | master on/off switch |
-| `eventstream.prefix` | string | `events:` | destination stream prefix |
-| `eventstream.events` | string | `all` | `all`/`*`, or comma list of event names, e.g. `expired,del` |
+| `eventstream.stream-prefix` | string | `events:` | destination stream prefix; immutable, load-time only |
+| `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
-| `eventstream.format` | enum | `Minimal` | `Minimal` or `Verbose` |
+
+The default filter is `expired` (the launch use case), so loading the module
+with no arguments captures only key expirations. See
+[SPEC.md](SPEC.md) section 7 for the full filter grammar.
 
 The module registers no commands. Configuration is `CONFIG GET/SET
 eventstream.*`; counters (forwarded, dropped and skipped by reason, active
@@ -84,6 +126,15 @@ Wait for the key to expire, then:
 ```
 
 See `demo.sh` for a scripted end-to-end run.
+
+## Documentation
+
+- [SPEC.md](SPEC.md): the authoritative design (architecture, routing, entry
+  schema, configuration, delivery semantics, failure modes).
+- [docs/consumer-patterns.md](docs/consumer-patterns.md): live tail, durable
+  work queue with consumer groups, replay, discovery, and `maxlen` sizing.
+- [docs/loss-windows.md](docs/loss-windows.md): every way an event can be lost,
+  how to detect it, and how to reconcile a gap window without a full scan.
 
 ## Requirements
 

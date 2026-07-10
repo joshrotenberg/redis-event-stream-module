@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Design spec
+    url: https://github.com/joshrotenberg/redis-event-stream-module/blob/main/SPEC.md
+    about: The authoritative design. Check here before filing a decision or feature request.
