@@ -426,6 +426,21 @@ fn tag_segment(ctx: &Context) -> Option<String> {
     cached.as_ref().map(|t| format!("{{{t}}}"))
 }
 
+/// Like [`tag_segment`] but never selects (never writes): returns the cached
+/// segment or `None`. For read-only contexts, such as the `EVENTSTREAM.STREAMS`
+/// command, where triggering the write probe would violate the readonly
+/// contract.
+fn tag_segment_cached() -> Option<String> {
+    if !PER_NODE.load(Ordering::Relaxed) {
+        return Some(String::new());
+    }
+    NODE_TAG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|t| format!("{{{t}}}"))
+}
+
 /// Find a hash tag whose slot this node owns. Uses
 /// `RedisModule_ClusterCanonicalKeyNameInSlot(slot)` to get a key name that
 /// hashes to a specific slot, then probes ownership with a non-destructive
@@ -1136,8 +1151,10 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
 /// cluster-wide fan-out is issue #47.
 #[cfg(not(test))]
 fn cmd_streams(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
-    // No owned slot yet in per-node mode: nothing local to report.
-    let seg = match tag_segment(ctx) {
+    // No owned slot selected yet in per-node mode: nothing local to report.
+    // Use the non-probing lookup: this is a readonly command and must not
+    // trigger the write that tag selection performs.
+    let seg = match tag_segment_cached() {
         Some(s) => s,
         None => return Ok(RedisValue::Array(vec![])),
     };
