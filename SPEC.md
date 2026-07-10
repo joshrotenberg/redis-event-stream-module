@@ -567,7 +567,7 @@ Each item is additive (new config key, counter, command, or entry field), so not
 - Runtime-mutable `stream-prefix`, with the current-plus-previous-prefix guard and documented old-stream cleanup semantics.
 - Additional entry formats (minimal without `event`, verbose with `class`, JSON) behind an `entry-format` enum config, with a format discriminator and a `dropped_encode_error` counter.
 - `MISSED`/`NEW`/`LOADED`/`TRIMMED` capture via direct `raw::RedisModule_SubscribeToKeyspaceEvents` (bypassing the `event_handlers:` macro, which intersects away anything outside NOTIFY_ALL); a hand-written handler also fixes the non-UTF-8 panic via lossy decode.
-- Cluster support: the slot-pinned per-node hashtag design (section 10, option B), with per-node discovery and reshard handling.
+- Cluster support: the slot-pinned per-node hashtag design (section 10, option B), with per-node discovery and reshard handling. A full design proposal is in [docs/cluster-design.md](docs/cluster-design.md), pending maintainer acceptance.
 - Key-name glob filter, per-event maxlen overrides, source-db filter, max-streams cap on distinct event names, an option to disable `verify_oom`, a global monotonic `seq` entry field for cross-stream same-millisecond ordering.
 - Shutdown gap marker via the Shutdown server-event hook, so clean restarts become distinguishable from crashes (section 9 limitation); requires verifying that a write at shutdown-event time still reaches the final RDB save or AOF.
 - Per-stream rate-limited failure logging with recovery notices; custom `@eventstream` ACL category (needs `RM_AddACLCategory`, Redis 7.4+, with 7.2/7.3 fallback).
