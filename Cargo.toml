@@ -10,7 +10,10 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-redis-module = "2.0.8"
+# The crates.io release (2.0.8, May 2026) is well behind the repo: tags through
+# v2.1.3 are unpublished and master carries newer API. Track git; Cargo.lock
+# (committed) pins the exact revision.
+redis-module = { git = "https://github.com/RedisLabsModules/redismodule-rs" }
 lazy_static = "1"
 
 [profile.release]
