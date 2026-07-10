@@ -89,11 +89,13 @@ The default filter is `expired` (the launch use case), so loading the module
 with no arguments captures only key expirations. See
 [SPEC.md](SPEC.md) section 7 for the full filter grammar.
 
-The module registers no commands. Configuration is `CONFIG GET/SET
-eventstream.*`; counters (forwarded, dropped and skipped by reason, active
-streams, gap markers) live in a module INFO section: `INFO eventstream` (module
-sections do not appear in plain `INFO`; use `INFO everything` or name the
-section).
+Configuration is `CONFIG GET/SET eventstream.*`. Counters (forwarded, dropped
+and skipped by reason, active streams, gap markers) live in a module INFO
+section: `INFO eventstream` (module sections do not appear in plain `INFO`; use
+`INFO everything` or name the section). Two readonly introspection commands are
+also registered: `EVENTSTREAM.STATS` returns those counters as a structured
+reply, and `EVENTSTREAM.STREAMS` lists the destination streams written so far
+(backed by a persistent registry that survives restart).
 
 Capture-gap boundaries are machine-readable: the module writes markers
 (`loaded`, `disabled`, `enabled`, `unloading`) to a control stream at

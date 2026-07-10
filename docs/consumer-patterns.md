@@ -151,16 +151,29 @@ XRANGE events:expired - + | ... filter entries where db == "2"
 
 ## Discovery
 
-With a known filter the stream names are deterministic
-(`<prefix><event-name>`). To enumerate them at runtime:
+The module tracks every destination stream it has written in a persistent
+registry, exposed through a command:
+
+```
+EVENTSTREAM.STREAMS
+```
+
+This returns the registered stream names, survives restart (RDB or AOF), and
+works on replicas. It is an append-only log of names ever written, so a listed
+stream may since have been trimmed to empty or deleted; check `XLEN` if you need
+liveness.
+
+With a known filter the stream names are also deterministic
+(`<prefix><event-name>`), and a `SCAN` fallback works:
 
 ```
 SCAN 0 MATCH events:* TYPE stream
 ```
 
-Skip keys under `events:#`: that namespace is the module's own control stream
-(`events:#control`), not an event stream. The sanitizer never produces `#` in an
-event-derived name, so `events:#*` is always internal.
+Skip keys under `events:#`: that namespace holds the module's own control stream
+(`events:#control`) and registry (`events:#streams`), not event streams. The
+sanitizer never produces `#` in an event-derived name, so `events:#*` is always
+internal.
 
 ## Sizing maxlen
 

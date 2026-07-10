@@ -25,13 +25,16 @@
 use lazy_static::lazy_static;
 use redis_module::configuration::ConfigurationContext;
 #[cfg(not(test))]
-use redis_module::{configuration::ConfigurationFlags, redis_module, InfoContext, RedisResult};
+use redis_module::{
+    configuration::ConfigurationFlags, redis_module, server_events::FlushSubevent, InfoContext,
+    RedisResult, RedisValue,
+};
 use redis_module::{
     raw, CallOptions, CallOptionsBuilder, CallResult, ConfigurationValue, Context, ContextFlags,
     NotifyEvent, RedisError, RedisGILGuard, RedisString, Status,
 };
 #[cfg(not(test))]
-use redis_module_macros::info_command_handler;
+use redis_module_macros::{flush_event_handler, info_command_handler};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -476,6 +479,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     let db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
 
     let stream = format!("{}{}", prefix.as_str(), suffix);
+    let registry = format!("{}#streams", prefix.as_str());
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
@@ -527,11 +531,25 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
         match res {
             Ok(_) => {
                 FORWARDED.fetch_add(1, Ordering::Relaxed);
-                // Track distinct destination streams for the INFO section.
+                // First write to a destination stream: register it in the
+                // persistent set at `<prefix>#streams` (replicated, so
+                // EVENTSTREAM.STREAMS survives restart and works on replicas)
+                // and count it. KNOWN_STREAMS is the in-process dedupe cache;
+                // it is cleared on flush (see the flush handler) so a FLUSHALL
+                // that deleted the registry rebuilds it on the next write. The
+                // registry key is under the prefix, so its own SADD
+                // notification is dropped by the feedback guard.
                 let mut known = KNOWN_STREAMS.lock(ctx);
                 if !known.contains(&stream) {
-                    known.insert(stream.clone());
-                    ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                    let sadd: CallResult = ctx.call_ext(
+                        "SADD",
+                        &xadd_call_options(),
+                        &[registry.as_bytes(), stream.as_bytes()][..],
+                    );
+                    if sadd.is_ok() {
+                        known.insert(stream.clone());
+                        ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             Err(e) => {
@@ -695,6 +713,93 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
     Ok(())
 }
 
+/// Invalidate the in-process stream registry cache on flush. FLUSHALL (or
+/// FLUSHDB in db 0) deletes the `<prefix>#streams` set, so the cache must be
+/// cleared for the next capture to re-register its stream. A FLUSHDB in
+/// another database does not delete the registry, so clearing here is
+/// conservative: the following re-SADD is idempotent, at the cost of
+/// re-counting `active_streams`, which is therefore "distinct streams written
+/// since load or last flush" (SPEC.md section 5).
+#[cfg(not(test))]
+#[flush_event_handler]
+fn on_flush(ctx: &Context, event: FlushSubevent) {
+    if let FlushSubevent::Started = event {
+        KNOWN_STREAMS.lock(ctx).clear();
+    }
+}
+
+/// `EVENTSTREAM.STATS`: the section 13 counters as a flat array of
+/// field/value pairs, agreeing with the INFO section at the moment of the
+/// call. Readonly, fast, keyless.
+#[cfg(not(test))]
+fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
+    let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
+        + DROPPED_OOM.load(Ordering::Relaxed)
+        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
+    let pairs: [(&str, i64); 12] = [
+        ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
+        ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
+        ("dropped", dropped as i64),
+        (
+            "dropped_xadd_error",
+            DROPPED_XADD_ERROR.load(Ordering::Relaxed) as i64,
+        ),
+        ("dropped_oom", DROPPED_OOM.load(Ordering::Relaxed) as i64),
+        (
+            "dropped_defer_error",
+            DROPPED_DEFER_ERROR.load(Ordering::Relaxed) as i64,
+        ),
+        ("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed) as i64),
+        (
+            "skipped_filtered",
+            SKIPPED_FILTERED.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "skipped_invalid",
+            SKIPPED_INVALID.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "active_streams",
+            ACTIVE_STREAMS.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "control_markers",
+            CONTROL_MARKERS.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "last_error_time",
+            LAST_ERROR_TIME.load(Ordering::Relaxed) as i64,
+        ),
+    ];
+    let mut out = Vec::with_capacity(pairs.len() * 2);
+    for (name, value) in pairs {
+        out.push(RedisValue::SimpleStringStatic(name));
+        out.push(RedisValue::Integer(value));
+    }
+    Ok(RedisValue::Array(out))
+}
+
+/// `EVENTSTREAM.STREAMS`: the destination streams registered since the
+/// registry existed, read live from the persistent `<prefix>#streams` set so
+/// the answer survives restart and works on replicas. The registry is an
+/// append-only log of stream names ever written; a listed stream may since
+/// have been trimmed to empty or deleted, so this is not a liveness check.
+/// Readonly, keyless. The registry lives in db 0, so the command selects db 0
+/// for the read and restores the caller's database.
+#[cfg(not(test))]
+fn cmd_streams(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
+    let registry = format!("{}#streams", PREFIX.value.lock(ctx).as_str());
+    let orig_db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
+    if unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) } != raw::REDISMODULE_OK as i32 {
+        return Err(RedisError::Str("failed to select database 0"));
+    }
+    let members: RedisResult = ctx.call("SMEMBERS", &[registry.as_str()][..]);
+    // Restore the caller's database before returning on any path.
+    unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, orig_db) };
+    // Set membership is unordered; return it as SMEMBERS produced it.
+    members
+}
+
 // The macro installs the Redis allocator as the global allocator, which aborts
 // outside a running Redis; compile it out of unit-test builds.
 #[cfg(not(test))]
@@ -705,9 +810,13 @@ redis_module! {
     data_types: [],
     init: init,
     deinit: deinit,
-    // Zero custom commands (SPEC.md section 8): observability lives in the
-    // module INFO section, configuration in CONFIG GET/SET.
-    commands: [],
+    // Readonly, keyless introspection commands (SPEC.md sections 5, 8). STATS
+    // is O(1); STREAMS is O(N) in the number of registered streams, so it is
+    // not flagged fast.
+    commands: [
+        ["eventstream.stats", cmd_stats, "readonly fast", 0, 0, 0, ""],
+        ["eventstream.streams", cmd_streams, "readonly", 0, 0, 0, ""],
+    ],
     event_handlers: [
         [@ALL: on_keyspace_event],
     ],
