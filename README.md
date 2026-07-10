@@ -1,79 +1,60 @@
 # redis-event-stream-module
 
 A Redis module that mirrors keyspace notifications into per-event Redis
-Streams, so ephemeral events become a durable, replayable log.
+Streams. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
+stream entry, written atomically with the keyspace change, so events are
+durable, replayable, and consumable with `XREAD` or consumer groups. Runs on
+Redis 7.2+ and Valkey 8.x, standalone or with replicas.
 
-Status: early release. The code implements the full v0.1 scope of
-[SPEC.md](SPEC.md) (the authoritative design), plus the introspection commands
-added just after it, and is exercised by an integration suite that CI runs
-against Redis 7.2, 7.4, 8.x, and Valkey. Interfaces may still change before
-1.0.
+Status: early release. The code implements the v0.1 scope of
+[SPEC.md](SPEC.md), the authoritative design, plus the introspection commands
+added after it. Interfaces may change before 1.0.
 
-## Why
+## Install
 
-Keyspace notifications (including the `expired` event) are delivered over
-Pub/Sub, which is fire and forget. A consumer that is disconnected when an
-event fires never sees it. This module subscribes to keyspace events inside the
-server and re-emits each one as an `XADD` into a per-event stream, so consumers
-can use `XREAD` or consumer groups and never miss an event, even across
-restarts.
+Prebuilt modules for Linux (x86_64, aarch64) and macOS (aarch64) are attached
+to each [release](https://github.com/joshrotenberg/redis-event-stream-module/releases)
+with sha256 checksums:
 
-The previous in-server way to do this was a RedisGears / Triggers-and-Functions
-script, which is deprecated. This module is a small, purpose-built replacement
-built on [redismodule-rs](https://github.com/RedisLabsModules/redismodule-rs).
+```sh
+curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so
+curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so.sha256
+shasum -a 256 -c redis-event-stream-module-<version>-linux-x86_64.so.sha256
+```
 
-## Choosing a capture approach
+Or build from source (stable Rust):
 
-Reacting reliably to key expirations usually means one of two approaches, and
-both have a failure mode. A pub/sub subscriber on `__keyevent@*__` loses events
-whenever it disconnects or its client output buffer overflows. Falling back to
-periodically scanning the keyspace for expired entries is expensive and only
-finds expirations after the fact, on the scan's own schedule.
+```sh
+cargo build --release
+# module at target/release/libredis_event_stream_module.so (.dylib on macOS)
+```
 
-This module replaces both. It captures each event into a durable stream at the
-moment the keyspace changes, so a consumer reacts per expiration instead of
-scanning, and a disconnected consumer resumes from where it left off.
+## Run
 
-| | Periodic keyspace scan | Pub/sub keyspace notifications | This module |
-|---|---|---|---|
-| Consumer disconnect | no effect (stateless poll) | events during the gap are lost | entries wait in the stream |
-| Replay after restart | rescan everything | none | `XRANGE` / group from any ID |
-| Server load per detection | full or partial keyspace scan | one pub/sub publish | one `XADD` (plus approximate trim) |
-| Detection latency | up to one scan interval | immediate | immediate |
-| Consumer scaling | manual sharding | fan-out only, no work splitting | consumer groups |
-| Loss detectable | n/a (always rescans) | no | yes (gap markers, counters) |
-| Needs `notify-keyspace-events` | no | yes | no |
+```sh
+redis-server --loadmodule ./redis-event-stream-module-<version>-linux-x86_64.so
+```
 
-Module delivery does not depend on `notify-keyspace-events`: module keyspace
-subscribers receive events regardless of that setting, which only gates pub/sub
-delivery (SPEC.md section 7, verified against Redis `src/notify.c` and enforced
-across the CI matrix). Pub/sub delivery does depend on it.
+The server's `notify-keyspace-events` setting is not required: module
+subscribers receive keyspace events regardless of that setting, which gates
+pub/sub delivery only (SPEC.md section 7).
 
-What this module does not provide: exactly-once delivery (consumers must be
-idempotent on stream name plus entry ID), and backfill of events that occur
-while the module is unloaded, disabled, or the server is down. It is a live
-mirror, not a write-ahead log. See
-[docs/loss-windows.md](docs/loss-windows.md) for the exact windows and how to
-reconcile over them, and [docs/consumer-patterns.md](docs/consumer-patterns.md)
-for consumer recipes.
+Quick check in `redis-cli` (the default configuration captures expirations
+only):
 
-## Routing
+```
+> SET foo bar PX 100
+> GET foo          (after ~100ms; forces lazy expiry)
+> XREAD COUNT 10 STREAMS events:expired 0
+```
 
-Events route by event name into `<prefix><event>`. With the default `events:`
-prefix:
+The expired event for `foo` is now a stream entry.
 
-| Event | Stream |
-|-------|--------|
-| key expiration | `events:expired` |
-| `SET` | `events:set` |
-| `HSET` | `events:hset` |
-| `DEL` | `events:del` |
-| eviction | `events:evicted` |
-
-Each entry has three fields: `event` (the event name), `key` (the affected key,
-binary-safe), and `db` (the database the event fired in). All destination
-streams live in database 0; the `db` field records the origin. The stream entry
-ID supplies the timestamp.
+- `./demo.sh` runs a scripted end-to-end demonstration on a local server.
+- `./demo-preflight.sh -h host -p port` checks an existing deployment
+  (reachability, module presence, config, an end-to-end probe expiration,
+  discovery, counters) and exits nonzero on any failure. All arguments pass
+  through to `redis-cli`.
 
 ## Configuration
 
@@ -87,108 +68,99 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
 
-The default filter is `expired`, so loading the module with no arguments
-captures only key expirations. See
-[SPEC.md](SPEC.md) section 7 for the full filter grammar.
+The full filter grammar is in SPEC.md section 7.
 
-Configuration is `CONFIG GET/SET eventstream.*`. Counters (forwarded, dropped
-and skipped by reason, active streams, gap markers) live in a module INFO
-section: `INFO eventstream` (module sections do not appear in plain `INFO`; use
-`INFO everything` or name the section). Two readonly introspection commands are
-also registered: `EVENTSTREAM.STATS` returns those counters as a structured
-reply, and `EVENTSTREAM.STREAMS` lists the destination streams written so far
-(backed by a persistent registry that survives restart).
+Counters (forwarded, dropped and skipped by reason, active streams, gap
+markers) are exposed in a module INFO section: `INFO eventstream`. Module
+sections do not appear in plain `INFO`; name the section or use
+`INFO everything`. Two readonly commands are also registered:
+`EVENTSTREAM.STATS` returns the counters as a structured reply, and
+`EVENTSTREAM.STREAMS` lists the destination streams written so far, backed by
+a persistent registry that survives restart.
 
-Capture-gap boundaries are machine-readable: the module writes markers
-(`loaded`, `disabled`, `enabled`, `unloading`) to a control stream at
-`<prefix>#control`, so consumers can bound reconciliation to known gap windows.
-See SPEC.md section 9.
+## How it works
 
-## Install and run
+Events route by event name into `<prefix><event>`:
 
-Prebuilt modules for Linux (x86_64, aarch64) and macOS (aarch64) are attached
-to each [release](https://github.com/joshrotenberg/redis-event-stream-module/releases),
-with sha256 checksums:
+| Event | Stream |
+|-------|--------|
+| key expiration | `events:expired` |
+| `SET` | `events:set` |
+| `HSET` | `events:hset` |
+| `DEL` | `events:del` |
+| eviction | `events:evicted` |
 
-```sh
-curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so
-curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so.sha256
-shasum -a 256 -c redis-event-stream-module-<version>-linux-x86_64.so.sha256
-redis-server --loadmodule ./redis-event-stream-module-<version>-linux-x86_64.so
-```
+Each entry has three fields: `event` (the event name), `key` (the affected
+key, binary-safe), and `db` (the database the event fired in). All destination
+streams live in database 0; the `db` field records the origin. The stream
+entry ID carries the event's millisecond timestamp.
 
-Or build from source:
+Delivery semantics (SPEC.md section 9): on a healthy capturing master, each
+selected event produces exactly one entry, atomic with the keyspace change.
+Overall capture is at-most-once; consumption through consumer groups is
+at-least-once within the retention window, so consumers must be idempotent on
+stream name plus entry ID. Mirrored entries replicate to replicas and the AOF.
 
-```sh
-cargo build --release
-redis-server --loadmodule ./target/release/libredis_event_stream_module.dylib
-```
+The module writes capture-gap markers (`loaded`, `disabled`, `enabled`,
+`unloading`) to a control stream at `<prefix>#control`, so consumers can bound
+reconciliation to known gap windows (SPEC.md section 9).
 
-(`.so` on Linux.) The server's `notify-keyspace-events` setting does not need
-to be enabled: module subscribers receive keyspace events regardless of that
-setting, which only gates pub/sub delivery. Verified empirically on Redis 8.8
-and documented in SPEC.md.
+## Comparison with other approaches
 
-Quick check in `redis-cli` (the default filter captures expirations only):
+| | Periodic keyspace scan | Pub/sub keyspace notifications | This module |
+|---|---|---|---|
+| Consumer disconnect | no effect (stateless poll) | events during the gap are lost | entries wait in the stream |
+| Replay after restart | rescan everything | none | `XRANGE` / group from any ID |
+| Server load per detection | full or partial keyspace scan | one pub/sub publish | one `XADD` (plus approximate trim) |
+| Detection latency | up to one scan interval | immediate | immediate |
+| Consumer scaling | manual sharding | fan-out only, no work splitting | consumer groups |
+| Loss detectable | n/a (always rescans) | no | yes (gap markers, counters) |
+| Needs `notify-keyspace-events` | no | yes | no |
 
-```
-> SET foo bar PX 100
-> GET foo          (after ~100ms; forces lazy expiry)
-> XREAD COUNT 10 STREAMS events:expired 0
-```
+RedisGears / Triggers-and-Functions could script similar capture in-server and
+is deprecated by Redis.
 
-The expired event for `foo` is in the stream, durable and replayable.
+This module does not provide exactly-once delivery, and it does not backfill
+events that occur while the module is unloaded, disabled, or the server is
+down. It is a live mirror, not a write-ahead log. See
+[docs/loss-windows.md](docs/loss-windows.md) for the loss windows and how to
+reconcile over them.
 
-See `demo.sh` for a scripted end-to-end run. Against a server that already has
-the module loaded (any host, all arguments pass through to `redis-cli`),
-`./demo-preflight.sh -h host -p port` verifies reachability, module presence,
-config, an end-to-end probe expiration, discovery, and counters, and exits
-nonzero on any failure.
+## Supported servers
 
-## Documentation
+Requires `RM_AddPostNotificationJob` (Redis 7.2, Valkey 8.x lineage). CI runs
+the full integration suite against each pinned version:
 
-- [SPEC.md](SPEC.md): the authoritative design (architecture, routing, entry
-  schema, configuration, delivery semantics, failure modes).
-- [docs/consumer-patterns.md](docs/consumer-patterns.md): live tail, durable
-  work queue with consumer groups, replay, discovery, and `maxlen` sizing.
-- [docs/loss-windows.md](docs/loss-windows.md): every way an event can be lost,
-  how to detect it, and how to reconcile a gap window without a full scan.
-
-## Requirements
-
-Redis 7.2 or newer, for `RM_AddPostNotificationJob`. Valkey 8.x works too; it
-shares the module ABI and post-notification-job API. CI runs the full
-integration suite on each server below, so these are verified, not just
-claimed:
-
-| Server | Verified in CI |
-|--------|----------------|
+| Server | Version in CI |
+|--------|---------------|
 | Redis 7.2 | 7.2.8 (minimum supported) |
 | Redis 7.4 | 7.4.5 |
 | Redis 8.x | 8.8.0 |
 | Valkey 8.x | 8.1.6 |
 
-Servers below 7.2 are not supported: the module fails to load (see SPEC.md
-section 14 for the exact failure mode).
+Servers below 7.2 fail to load the module (SPEC.md section 14 describes the
+failure mode).
 
-## Known limitations
+## Limitations
 
 - `expired` fires when Redis actually removes the key, not at the TTL instant.
 - Capture is at-most-once: events during unloaded or disabled windows are not
-  recoverable (the control stream makes the windows detectable, not the events).
-- Clean restarts and crashes are indistinguishable in v0.1: neither writes a
-  closing marker (see SPEC.md section 9).
-- Cluster mode is unsupported; the module refuses to load (SPEC.md section 10).
+  recoverable. The control stream makes the windows detectable, not the
+  events.
+- Clean restarts and crashes are indistinguishable: neither writes a closing
+  marker (SPEC.md section 9).
+- Cluster mode is unsupported; the module refuses to load (SPEC.md section 10;
+  a design proposal is in [docs/cluster-design.md](docs/cluster-design.md)).
 
 ## Performance
 
-The cost of the module is one extra `XADD` (plus an inline approximate trim) per
-captured event, on the main thread, in a post-notification job. Loaded but not
-capturing, it adds a few cheap gate checks per keyspace event and nothing else.
+The cost per captured event is one `XADD` plus an inline approximate trim, on
+the main thread, in a post-notification job. When loaded but not capturing,
+the per-event cost is the gate checks in the notification callback.
 
-Measured with `bench/run.sh` across the three SPEC.md section 11 scenarios (S0:
-no module; S1: loaded, default `expired` filter, so a `SET` workload captures
-nothing; S2: `events=set`, so every `SET` is captured):
+Measured with `bench/run.sh` across the SPEC.md section 11 scenarios (S0: no
+module; S1: loaded, default filter, `SET` workload so nothing is captured;
+S2: `events=set`, every `SET` captured):
 
 | Scenario | ops/sec | vs S0 | p50 (ms) | p99 (ms) |
 |---|---|---|---|---|
@@ -196,26 +168,34 @@ nothing; S2: `events=set`, so every `SET` is captured):
 | S1 loaded, no capture | 133262 | +0.0% | 0.207 | 0.407 |
 | S2 loaded, full capture | 114260 | -14.3% | 0.335 | 0.623 |
 
-The gate tax (S1) is within noise: a deployment that loads the module but does
-not match the workload pays effectively nothing. Full capture (S2) costs about
-14% throughput and under twice the p99 latency on this workload, well inside
-the worst case. Capture cost scales with captured write volume, and the default
-filter captures only expirations, so a typical deployment sits between S1 and
-S2, near S1.
+S1 is within measurement noise of S0. Capture cost scales with captured write
+volume; the default filter captures expirations only.
 
 Method: median of 3 runs, `redis-benchmark -t set -n 1000000 -c 50 --threads 4
 -d 64 -r 100000` per run, on Apple M4 Pro (14 cores, 24 GB, macOS 26.5.2)
-against Redis 8.8.0. Numbers vary with hardware and workload; re-run
+against Redis 8.8.0. Numbers vary with hardware and workload; run
 `bench/run.sh` on your own host to reproduce. SPEC.md section 11 specifies
 `memtier_benchmark`; the script uses `redis-benchmark` because it ships with
 every Redis and Valkey.
 
-Mass-expiry storms (a large backlog of keys expiring at once) are the worst case:
-each expiration becomes an `XADD` on the main thread, paced by the server's
-expire-cycle throttling. The `tests/observability.rs` mass-expiry test captures
-2000 staggered expirations with zero drops; drain-latency profiling under an
-adversarial expiry burst, and CI-gated regression thresholds, are future work
+Mass expiry is the heaviest case: each expiration becomes an `XADD` on the
+main thread, paced by the server's expire-cycle throttling. The integration
+suite includes a 2000-key staggered-expiry scenario captured with zero drops;
+drain-latency profiling and CI-gated regression thresholds are future work
 (SPEC.md section 16).
+
+## Documentation
+
+- [SPEC.md](SPEC.md): the authoritative design (architecture, routing, entry
+  schema, configuration, delivery semantics, failure modes).
+- [docs/consumer-patterns.md](docs/consumer-patterns.md): live tail, durable
+  work queue with consumer groups, replay, discovery, and `maxlen` sizing.
+- [docs/loss-windows.md](docs/loss-windows.md): every way an event can be
+  lost, how to detect it, and how to reconcile a gap window without a full
+  scan.
+- [docs/cluster-design.md](docs/cluster-design.md): proposed cluster support
+  (not implemented).
+- [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 
