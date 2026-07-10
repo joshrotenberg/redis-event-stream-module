@@ -701,9 +701,9 @@ dependencies = [
 
 [[package]]
 name = "redis-server-wrapper"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e30d98739eaf371e7898eef3762070fa8fe575e765231b14d8e260e7778c15d4"
+checksum = "81c4bffe3b4bef0d6cadd0c1efc1e163b3a793dbbbc1d6821676c7214ede4d12"
 dependencies = [
  "glob",
  "thiserror",

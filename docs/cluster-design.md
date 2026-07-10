@@ -23,6 +23,18 @@ and each slot is owned by exactly one master. Two facts collide:
 So a naive port loses capture on N-1 of N masters. The destination must hash to
 a slot the firing node owns.
 
+Both halves of this are confirmed against a live 3-master cluster in
+`tests/cluster.rs`. The exact failure is `ERR Attempted to access a non local
+key in a cluster node` (a hard local refusal, not a followable MOVED), and it
+hits every module-written key independently: because `events:expired`,
+`events:set`, `events:#control`, and `events:#streams` each hash to different
+slots, even the node that owns one of them fails on the others. The test also
+confirms the fix: a per-node hashtag chosen to hash to a slot the node owns
+(`events:{tag}:expired`) makes the write succeed locally on every node. A
+corollary the test makes concrete: all of a node's module-written keys (event
+streams, the control stream, and the registry) must share one node tag so they
+co-locate on that node.
+
 ## Proposed design: slot-pinned per-node hashtags
 
 Each master writes its captures into streams whose name carries a hashtag chosen
@@ -72,9 +84,11 @@ its pinned slot stays locally owned.
 
 - Detection. Subscribe to the cluster topology-change server event if the
   wrapper exposes one; otherwise re-derive owned slots on a low-frequency timer
-  (for example the cron server event) and on any `RM_Call` that returns a
-  cluster redirection. When the currently pinned slot `S` is no longer owned,
-  re-pin: pick a new owned slot `S'`, switch new writes to `<prefix>{tag(S')}`.
+  (for example the cron server event) and on any mirrored `XADD` that returns
+  the local-refusal error (`Attempted to access a non local key in a cluster
+  node`, the observed error when the pinned slot has migrated away). When the
+  currently pinned slot `S` is no longer owned, re-pin: pick a new owned slot
+  `S'`, switch new writes to `<prefix>{tag(S')}`.
 - Fate of existing entries. The streams under `{tag(S)}` are ordinary keys in
   slot `S`. When slot `S` migrates to another node, those streams migrate with
   it (that is what slot migration does). So no entries are lost; the history for
