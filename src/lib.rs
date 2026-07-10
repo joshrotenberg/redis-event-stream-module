@@ -320,7 +320,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     // itself always lives in db 0 (SPEC.md section 6).
     let db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
 
-    let stream = format!("{}{}", &*prefix, suffix);
+    let stream = format!("{}{}", prefix.as_str(), suffix);
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
