@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Redis module that mirrors keyspace notifications into per-event Redis Streams for durable, replayable event consumption."
 repository = "https://github.com/joshrotenberg/redis-event-stream-module"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]
