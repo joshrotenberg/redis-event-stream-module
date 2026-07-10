@@ -50,9 +50,9 @@ at-least-once processing across restarts, use a consumer group.
 
 ## Durable work queue (consumer groups)
 
-This is the pattern that replaces the sweeper: each expiration becomes a unit of
-work, delivered at least once, split across a pool of workers, surviving worker
-restarts.
+This is the pattern that replaces periodic keyspace scanning: each expiration
+becomes a unit of work, delivered at least once, split across a pool of workers,
+surviving worker restarts.
 
 Create the group once. `MKSTREAM` creates the stream if the first event has not
 been captured yet, so setup does not race against capture:
