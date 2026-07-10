@@ -93,7 +93,7 @@ Subscription mechanism. `REDISMODULE_NOTIFY_ALL` covers GENERIC|STRING|LIST|SET|
 
 `MISSED` (`keymiss`, one event per read miss) and `NEW` (`new`, one event per newly created key) are high-volume, so they are opt-in: the subscription mask is `NOTIFY_ALL` plus MISSED and/or NEW only when the load-time filter names them (`@missed`, `@new`, or `*`, which subscribes to both). The mask is fixed at load; `RedisModule_SubscribeToKeyspaceEvents` has no unsubscribe, so a runtime `CONFIG SET eventstream.events` that names a MISSED or NEW class the load did not subscribe to is rejected (a bare `*` at runtime is accepted and captures only what is subscribed). `LOADED` and `TRIMMED` remain uncapturable and their `@class` tokens are rejected with a reason: `LOADED` fires only during dataset load, when the not-LOADING gate and the deferred-write API both refuse writes, and `TRIMMED` fires only during cluster reshard trimming (cluster is unsupported, section 10).
 
-Byte-level guarantees and panic safety: `RM_NotifyKeyspaceEvent` takes a C string, so event names cannot contain NUL, but they can be non-UTF-8. The wrapper's macro-generated callback would convert the name with `to_str().unwrap()` and panic on non-UTF-8, which is undefined behavior across the FFI boundary and aborts the server (redismodule-rs#472). The module's hand-written callback avoids this two ways: it decodes the name with `String::from_utf8_lossy` (replacement characters for invalid bytes, so the entry's `event` field is always written), and it wraps the whole handler in `catch_unwind`, counting any caught panic as `handler_panics` (a nonzero value is a bug in this module) rather than letting it unwind into Redis. A non-UTF-8 name is therefore captured, not a crash.
+Byte-level guarantees and panic safety: `RM_NotifyKeyspaceEvent` takes a C string, so event names cannot contain NUL, but they can be non-UTF-8. The wrapper's macro-generated callback would convert the name with `to_str().unwrap()` and panic on non-UTF-8, which is undefined behavior across the FFI boundary and aborts the server (redismodule-rs#472). The module's hand-written callback avoids this two ways: it decodes the name with `String::from_utf8_lossy` (replacement characters for invalid bytes, so the entry's `event` field is always written), and it wraps the whole handler in `catch_unwind`, counting any caught panic as `handler_panics` (a nonzero value is a bug in this module) rather than letting it unwind into Redis. A non-UTF-8 name is therefore captured, not a crash. The post-notification job the callback enqueues runs through a separate FFI trampoline the wrapper does not guard, so its body is wrapped in the same `catch_unwind` and shares the `handler_panics` counter (issue #45 hit this: a null optional-API pointer, `ClusterCanonicalKeyNameInSlot` on 7.2, panicked in the job and aborted the node).
 
 ### Sanitization
 
@@ -156,6 +156,7 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | `eventstream.stream-prefix` | string | `events:` | no (IMMUTABLE) | non-empty; at most 128 bytes; characters limited to `A-Z a-z 0-9 : . _ - { }`; glob metacharacters (`*`, `?`, `[`, `]`, `\`) rejected |
 | `eventstream.events` | string | `expired` | yes | filter grammar below; empty string rejected |
 | `eventstream.maxlen` | i64 | `10000` | yes | `0` to `i64::MAX`; `0` disables trimming. Redis enforces the registered range on `CONFIG SET` and redis.conf paths only; a module-arg value becomes the registered default and bypasses the boundary check (verified against redis 7.2 `module.c`/`config.c`), so the module's config binding re-validates and rejects negatives, aborting the load |
+| `eventstream.cluster-streams` | string | `refuse` | no (IMMUTABLE) | `refuse` or `per-node` (section 10). Only meaningful in cluster mode |
 
 **`eventstream.enabled`.** Master kill switch. There is no unsubscribe API for keyspace notifications, so `no` is an early return at the top of the notification handler (one atomic load per event). Flipping back to `yes` does not replay events that occurred while disabled.
 
@@ -392,17 +393,20 @@ Destination streams are ordinary keys: included in RDB, AOF, replication, `DUMP`
 
 Eviction warning: `allkeys-*` policies can evict the event streams themselves. Recommend `noeviction` or `volatile-*` on instances running this module.
 
-### Cluster: unsupported in v0.1, refuse to load
+### Cluster: refuse by default, opt-in per-node capture
 
-Three facts collide in cluster mode: notifications are node-local (every master sees only its own shard of events); the destination stream is a fixed key name, hashing to one slot owned by one master; and `RM_Call` executes locally with no MOVED handling, failing on non-local slots. Net effect with no countermeasure: on an N-master cluster, N-1 masters fail every capture and the remaining one captures only local events. That is silent loss of most traffic.
+Three facts collide in cluster mode: notifications are node-local (every master sees only its own shard of events); a fixed destination stream key name hashes to one slot owned by one master; and `RM_Call` refuses a non-local key (the observed error is `Attempted to access a non local key in a cluster node`, a hard local refusal, not a followable MOVED). Worse, because each distinct destination name (event streams, `#control`, `#streams`) hashes to a different slot, even the node owning one of them fails on the others. Net effect with no countermeasure on an N-master cluster: nothing captures reliably. This was confirmed against a live cluster (`tests/cluster.rs`).
 
-| Option | Verdict |
-|---|---|
-| Source-key hashtag (`events:{<key>}:expired`) | Writes always local, but one stream per source key defeats the consolidation model |
-| Slot-pinned per-node hashtag (`events:{s1234}:expired`) | Correct, preserves per-event streams per node, but needs topology awareness, re-pinning on reshard, and per-node discovery |
-| Refuse to load when `ContextFlags::CLUSTER` is set | No silent loss, no half-working deployments |
+Behavior is chosen by `eventstream.cluster-streams` (IMMUTABLE, load-time):
 
-Decision: refuse to load in cluster mode, with a clear error at `MODULE LOAD` time. Failing at deploy time beats an incident postmortem. The slot-pinned design is the documented v0.2+ direction; a plain node-id name prefix does not work (it does not change which slot the key hashes to), only a hashtag pinned to a locally owned slot does.
+- `refuse` (default): the module refuses to load when `ContextFlags::CLUSTER` is set, with a clear error at load time. No silent loss, no half-working deployments.
+- `per-node` (issue #45): each master pins all of its keys to a hash tag that hashes to a slot the node owns, so its writes stay local. The tag is shared across the node's event streams, control stream, and registry (`events:{tag}expired`, `events:{tag}#control`, `events:{tag}#streams`) so they co-locate; distinct nodes pin distinct tags (a tag's slot is owned by exactly one node).
+
+Tag selection is lazy. A node owns no slots at module load (it joins the cluster afterward), so the tag is selected on the first captured event, when slots are known: the module walks slots and probes ownership with a non-destructive replicated write (`XADD {tag}#slotprobe NOMKSTREAM`), which is the same locality rule the real writes obey (a plain read is not slot-checked and would falsely pass on every node). The candidate tag for each slot comes from `RedisModule_ClusterCanonicalKeyNameInSlot`, which guarantees slot coverage; that API was added after 7.2, so on 7.2 (where its pointer is null and calling it would abort the server) the module falls back to synthetic candidate tags, which cover an owned slot on any balanced cluster. If the node owns no slot yet, events are dropped and counted as `dropped_no_owned_slot`.
+
+Static per-node mode (#45) does not re-pin after a reshard that moves the pinned slot; that is issue #46. Single-shard clusters (one master owning all slots) are the safest deployment and sidestep re-pinning entirely.
+
+Rejected alternatives: a source-key hashtag (`events:{<key>}:expired`) keeps writes local but produces one stream per source key, defeating consolidation; a plain node-id name prefix does not change which slot the key hashes to, so it does not solve placement at all.
 
 ## 11. Performance and memory model
 
@@ -470,10 +474,13 @@ eventstream_skipped_invalid:0
 eventstream_active_streams:1
 eventstream_control_markers:2
 eventstream_handler_panics:0
+eventstream_dropped_no_owned_slot:0
+eventstream_cluster_per_node:0
+eventstream_cluster_pinned_tag:
 eventstream_last_error_time:1752071011
 ```
 
-`dropped` is the sum of the three `dropped_*` reasons. `active_streams` counts distinct destination streams written since load, excluding the control stream. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at the notification-callback FFI boundary (section 5); it should always be 0, and any nonzero value is a bug in this module. Config values are not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO.
+`dropped` is the sum of the three `dropped_*` reasons. `active_streams` counts distinct destination streams written since load, excluding the control stream. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO.
 
 Documentation must state plainly: module sections do not appear in default `INFO` or `INFO all`; use `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. This is otherwise a recurring support question.
 

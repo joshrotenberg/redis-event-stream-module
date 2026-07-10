@@ -67,6 +67,7 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.stream-prefix` | string | `events:` | destination stream prefix; immutable, load-time only |
 | `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
+| `eventstream.cluster-streams` | string | `refuse` | cluster behavior: `refuse` (default) or `per-node` (see Limitations); immutable, load-time only |
 
 The full filter grammar is in SPEC.md section 7. The high-volume `@missed`
 (read misses) and `@new` (new-key) classes are opt-in and must be named at load
@@ -152,8 +153,13 @@ failure mode).
   events.
 - Clean restarts and crashes are indistinguishable: neither writes a closing
   marker (SPEC.md section 9).
-- Cluster mode is unsupported; the module refuses to load (SPEC.md section 10;
-  a design proposal is in [docs/cluster-design.md](docs/cluster-design.md)).
+- Cluster mode: the module refuses to load by default. Setting
+  `eventstream.cluster-streams per-node` enables per-node capture, where each
+  master pins its streams to a slot it owns via a shared hash tag; single-shard
+  clusters are the safest deployment. Dynamic re-pinning after a reshard is not
+  implemented yet, so a slot migration stops capture on the affected node until
+  reload (SPEC.md section 10; design in
+  [docs/cluster-design.md](docs/cluster-design.md)).
 
 ## Performance
 
