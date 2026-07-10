@@ -512,11 +512,14 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
         args.push(&b"db"[..]);
         args.push(db_s.as_bytes());
 
-        // Per-event trace (SPEC.md section 13); the server filters by loglevel.
+        // Per-event trace (SPEC.md section 13); the server filters by
+        // loglevel. Key bytes are ASCII-escaped: the wrapper's logger builds
+        // a CString and panics across the FFI boundary on interior NUL, so
+        // raw key bytes (which may contain NUL) must never reach it.
         ctx.log_debug(&format!(
             "eventstream: {} key={} -> {}",
             event_owned,
-            String::from_utf8_lossy(&key_owned),
+            key_owned.escape_ascii(),
             stream
         ));
 
