@@ -125,6 +125,49 @@ impl TestServer {
         let _: () = redis::cmd("SELECT").arg(db).query(&mut c).expect("SELECT");
         c
     }
+
+    /// Start a replica of `master` with the module loaded, and wait until the
+    /// replication link is up and the initial sync has completed.
+    pub fn start_replica_of(master: &TestServer, module_args: &[&str]) -> TestServer {
+        let port = next_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle = Self::builder(port, &dir, module_args)
+            .replicaof("127.0.0.1", master.port)
+            .start()
+            .expect("failed to start replica");
+        let replica = TestServer { handle, port, dir };
+        let mut c = replica.conn();
+        wait_until(Duration::from_secs(15), "replica link up", || {
+            let info: String = redis::cmd("INFO")
+                .arg("replication")
+                .query(&mut c)
+                .unwrap_or_default();
+            info.contains("master_link_status:up")
+        });
+        replica
+    }
+
+    /// Start with append-only durability enabled (for restart-survival tests).
+    pub fn start_aof(module_args: &[&str]) -> TestServer {
+        let port = next_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle = Self::builder(port, &dir, module_args)
+            .appendonly(true)
+            .start()
+            .expect("failed to start redis-server with AOF");
+        TestServer { handle, port, dir }
+    }
+
+    /// Restart an AOF server on the same working directory.
+    pub fn restart_aof(self, module_args: &[&str]) -> TestServer {
+        let TestServer { handle, port, dir } = self;
+        drop(handle);
+        let handle = Self::builder(port, &dir, module_args)
+            .appendonly(true)
+            .start()
+            .expect("failed to restart redis-server with AOF");
+        TestServer { handle, port, dir }
+    }
 }
 
 /// Poll `f` until it returns true or the deadline passes. Panics with `what`
