@@ -7,9 +7,12 @@
 #![allow(dead_code)]
 
 use redis::Commands;
-use redis_server_wrapper::blocking::{RedisServer, RedisServerHandle};
+use redis_server_wrapper::blocking::{
+    RedisCluster, RedisClusterHandle, RedisServer, RedisServerHandle,
+};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
@@ -22,6 +25,63 @@ pub fn next_port() -> u16 {
         .local_addr()
         .expect("probe addr")
         .port()
+}
+
+/// Base client port for the next test cluster. Clusters need a contiguous run
+/// of client ports plus their bus ports at `+10000`, so a random OS-assigned
+/// port will not do; this band (16000+) sits below the ephemeral range the
+/// single-server tests draw from, so the two do not collide.
+static CLUSTER_BASE: AtomicU16 = AtomicU16::new(16000);
+
+fn next_cluster_base() -> u16 {
+    CLUSTER_BASE.fetch_add(50, Ordering::Relaxed)
+}
+
+/// An in-process Redis Cluster for cluster-mode tests (issue #19). Kill-on-drop
+/// via the wrapper handle.
+pub struct TestCluster {
+    pub handle: RedisClusterHandle,
+}
+
+impl TestCluster {
+    /// Start an `masters`-master cluster (no replicas). When `module_args` is
+    /// `Some`, every node loads the module with those arguments; the cluster
+    /// builder has no dedicated `loadmodule`, so this goes through `.extra`.
+    /// Returns `Err` if the cluster does not form, which is the expected
+    /// outcome while the module refuses to load in cluster mode.
+    pub fn try_start(masters: u16, module_args: Option<&[&str]>) -> Result<TestCluster, String> {
+        let mut b = RedisCluster::builder()
+            .masters(masters)
+            .replicas_per_master(0)
+            .base_port(next_cluster_base())
+            .save(false)
+            .cluster_node_timeout(2000);
+        // The CI version matrix (issue #14) points these at a specific build.
+        // Cluster formation shells out to redis-cli, so both must be set.
+        if let Ok(bin) = std::env::var("TEST_REDIS_SERVER_BIN") {
+            b = b.redis_server_bin(bin);
+        }
+        if let Ok(bin) = std::env::var("TEST_REDIS_CLI_BIN") {
+            b = b.redis_cli_bin(bin);
+        }
+        if let Some(args) = module_args {
+            let directive = format!("{} {}", module_path().display(), args.join(" "));
+            b = b.extra("loadmodule", directive.trim().to_string());
+        }
+        b.start()
+            .map(|handle| TestCluster { handle })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Run a command against one specific node without cluster redirection,
+    /// so the reply reveals whether that node owns the key's slot.
+    pub fn node_run(&self, index: usize, args: &[&str]) -> Result<String, String> {
+        self.handle.node_run(index, args).map_err(|e| e.to_string())
+    }
+
+    pub fn num_masters(&self) -> usize {
+        self.handle.num_masters() as usize
+    }
 }
 
 /// Build the module cdylib once per test-binary run and return its path.
