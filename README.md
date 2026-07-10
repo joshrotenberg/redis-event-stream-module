@@ -98,6 +98,43 @@ See `demo.sh` for a scripted end-to-end run.
   closing marker (see SPEC.md section 9).
 - Cluster mode is unsupported; the module refuses to load (SPEC.md section 10).
 
+## Performance
+
+The cost of the module is one extra `XADD` (plus an inline approximate trim) per
+captured event, on the main thread, in a post-notification job. Loaded but not
+capturing, it adds a few cheap gate checks per keyspace event and nothing else.
+
+Measured with `bench/run.sh` across the three SPEC.md section 11 scenarios (S0:
+no module; S1: loaded, default `expired` filter, so a `SET` workload captures
+nothing; S2: `events=set`, so every `SET` is captured):
+
+| Scenario | ops/sec | vs S0 | p50 (ms) | p99 (ms) |
+|---|---|---|---|---|
+| S0 baseline (no module) | 124969 | - | 0.223 | 0.407 |
+| S1 loaded, no capture | 124938 | -0.0% | 0.223 | 0.415 |
+| S2 loaded, full capture | 111086 | -11.1% | 0.311 | 0.623 |
+
+The gate tax (S1) is within noise: a deployment that loads the module but does
+not match the workload pays effectively nothing. Full capture (S2) costs about
+11% throughput and roughly doubles p99 latency on this workload, well inside the
+worst case. Capture cost scales with captured write volume, and the default
+filter captures only expirations, so a typical deployment sits between S1 and
+S2, near S1.
+
+Method: median of 3 runs, `redis-benchmark -t set -n 1000000 -c 50 --threads 4
+-d 64 -r 100000` per run. These figures are indicative, measured on a dev laptop
+(Apple M4 Pro, 24 GB, macOS 26.5.2, Redis 8.8.0) under light use; treat them as a
+shape, not a spec. Re-run `bench/run.sh` on a quiet, representative host for
+authoritative numbers. SPEC.md section 11 specifies `memtier_benchmark`; the
+script uses `redis-benchmark` because it ships with every Redis and Valkey.
+
+Mass-expiry storms (a large backlog of keys expiring at once) are the worst case:
+each expiration becomes an `XADD` on the main thread, paced by the server's
+expire-cycle throttling. The `tests/observability.rs` mass-expiry test captures
+2000 staggered expirations with zero drops; drain-latency profiling under an
+adversarial expiry burst, and CI-gated regression thresholds, are future work
+(SPEC.md section 16).
+
 ## License
 
 Licensed under either of
