@@ -1,0 +1,83 @@
+name: Bug report
+description: Report incorrect or unexpected module behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please include the version and configuration details below. They are
+        usually enough to reproduce a capture bug without a follow-up round trip.
+  - type: input
+    id: module-version
+    attributes:
+      label: Module version or commit
+      description: Release tag, or `git rev-parse HEAD` if built from source.
+      placeholder: "v0.1.0 or 6aa8e48"
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version and how it was installed
+      description: Redis or Valkey version, and package vs source build.
+      placeholder: "Redis 7.2.8, built from source"
+    validations:
+      required: true
+  - type: dropdown
+    id: topology
+    attributes:
+      label: Topology
+      options:
+        - Standalone
+        - Master with replicas
+        - Other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: loadmodule
+    attributes:
+      label: How the module is loaded
+      description: The exact `loadmodule` line or redis.conf directive, including any module arguments.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: CONFIG GET eventstream.*
+      description: Paste the full output.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: info
+    attributes:
+      label: INFO eventstream
+      description: >
+        Paste the module INFO section. Note: module sections do not appear in
+        plain `INFO`; run `INFO eventstream` (or `INFO everything`). The
+        `forwarded`, `dropped_*`, and `skipped_*` counters distinguish a
+        capture bug from a filter or memory-pressure drop.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: The commands or workload that trigger the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose new or changed behavior
+labels: ["kind:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that the module does not support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should the module do? Config keys, commands, entry fields, or docs affected.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, and why they fall short.
+    validations:
+      required: false
+  - type: input
+    id: spec-ref
+    attributes:
+      label: Related SPEC.md section
+      description: If this maps to a Future work item, cite the section (SPEC.md section 16).
+      placeholder: "section 16"
+    validations:
+      required: false
+  - type: dropdown
+    id: pr
+    attributes:
+      label: Are you willing to open a PR?
+      options:
+        - "Yes"
+        - "Maybe, with guidance"
+        - "No"
+    validations:
+      required: false
