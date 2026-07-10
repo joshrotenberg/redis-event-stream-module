@@ -180,7 +180,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
             }
         }
     });
-    if !matches!(status, Ok(Status::Ok)) {
+    if status == Status::Err {
         ctx.log_warning("eventstream: failed to register post-notification job; event dropped");
     }
 }

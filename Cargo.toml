@@ -10,7 +10,12 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-redis-module = "2.0.8"
+# crates.io releases of redis-module lag the repo badly; Redis's own modules
+# (e.g. RedisJSON) consume the git v2.1.x tags instead. Match RedisJSON's pin
+# shape, with the 7.2 compatibility floor from SPEC.md section 14.
+redis-module = { git = "https://github.com/RedisLabsModules/redismodule-rs", tag = "v2.1.3", default-features = false, features = [
+    "min-redis-compatibility-version-7-2",
+] }
 lazy_static = "1"
 
 [profile.release]
