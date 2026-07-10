@@ -1,0 +1,15 @@
+# Release automation (issue #27). release-plz opens a release PR on each push
+# to main (version bump + changelog from conventional commits); merging that PR
+# tags the release and creates the GitHub release. The release-artifacts
+# workflow then attaches prebuilt module binaries to it.
+#
+# This crate is a cdylib Redis module: consumers load a compiled artifact, not
+# a Rust dependency, so crates.io publishing adds nothing and is disabled here
+# (and via publish = false in Cargo.toml). Versions, tags, changelog, and
+# GitHub releases still flow through release-plz.
+
+[workspace]
+publish = false
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true

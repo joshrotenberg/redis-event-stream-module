@@ -1,0 +1,99 @@
+name: Release artifacts
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types: [published]
+  # Self-validation: build (but do not upload to a release) whenever this
+  # workflow file itself changes in a PR, so runner and build breakage is
+  # caught before a release depends on it.
+  pull_request:
+    paths:
+      - ".github/workflows/release-artifacts.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 rather than -latest: older glibc (2.35) for wider
+          # compatibility of the prebuilt .so.
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+            ext: so
+          - name: linux-aarch64
+            runner: ubuntu-22.04-arm
+            ext: so
+          - name: macos-aarch64
+            runner: macos-14
+            ext: dylib
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release cdylib
+        run: cargo build --release
+
+      - name: Package artifact with checksum
+        id: pkg
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          NAME="redis-event-stream-module-${VERSION}-${{ matrix.name }}.${{ matrix.ext }}"
+          mkdir -p dist
+          cp "target/release/libredis_event_stream_module.${{ matrix.ext }}" "dist/${NAME}"
+          cd dist
+          shasum -a 256 "${NAME}" > "${NAME}.sha256"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          shasum -a 256 -c "${NAME}.sha256"
+
+      - name: Smoke test the artifact loads
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y redis-server redis-tools || true
+          else
+            brew install redis
+          fi
+          # Distro Redis can predate 7.2; only smoke-test where it is new enough.
+          MAJOR="$(redis-server --version | sed -E 's/.*v=([0-9]+)\..*/\1/')"
+          MINOR="$(redis-server --version | sed -E 's/.*v=[0-9]+\.([0-9]+).*/\1/')"
+          if [ "$MAJOR" -lt 7 ] || { [ "$MAJOR" -eq 7 ] && [ "$MINOR" -lt 2 ]; }; then
+            echo "redis-server ${MAJOR}.${MINOR} < 7.2; skipping load smoke (CI matrix covers it)"
+            exit 0
+          fi
+          DIR="$(mktemp -d)"
+          redis-server --port 6397 --dir "$DIR" --daemonize yes --logfile "$DIR/l.log" \
+            --loadmodule "$PWD/dist/${{ steps.pkg.outputs.name }}"
+          sleep 1
+          redis-cli -p 6397 MODULE LIST | grep -q eventstream
+          redis-cli -p 6397 SHUTDOWN NOSAVE || true
+          echo "artifact loads cleanly"
+
+      - name: Upload to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "dist/${{ steps.pkg.outputs.name }}" \
+            "dist/${{ steps.pkg.outputs.name }}.sha256" \
+            --clobber
+
+      - name: Upload as workflow artifact (PR validation runs)
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: dist/
+          retention-days: 5
