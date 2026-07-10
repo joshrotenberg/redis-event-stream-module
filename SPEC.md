@@ -2,7 +2,7 @@
 
 ## 1. Summary
 
-`redis-event-stream-module` is a Redis module, written in Rust on the `redis-module` crate (redismodule-rs, pinned at the v2.1.3 git tag), that subscribes to keyspace notifications inside the server and mirrors each selected notification as an `XADD` into a Redis Stream. Keyspace notifications over pub/sub are fire-and-forget: a disconnected subscriber misses events permanently. This module makes those events durable, replayable, and consumable through consumer groups, using only standard Redis Streams on the read side. The originating use case, and the v0.1 default configuration, is reliable capture of key expiration events (`expired`) for consumers that must not miss one across restarts.
+`redis-event-stream-module` is a Redis module, written in Rust on the `redis-module` crate (redismodule-rs, pinned at the v2.1.3 git tag), that subscribes to keyspace notifications inside the server and mirrors each selected notification as an `XADD` into a Redis Stream. Keyspace notifications over pub/sub are fire-and-forget: a disconnected subscriber misses events permanently. This module makes those events durable, replayable, and consumable through consumer groups, using only standard Redis Streams on the read side. The v0.1 default configuration is reliable capture of key expiration events (`expired`) for consumers that must not miss one across restarts.
 
 ## 2. Goals and non-goals
 
@@ -157,7 +157,7 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 
 **`eventstream.stream-prefix`.** Registered with `ConfigurationFlags::IMMUTABLE`: settable via module args, a `loadmodule` line, redis.conf directive, or `MODULE LOADEX CONFIG`, but not via `CONFIG SET`. Rationale: a runtime-mutable prefix drags in dual-prefix feedback-guard machinery, old-stream cleanup semantics, and registry-reset questions, all for no v0.1 user; relaxing IMMUTABLE to mutable later is non-breaking. An empty prefix is rejected because the feedback guard (skip keys starting with the prefix) would then match every key and blackhole all events. Braces are allowed in the charset; they are reserved for the future cluster design (section 10), not a working cluster recipe in v0.1.
 
-**`eventstream.events`.** Which events to mirror. Default `expired` matches the originating use case and creates exactly one stream; mirroring everything by default would silently add write amplification to any production workload the moment the module loads. Operators widen it deliberately.
+**`eventstream.events`.** Which events to mirror. Default `expired` captures only key expirations and creates exactly one stream; mirroring everything by default would silently add write amplification to any production workload the moment the module loads. Operators widen it deliberately.
 
 **`eventstream.maxlen`.** Per-stream retention cap, applied inline as `XADD ... MAXLEN ~ <n>` on every write. Default 10000 bounds worst-case memory (section 11) while degrading to "recent history" rather than degrading to an outage. Alternative considered: periodic `XTRIM`. Rejected: inline approximate `MAXLEN` achieves the same bound with no extra writes and no timer.
 
@@ -507,7 +507,7 @@ The crate builds with the wrapper's `min-redis-compatibility-version-7-2` featur
 
 ## 15. v0.1 scope
 
-The one validated user need is durable expiration events. v0.1 is the smallest module that serves it correctly.
+The primary need is durable expiration events. v0.1 is the smallest module that serves it correctly.
 
 ### Ships
 
@@ -577,5 +577,5 @@ Each item is additive (new config key, counter, command, or entry field), so not
 
 1. **Non-UTF-8 module event names panic in the wrapper.** The macro-generated handler calls `to_str().unwrap()` before module code runs (`redismodule-rs/src/macros.rs`). Options: accept and document (no known module fires non-UTF-8 names), subscribe via the raw API with a hand-written handler, or upstream a lossy-decode fix to redismodule-rs. Resolved 2026-07-09: accept and document for v0.1; upstream issue filed as RedisLabsModules/redismodule-rs#472. The raw-API path (Future work, MISSED/NEW capture) absorbs the real fix if upstream does not move first.
 2. **notify-keyspace-events bypass across versions.** Resolved. The integration suite never sets `notify-keyspace-events`, so it only passes if module keyspace subscribers receive events with the setting empty. CI runs the full suite against Redis 7.2.8, 7.4.5, 8.8.0, and Valkey 8.1.6, so every supported server line empirically pins the bypass. Originally verified by reading Redis 7.2 `src/notify.c` (`moduleNotifyKeyspaceEvent()` runs before the config check); now enforced across the matrix rather than asserted.
-3. **Is an immutable `stream-prefix` acceptable for the launch customer?** IMMUTABLE deletes real complexity (dual-prefix guard, cleanup semantics) and relaxing later is non-breaking. Recommendation: keep IMMUTABLE unless the customer states a concrete need to re-prefix without a restart.
+3. **Is an immutable `stream-prefix` acceptable for launch?** IMMUTABLE deletes real complexity (dual-prefix guard, cleanup semantics) and relaxing later is non-breaking. Recommendation: keep IMMUTABLE unless there is a concrete need to re-prefix without a restart.
 4. **`module_args_as_configuration` with three config types.** The macro grammar makes each config-type block optional, but the established wrapper guidance says all four sections must be present when module args are enabled. Resolved 2026-07-09 by experiment against the pinned v2.1.3 tag: omitting the enum section fails to compile, but an empty `enum: []` list compiles and works (module loads, `CONFIG GET eventstream.*` lists the real configs, unprefixed module args are applied). The config block uses `enum: []` with a code comment.

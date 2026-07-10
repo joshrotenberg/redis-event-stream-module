@@ -133,9 +133,9 @@ either, so the absence is correct.
 
 ## Reconciling a gap without a full scan
 
-The point of the launch use case is to avoid rescanning 10 million keys. Given a
-gap window `[t_start, t_end]` in milliseconds (from a marker pair, a restart, or
-a `dropped_oom` alert), reconcile only over that window:
+The point is to avoid rescanning the whole keyspace. Given a gap window
+`[t_start, t_end]` in milliseconds (from a marker pair, a restart, or a
+`dropped_oom` alert), reconcile only over that window:
 
 1. Extract the window. For a disable/enable pair:
 

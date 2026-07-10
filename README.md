@@ -21,18 +21,17 @@ built on [redismodule-rs](https://github.com/RedisLabsModules/redismodule-rs).
 
 ## Choosing a capture approach
 
-The launch use case was a customer replacing a client that periodically scanned
-roughly 10 million keys to find expired entries. They had first tried a pub/sub
-subscriber on `__keyevent@*__`, but it lost events whenever the subscriber
-disconnected or its client output buffer overflowed, so they fell back to
-scanning. The scan is expensive and only finds expirations after the fact, on
-its own schedule.
+Reacting reliably to key expirations usually means one of two approaches, and
+both have a failure mode. A pub/sub subscriber on `__keyevent@*__` loses events
+whenever it disconnects or its client output buffer overflows. Falling back to
+periodically scanning the keyspace for expired entries is expensive and only
+finds expirations after the fact, on the scan's own schedule.
 
 This module replaces both. It captures each event into a durable stream at the
 moment the keyspace changes, so a consumer reacts per expiration instead of
 scanning, and a disconnected consumer resumes from where it left off.
 
-| | Periodic sweeper scan | Pub/sub keyspace notifications | This module |
+| | Periodic keyspace scan | Pub/sub keyspace notifications | This module |
 |---|---|---|---|
 | Consumer disconnect | no effect (stateless poll) | events during the gap are lost | entries wait in the stream |
 | Replay after restart | rescan everything | none | `XRANGE` / group from any ID |
@@ -85,8 +84,8 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
 
-The default filter is `expired` (the launch use case), so loading the module
-with no arguments captures only key expirations. See
+The default filter is `expired`, so loading the module with no arguments
+captures only key expirations. See
 [SPEC.md](SPEC.md) section 7 for the full filter grammar.
 
 The module registers no commands. Configuration is `CONFIG GET/SET
