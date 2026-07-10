@@ -131,6 +131,69 @@ impl TestCluster {
             .trim()
             .to_string()
     }
+
+    /// A node's cluster id (`CLUSTER MYID`).
+    pub fn node_id(&self, index: usize) -> String {
+        self.node_run(index, &["CLUSTER", "MYID"])
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    /// The hash slot a key maps to, as the cluster computes it.
+    pub fn keyslot(&self, key: &str) -> u16 {
+        self.node_run(0, &["CLUSTER", "KEYSLOT", key])
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// Migrate a single slot from node `from` to node `to`, moving any keys in
+    /// it, via the manual `CLUSTER SETSLOT` dance (redis-server-wrapper 0.4.3
+    /// exposes no reshard helper). After this returns, `to` owns the slot: the
+    /// source node's writes to keys in it get the local-refusal error, which is
+    /// what the module re-pins on (issue #46).
+    pub fn migrate_slot(&self, slot: u16, from: usize, to: usize) {
+        let from_id = self.node_id(from);
+        let to_id = self.node_id(to);
+        let slot_s = slot.to_string();
+        let to_port = self.node_ports()[to].to_string();
+
+        self.node_run(to, &["CLUSTER", "SETSLOT", &slot_s, "IMPORTING", &from_id])
+            .expect("mark importing on destination");
+        self.node_run(from, &["CLUSTER", "SETSLOT", &slot_s, "MIGRATING", &to_id])
+            .expect("mark migrating on source");
+
+        // Move every key in the slot to the destination.
+        loop {
+            let reply = self
+                .node_run(from, &["CLUSTER", "GETKEYSINSLOT", &slot_s, "100"])
+                .unwrap_or_default();
+            let keys: Vec<&str> = reply
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            if keys.is_empty() {
+                break;
+            }
+            let mut args: Vec<&str> =
+                vec!["MIGRATE", "127.0.0.1", &to_port, "", "0", "5000", "KEYS"];
+            args.extend(keys.iter().copied());
+            self.node_run(from, &args).expect("migrate keys");
+        }
+
+        // Assign the slot to the destination everywhere. Destination first so it
+        // claims the slot before the source relinquishes it; then the source;
+        // then the rest, though gossip would also spread it.
+        let mut order = vec![to, from];
+        order.extend((0..self.num_masters()).filter(|&i| i != to && i != from));
+        for i in order {
+            self.node_run(i, &["CLUSTER", "SETSLOT", &slot_s, "NODE", &to_id])
+                .expect("assign slot to destination");
+        }
+    }
 }
 
 /// Build the module cdylib once per test-binary run and return its path.
