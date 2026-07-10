@@ -68,7 +68,10 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
 
-The full filter grammar is in SPEC.md section 7.
+The full filter grammar is in SPEC.md section 7. The high-volume `@missed`
+(read misses) and `@new` (new-key) classes are opt-in and must be named at load
+time; a `*` or explicit `@missed`/`@new` in the load-time filter subscribes to
+them.
 
 Counters (forwarded, dropped and skipped by reason, active streams, gap
 markers) are exposed in a module INFO section: `INFO eventstream`. Module

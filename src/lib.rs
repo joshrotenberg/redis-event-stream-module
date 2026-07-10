@@ -36,6 +36,10 @@ use redis_module::{
 #[cfg(not(test))]
 use redis_module_macros::{flush_event_handler, info_command_handler};
 use std::collections::HashSet;
+#[cfg(not(test))]
+use std::ffi::CStr;
+#[cfg(not(test))]
+use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 /// Longest stream-key suffix the sanitizer will emit, in bytes (SPEC.md section 5).
@@ -70,6 +74,27 @@ static MARKERS_DIRTY: AtomicBool = AtomicBool::new(false);
 static LOGGED_XADD_ERROR: AtomicBool = AtomicBool::new(false);
 static LOGGED_OOM: AtomicBool = AtomicBool::new(false);
 static LOGGED_DEFER_ERROR: AtomicBool = AtomicBool::new(false);
+static LOGGED_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// Panics caught at the notification-callback FFI boundary (SPEC.md section 5).
+/// A nonzero value is a bug in this module; the counter exists so it surfaces
+/// in INFO instead of aborting the server.
+static HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
+
+/// The `MISSED`/`NEW` bits the module subscribed to at load. The keyspace
+/// subscription mask is fixed when the module loads and cannot be widened at
+/// runtime, so these classes are only capturable if the load-time filter asked
+/// for them; a runtime `CONFIG SET` that names an unsubscribed one is rejected
+/// (SPEC.md section 5). `EXTRA_UNINIT` until `init` subscribes: the load-time
+/// filter `set()` runs before `init` and must not reject.
+const EXTRA_UNINIT: i64 = i64::MIN;
+static SUBSCRIBED_EXTRA: AtomicI64 = AtomicI64::new(EXTRA_UNINIT);
+
+/// The `MISSED`/`NEW` bits a parsed filter explicitly names via `@class`
+/// tokens (not `*`, which adapts to whatever is subscribed).
+fn extra_classes_named(f: &ParsedFilter) -> NotifyEvent {
+    f.classes & (NotifyEvent::MISSED | NotifyEvent::NEW)
+}
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static MAXLEN: MaxlenConfig = MaxlenConfig {
@@ -103,7 +128,7 @@ impl ConfigurationValue<i64> for MaxlenConfig {
 }
 
 /// Parsed form of the `eventstream.events` filter (SPEC.md section 7 grammar).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ParsedFilter {
     star: bool,
     classes: NotifyEvent,
@@ -126,9 +151,9 @@ impl ParsedFilter {
     }
 }
 
-/// Map an `@class` token to its `NotifyEvent` bit. Only classes inside
-/// `NOTIFY_ALL` are accepted; `missed`/`new`/`loaded`/`trimmed` are not
-/// capturable in v0.1 (SPEC.md section 5).
+/// Map an `@class` token to its `NotifyEvent` bit (SPEC.md section 7 grammar).
+/// `missed` and `new` are outside `NOTIFY_ALL`; the module subscribes to them
+/// through its own raw subscription, gated at load (SPEC.md section 5).
 fn class_bit(class: &str) -> Option<NotifyEvent> {
     // Byte-exact lowercase literals per the SPEC.md section 7 grammar; no
     // case folding (`@HASH` is an unknown class token and is rejected).
@@ -143,6 +168,26 @@ fn class_bit(class: &str) -> Option<NotifyEvent> {
         "expired" => Some(NotifyEvent::EXPIRED),
         "evicted" => Some(NotifyEvent::EVICTED),
         "module" => Some(NotifyEvent::MODULE),
+        "missed" => Some(NotifyEvent::MISSED),
+        "new" => Some(NotifyEvent::NEW),
+        _ => None,
+    }
+}
+
+/// Classes the notification API defines but this module cannot turn into
+/// stream entries, each with the reason surfaced in the CONFIG SET error
+/// (SPEC.md section 5).
+fn uncapturable_class(class: &str) -> Option<&'static str> {
+    match class {
+        "loaded" => Some(
+            "'@loaded' fires only while the server loads its dataset, when stream \
+             writes are unavailable (the not-LOADING gate and the deferred-write \
+             API both refuse during load); it cannot be captured",
+        ),
+        "trimmed" => Some(
+            "'@trimmed' fires only during cluster reshard trimming, and cluster \
+             mode is unsupported (SPEC.md section 10); it cannot be captured",
+        ),
         _ => None,
     }
 }
@@ -166,9 +211,12 @@ fn parse_filter(s: &str) -> Result<ParsedFilter, RedisError> {
             match class_bit(class) {
                 Some(bit) => filter.classes |= bit,
                 None => {
+                    if let Some(reason) = uncapturable_class(class) {
+                        return Err(RedisError::String(reason.to_owned()));
+                    }
                     return Err(RedisError::String(format!(
                         "unknown event class '@{class}'"
-                    )))
+                    )));
                 }
             }
         } else if token.chars().any(char::is_whitespace) {
@@ -236,6 +284,28 @@ impl ConfigurationValue<RedisString> for FilterConfig {
     fn set(&self, ctx: &ConfigurationContext, val: RedisString) -> Result<(), RedisError> {
         let s = val.try_as_str()?;
         let parsed = parse_filter(s)?;
+        // At runtime (after init subscribed), reject naming a MISSED/NEW class
+        // the load-time subscription does not cover: the mask is fixed at load,
+        // so the event would never fire (SPEC.md section 5). Skipped during the
+        // load-time set, which runs before init and defines the subscription.
+        let subscribed = SUBSCRIBED_EXTRA.load(Ordering::Relaxed);
+        if subscribed != EXTRA_UNINIT {
+            let missing = extra_classes_named(&parsed).bits() & !(subscribed as i32);
+            if missing != 0 {
+                let mut names = Vec::new();
+                if missing & NotifyEvent::MISSED.bits() != 0 {
+                    names.push("@missed");
+                }
+                if missing & NotifyEvent::NEW.bits() != 0 {
+                    names.push("@new");
+                }
+                return Err(RedisError::String(format!(
+                    "{} must be enabled as a load-time module argument; the keyspace \
+                     subscription mask is fixed at load and cannot be widened at runtime",
+                    names.join(" and ")
+                )));
+            }
+        }
         *self.parsed.lock(ctx) = parsed;
         *self.raw.lock(ctx) = s.to_owned();
         Ok(())
@@ -582,8 +652,49 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     }
 }
 
-/// Module init: version and topology gates (SPEC.md sections 10 and 14), then
-/// log the effective configuration.
+/// Raw keyspace-notification callback, registered directly rather than through
+/// the wrapper's `event_handlers:` macro so the module can subscribe to
+/// `MISSED` and `NEW` (which the macro intersects away) and so the FFI boundary
+/// is panic-safe: a panic here is undefined behavior that would abort the
+/// server, and the wrapper's own handler `unwrap`s a non-UTF-8 event name into
+/// exactly such a panic (redismodule-rs#472). This decodes the name lossily and
+/// catches any panic, counting it instead (SPEC.md section 5).
+#[cfg(not(test))]
+extern "C" fn raw_keyspace_event(
+    ctx: *mut raw::RedisModuleCtx,
+    event_type: c_int,
+    event: *const c_char,
+    key: *mut raw::RedisModuleString,
+) -> c_int {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let context = Context::new(ctx);
+        let key_slice = RedisString::string_as_slice(key);
+        let event_name = String::from_utf8_lossy(unsafe { CStr::from_ptr(event) }.to_bytes());
+        on_keyspace_event(
+            &context,
+            NotifyEvent::from_bits_truncate(event_type),
+            &event_name,
+            key_slice,
+        );
+    }));
+    if outcome.is_err() {
+        HANDLER_PANICS.fetch_add(1, Ordering::Relaxed);
+        if LOGGED_PANIC
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            redis_module::logging::log_warning(
+                "eventstream: notification handler panicked (caught); event dropped",
+            );
+        }
+    }
+    raw::Status::Ok as c_int
+}
+
+/// Module init: version and topology gates (SPEC.md sections 10 and 14), the
+/// keyspace subscription, then log the effective configuration. Compiled out
+/// of unit-test builds along with the raw callback it registers.
+#[cfg(not(test))]
 fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     match ctx.get_redis_version() {
         Ok(v) => {
@@ -611,12 +722,42 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
         return Status::Err;
     }
 
+    // Subscribe to keyspace events. NOTIFY_ALL always, plus MISSED and NEW only
+    // when the load-time filter names them (a `*` filter counts): both classes
+    // fire on high-volume paths (every read miss, every new key), so subscribing
+    // to them unconditionally would tax deployments that do not want them
+    // (SPEC.md section 5). The mask is fixed here; FILTER::set rejects widening
+    // it at runtime.
+    let load_filter = FILTER.parsed.lock(ctx).clone();
+    let mut extra = NotifyEvent::empty();
+    if load_filter.star || load_filter.classes.contains(NotifyEvent::MISSED) {
+        extra |= NotifyEvent::MISSED;
+    }
+    if load_filter.star || load_filter.classes.contains(NotifyEvent::NEW) {
+        extra |= NotifyEvent::NEW;
+    }
+    let mask = NotifyEvent::ALL | extra;
+    let rc = unsafe {
+        raw::RedisModule_SubscribeToKeyspaceEvents.unwrap()(
+            ctx.ctx,
+            mask.bits(),
+            Some(raw_keyspace_event),
+        )
+    };
+    if rc != raw::REDISMODULE_OK as i32 {
+        ctx.log_warning("eventstream: failed to subscribe to keyspace events; refusing to load");
+        return Status::Err;
+    }
+    SUBSCRIBED_EXTRA.store(extra.bits() as i64, Ordering::Relaxed);
+
     let prefix = PREFIX.value.lock(ctx).clone();
     let filter = FILTER.raw.lock(ctx).clone();
     ctx.log_notice(&format!(
-        "eventstream loaded: stream-prefix='{prefix}' events='{filter}' maxlen={} enabled={}",
+        "eventstream loaded: stream-prefix='{prefix}' events='{filter}' maxlen={} \
+         enabled={} extra-classes={:?}",
         MAXLEN.value.load(Ordering::Relaxed),
         ENABLED.load(Ordering::Relaxed),
+        extra,
     ));
 
     // Record the loaded gap marker as pending; a direct write here would
@@ -707,6 +848,7 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
         .field("skipped_invalid", SKIPPED_INVALID.load(Ordering::Relaxed))?
         .field("active_streams", ACTIVE_STREAMS.load(Ordering::Relaxed))?
         .field("control_markers", CONTROL_MARKERS.load(Ordering::Relaxed))?
+        .field("handler_panics", HANDLER_PANICS.load(Ordering::Relaxed))?
         .field("last_error_time", LAST_ERROR_TIME.load(Ordering::Relaxed))?
         .build_section()?
         .build_info()?;
@@ -736,7 +878,7 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 12] = [
+    let pairs: [(&str, i64); 13] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         ("dropped", dropped as i64),
@@ -765,6 +907,10 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
         (
             "control_markers",
             CONTROL_MARKERS.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "handler_panics",
+            HANDLER_PANICS.load(Ordering::Relaxed) as i64,
         ),
         (
             "last_error_time",
@@ -817,9 +963,9 @@ redis_module! {
         ["eventstream.stats", cmd_stats, "readonly fast", 0, 0, 0, ""],
         ["eventstream.streams", cmd_streams, "readonly", 0, 0, 0, ""],
     ],
-    event_handlers: [
-        [@ALL: on_keyspace_event],
-    ],
+    // No event_handlers: the module subscribes to keyspace events itself in
+    // init, via a raw callback, so it can request MISSED and NEW (which the
+    // macro intersects away) and make the FFI boundary panic-safe.
     configurations: [
         i64: [
             ["maxlen", &MAXLEN, 10000, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
@@ -883,9 +1029,39 @@ mod tests {
         assert!(parse_filter("expired,").is_err());
         assert!(parse_filter("expired,,del").is_err());
         assert!(parse_filter("@hsah").is_err());
-        assert!(parse_filter("@missed").is_err());
-        assert!(parse_filter("@new").is_err());
         assert!(parse_filter("foo bar").is_err());
+    }
+
+    #[test]
+    fn filter_missed_and_new_classes_parse() {
+        let f = parse_filter("@missed,@new").unwrap();
+        assert!(f.matches(NotifyEvent::MISSED, "keymiss"));
+        assert!(f.matches(NotifyEvent::NEW, "new"));
+        assert!(!f.matches(NotifyEvent::STRING, "set"));
+        assert_eq!(
+            extra_classes_named(&f),
+            NotifyEvent::MISSED | NotifyEvent::NEW
+        );
+    }
+
+    #[test]
+    fn star_does_not_name_extra_classes() {
+        // `*` matches everything delivered but does not force MISSED/NEW into
+        // the subscription mask; only explicit tokens do.
+        let f = parse_filter("*").unwrap();
+        assert_eq!(extra_classes_named(&f), NotifyEvent::empty());
+    }
+
+    #[test]
+    fn uncapturable_classes_rejected_with_reason() {
+        for (token, needle) in [("@loaded", "loads its dataset"), ("@trimmed", "reshard")] {
+            let err = parse_filter(token).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(needle),
+                "reject reason for {token} should mention {needle}, got: {msg}"
+            );
+        }
     }
 
     #[test]
