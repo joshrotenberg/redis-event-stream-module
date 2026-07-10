@@ -323,6 +323,13 @@ fn enabled_changed(config_ctx: &ConfigurationContext, _name: &str, _val: &'stati
     let now = ENABLED.load(Ordering::Relaxed);
     let before = LAST_ENABLED.swap(now, Ordering::Relaxed);
     if before != now {
+        // The ConfigurationContext cannot log through a Context; the
+        // module-wide logger works without one (SPEC.md section 13: toggles
+        // log at notice).
+        redis_module::logging::log_notice(format!(
+            "eventstream: enabled set to {}",
+            if now { "yes" } else { "no" }
+        ));
         record_pending_marker(config_ctx, if now { "enabled" } else { "disabled" });
     }
 }
@@ -399,18 +406,24 @@ fn drain_pending_markers(ctx: &Context) {
     }
     let control_stream = format!("{}#control", PREFIX.value.lock(ctx).as_str());
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+    let dropped_count = drained.len() as u64;
     let status = ctx.add_post_notification_job(move |ctx| {
         for action in &drained {
             write_marker(ctx, &control_stream, action, maxlen);
         }
     });
     if !matches!(status, Status::Ok) {
+        // One increment per dropped marker (SPEC.md section 9: marker-write
+        // failures follow the same drop-counter policy as mirrored entries).
         count_drop(
             ctx,
             &DROPPED_DEFER_ERROR,
             &LOGGED_DEFER_ERROR,
             "failed to register gap-marker job; markers dropped",
         );
+        if dropped_count > 1 {
+            DROPPED_DEFER_ERROR.fetch_add(dropped_count - 1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -499,6 +512,14 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
         args.push(&b"db"[..]);
         args.push(db_s.as_bytes());
 
+        // Per-event trace (SPEC.md section 13); the server filters by loglevel.
+        ctx.log_debug(&format!(
+            "eventstream: {} key={} -> {}",
+            event_owned,
+            String::from_utf8_lossy(&key_owned),
+            stream
+        ));
+
         let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
         match res {
             Ok(_) => {
@@ -580,11 +601,17 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     // Record the loaded gap marker as pending; a direct write here would
     // abort startup loads when the RDB later loads a persisted control stream
     // (SPEC.md section 9 delivery mechanics). Clear anything queued by
-    // LoadConfigs-time transitions first: the fresh-load state supersedes them.
+    // LoadConfigs-time transitions first: the fresh-load state supersedes
+    // them. If the effective config starts disabled (enabled no as a module
+    // arg), re-queue the disabled state after loaded, otherwise a bare loaded
+    // marker would close the capture gap while every event is being dropped.
     {
         let mut pending = PENDING_MARKERS.lock(ctx);
         pending.clear();
         pending.push("loaded");
+        if !ENABLED.load(Ordering::Relaxed) {
+            pending.push("disabled");
+        }
     }
     MARKERS_DIRTY.store(true, Ordering::Relaxed);
 
@@ -597,8 +624,21 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
 fn deinit(ctx: &Context) -> Status {
     let flags = ctx.get_flags();
     if flags.contains(ContextFlags::MASTER) && !flags.contains(ContextFlags::LOADING) {
+        // Drain pending markers and clear the dirty flag BEFORE any direct
+        // write: the write's own xadd notification re-enters the callback
+        // during OnUnload (Redis does not suppress re-entry there), and a
+        // step-0 drain at that point would register a post-notification job
+        // that fires after the module is dlclosed, a use-after-free. With the
+        // flag cleared, the re-entrant callback falls through to the prefix
+        // guard. Writing the drained markers directly here also preserves
+        // them instead of orphaning them at unload.
+        let drained: Vec<&'static str> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
+        MARKERS_DIRTY.store(false, Ordering::Relaxed);
         let control_stream = format!("{}#control", PREFIX.value.lock(ctx).as_str());
         let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+        for action in drained {
+            write_marker(ctx, &control_stream, action, maxlen);
+        }
         write_marker(ctx, &control_stream, "unloading", maxlen);
     }
     ctx.log_notice(&format!(
