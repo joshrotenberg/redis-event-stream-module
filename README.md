@@ -126,7 +126,11 @@ Wait for the key to expire, then:
 > XREAD COUNT 10 STREAMS events:expired 0
 ```
 
-See `demo.sh` for a scripted end-to-end run.
+See `demo.sh` for a scripted end-to-end run. Against a server that already has
+the module loaded (any host, all arguments pass through to `redis-cli`),
+`./demo-preflight.sh -h host -p port` verifies reachability, module presence,
+config, an end-to-end probe expiration, discovery, and counters, and exits
+nonzero on any failure.
 
 ## Documentation
 
