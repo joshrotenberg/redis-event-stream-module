@@ -13,3 +13,18 @@ publish = false
 git_tag_enable = true
 git_release_enable = true
 changelog_update = true
+git_release_body = """
+{{ changelog }}
+
+## Install
+
+Download the module for your platform below, verify the checksum, and load it:
+
+```
+shasum -a 256 -c redis-event-stream-module-<version>-<target>.<ext>.sha256
+redis-server --loadmodule ./redis-event-stream-module-<version>-<target>.<ext>
+```
+
+Requires Redis 7.2+ or Valkey 8.x. Artifacts are attached by CI within a few
+minutes of the release being published.
+"""

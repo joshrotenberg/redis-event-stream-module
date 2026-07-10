@@ -528,7 +528,7 @@ The primary need is durable expiration events. v0.1 is the smallest module that 
 - Gap-marker control stream at `<stream-prefix>#control`: markers on load, enable, disable, and `MODULE UNLOAD`, with `action` and `module-version` fields, delivered via the pending-marker mechanism (section 9).
 - Refuse load on Redis below 7.2 and on cluster.
 - Drop/skip counters, one module INFO section, plain logging per section 13.
-- Zero custom commands.
+- Zero custom commands in the original v0.1 cut; the v0.1.0 release additionally carries the two readonly introspection commands and the persistent registry added just after (section 8).
 - Docs: build and quickstart (below), the expired end-to-end example (section 9), consumer patterns, loss windows.
 
 ### Build and quickstart

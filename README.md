@@ -3,8 +3,11 @@
 A Redis module that mirrors keyspace notifications into per-event Redis
 Streams, so ephemeral events become a durable, replayable log.
 
-Status: pre-alpha. [SPEC.md](SPEC.md) is the authoritative design; the current
-code is a working baseline that predates parts of it.
+Status: early release. The code implements the full v0.1 scope of
+[SPEC.md](SPEC.md) (the authoritative design), plus the introspection commands
+added just after it, and is exercised by an integration suite that CI runs
+against Redis 7.2, 7.4, 8.x, and Valkey. Interfaces may still change before
+1.0.
 
 ## Why
 
@@ -101,7 +104,20 @@ Capture-gap boundaries are machine-readable: the module writes markers
 `<prefix>#control`, so consumers can bound reconciliation to known gap windows.
 See SPEC.md section 9.
 
-## Build and run
+## Install and run
+
+Prebuilt modules for Linux (x86_64, aarch64) and macOS (aarch64) are attached
+to each [release](https://github.com/joshrotenberg/redis-event-stream-module/releases),
+with sha256 checksums:
+
+```sh
+curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so
+curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so.sha256
+shasum -a 256 -c redis-event-stream-module-<version>-linux-x86_64.so.sha256
+redis-server --loadmodule ./redis-event-stream-module-<version>-linux-x86_64.so
+```
+
+Or build from source:
 
 ```sh
 cargo build --release
@@ -113,18 +129,15 @@ to be enabled: module subscribers receive keyspace events regardless of that
 setting, which only gates pub/sub delivery. Verified empirically on Redis 8.8
 and documented in SPEC.md.
 
-Quick check in `redis-cli`:
+Quick check in `redis-cli` (the default filter captures expirations only):
 
 ```
 > SET foo bar PX 100
-> XREAD COUNT 10 STREAMS events:set 0
-```
-
-Wait for the key to expire, then:
-
-```
+> GET foo          (after ~100ms; forces lazy expiry)
 > XREAD COUNT 10 STREAMS events:expired 0
 ```
+
+The expired event for `foo` is in the stream, durable and replayable.
 
 See `demo.sh` for a scripted end-to-end run. Against a server that already has
 the module loaded (any host, all arguments pass through to `redis-cli`),
@@ -179,23 +192,23 @@ nothing; S2: `events=set`, so every `SET` is captured):
 
 | Scenario | ops/sec | vs S0 | p50 (ms) | p99 (ms) |
 |---|---|---|---|---|
-| S0 baseline (no module) | 124969 | - | 0.223 | 0.407 |
-| S1 loaded, no capture | 124938 | -0.0% | 0.223 | 0.415 |
-| S2 loaded, full capture | 111086 | -11.1% | 0.311 | 0.623 |
+| S0 baseline (no module) | 133262 | - | 0.199 | 0.399 |
+| S1 loaded, no capture | 133262 | +0.0% | 0.207 | 0.407 |
+| S2 loaded, full capture | 114260 | -14.3% | 0.335 | 0.623 |
 
 The gate tax (S1) is within noise: a deployment that loads the module but does
 not match the workload pays effectively nothing. Full capture (S2) costs about
-11% throughput and roughly doubles p99 latency on this workload, well inside the
-worst case. Capture cost scales with captured write volume, and the default
+14% throughput and under twice the p99 latency on this workload, well inside
+the worst case. Capture cost scales with captured write volume, and the default
 filter captures only expirations, so a typical deployment sits between S1 and
 S2, near S1.
 
 Method: median of 3 runs, `redis-benchmark -t set -n 1000000 -c 50 --threads 4
--d 64 -r 100000` per run. These figures are indicative, measured on a dev laptop
-(Apple M4 Pro, 24 GB, macOS 26.5.2, Redis 8.8.0) under light use; treat them as a
-shape, not a spec. Re-run `bench/run.sh` on a quiet, representative host for
-authoritative numbers. SPEC.md section 11 specifies `memtier_benchmark`; the
-script uses `redis-benchmark` because it ships with every Redis and Valkey.
+-d 64 -r 100000` per run, on Apple M4 Pro (14 cores, 24 GB, macOS 26.5.2)
+against Redis 8.8.0. Numbers vary with hardware and workload; re-run
+`bench/run.sh` on your own host to reproduce. SPEC.md section 11 specifies
+`memtier_benchmark`; the script uses `redis-benchmark` because it ships with
+every Redis and Valkey.
 
 Mass-expiry storms (a large backlog of keys expiring at once) are the worst case:
 each expiration becomes an `XADD` on the main thread, paced by the server's
