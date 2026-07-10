@@ -383,7 +383,9 @@ name = "redis-event-stream-module"
 version = "0.1.0"
 dependencies = [
  "lazy_static",
+ "linkme",
  "redis-module",
+ "redis-module-macros",
 ]
 
 [[package]]
@@ -407,6 +409,19 @@ dependencies = [
  "regex",
  "serde",
  "strum_macros",
+]
+
+[[package]]
+name = "redis-module-macros"
+version = "99.99.99"
+source = "git+https://github.com/RedisLabsModules/redismodule-rs?tag=v2.1.3#3ff28c8c2987ae07106025bcc8cb4c489094d10b"
+dependencies = [
+ "common",
+ "proc-macro2",
+ "quote 1.0.46",
+ "serde",
+ "serde_syn",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -508,6 +523,18 @@ dependencies = [
  "proc-macro2",
  "quote 1.0.46",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "serde_syn"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0ca8adcbd02c69d24859f7f0c54ede988e4509c8767c8a3185ec0eb158281c"
+dependencies = [
+ "bitflags 1.3.2",
+ "proc-macro2",
+ "serde",
+ "syn 1.0.109",
 ]
 
 [[package]]
