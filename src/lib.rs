@@ -93,6 +93,10 @@ static PER_NODE: AtomicBool = AtomicBool::new(false);
 /// (SPEC.md section 5). Distinct from the write-failure drops.
 static DROPPED_NO_OWNED_SLOT: AtomicU64 = AtomicU64::new(0);
 static LOGGED_NO_OWNED_SLOT: AtomicBool = AtomicBool::new(false);
+/// Times the node re-pinned to a new owned slot after its pinned slot migrated
+/// away (issue #46). Each re-pin writes a `repinned` gap marker and changes the
+/// destination stream name; a nonzero value records reshard activity.
+static REPINS: AtomicU64 = AtomicU64::new(0);
 /// Redis has 16384 hash slots.
 const SLOT_COUNT: u32 = 16384;
 /// The hash tag this node pins its streams to in per-node cluster mode (issue
@@ -206,8 +210,9 @@ fn uncapturable_class(class: &str) -> Option<&'static str> {
              API both refuse during load); it cannot be captured",
         ),
         "trimmed" => Some(
-            "'@trimmed' fires only during cluster reshard trimming, and cluster \
-             mode is unsupported (SPEC.md section 10); it cannot be captured",
+            "'@trimmed' fires during cluster reshard trimming, on the source node \
+             for keys leaving in the migration window; it is reshard bookkeeping, \
+             not a user keyspace change, and is not captured (SPEC.md section 10)",
         ),
         _ => None,
     }
@@ -717,6 +722,111 @@ fn drain_pending_markers(ctx: &Context) {
     }
 }
 
+/// True if an `XADD` failure is the cluster local-refusal error, which in
+/// per-node mode means the node no longer owns the pinned tag's slot (it
+/// migrated away in a reshard, issue #46). The full text is "Attempted to
+/// access a non local key in a cluster node" (observed empirically, #19); match
+/// a stable substring so a leading error code does not matter.
+fn is_slot_migrated(msg: &str) -> bool {
+    msg.contains("non local key")
+}
+
+/// Classification of one mirrored-write attempt, so the caller can decide
+/// whether to re-pin and retry.
+enum MirrorOutcome {
+    /// The entry was written (and its stream registered on first sight).
+    Written,
+    /// The pinned slot is no longer local: re-pin to a new owned slot and retry.
+    SlotMigrated,
+    /// Refused under `maxmemory`.
+    Oom(String),
+    /// Any other `XADD` failure.
+    Failed(String),
+}
+
+/// Write one mirrored entry to `<prefix><seg><suffix>`, and on the first write
+/// to a stream register it in `<prefix><seg>#streams`. Returns a classified
+/// outcome; the caller counts drops and, on [`MirrorOutcome::SlotMigrated`],
+/// re-pins. Runs only in a write-safe context (a post-notification job).
+#[allow(clippy::too_many_arguments)]
+fn mirror_entry(
+    ctx: &Context,
+    prefix: &str,
+    seg: &str,
+    suffix: &str,
+    event: &[u8],
+    key: &[u8],
+    db: &str,
+    maxlen: i64,
+) -> MirrorOutcome {
+    let stream = format!("{prefix}{seg}{suffix}");
+    let registry = format!("{prefix}{seg}#streams");
+
+    let maxlen_s = maxlen.to_string();
+    let mut args: Vec<&[u8]> = Vec::with_capacity(12);
+    args.push(stream.as_bytes());
+    if maxlen > 0 {
+        args.push(&b"MAXLEN"[..]);
+        args.push(&b"~"[..]);
+        args.push(maxlen_s.as_bytes());
+    }
+    args.push(&b"*"[..]);
+    args.push(&b"event"[..]);
+    args.push(event);
+    args.push(&b"key"[..]);
+    args.push(key);
+    args.push(&b"db"[..]);
+    args.push(db.as_bytes());
+
+    // Per-event trace (SPEC.md section 13); the server filters by loglevel. Key
+    // bytes are ASCII-escaped: the wrapper's logger builds a CString and panics
+    // across the FFI boundary on interior NUL, so raw key bytes (which may
+    // contain NUL) must never reach it.
+    ctx.log_debug(&format!(
+        "eventstream: {} key={} -> {}",
+        String::from_utf8_lossy(event),
+        key.escape_ascii(),
+        stream
+    ));
+
+    let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
+    match res {
+        Ok(_) => {
+            FORWARDED.fetch_add(1, Ordering::Relaxed);
+            // First write to a destination stream: register it in the persistent
+            // set at `<prefix><seg>#streams` (replicated, so EVENTSTREAM.STREAMS
+            // survives restart and works on replicas) and count it. KNOWN_STREAMS
+            // is the in-process dedupe cache; it is cleared on flush so a FLUSHALL
+            // that deleted the registry rebuilds it on the next write. The
+            // registry key is under the prefix, so its own SADD notification is
+            // dropped by the feedback guard.
+            let mut known = KNOWN_STREAMS.lock(ctx);
+            if !known.contains(&stream) {
+                let sadd: CallResult = ctx.call_ext(
+                    "SADD",
+                    &xadd_call_options(),
+                    &[registry.as_bytes(), stream.as_bytes()][..],
+                );
+                if sadd.is_ok() {
+                    known.insert(stream.clone());
+                    ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            MirrorOutcome::Written
+        }
+        Err(e) => {
+            let msg = e.to_utf8_string().unwrap_or_default();
+            if msg.starts_with("OOM") {
+                MirrorOutcome::Oom(format!("XADD to '{stream}' refused under maxmemory: {msg}"))
+            } else if is_slot_migrated(&msg) {
+                MirrorOutcome::SlotMigrated
+            } else {
+                MirrorOutcome::Failed(format!("XADD to '{stream}' failed: {msg}"))
+            }
+        }
+    }
+}
+
 /// Keyspace notification callback. Runs with the GIL held; keyspace writes are
 /// unsafe here, so the XADD is deferred to a post-notification job. Gate order
 /// follows the SPEC.md section 4 diagram.
@@ -787,6 +897,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 );
                 return;
             }
+            let db_s = db.to_string();
 
             // In per-node cluster mode, `{tag}` co-locates this node's streams on
             // an owned slot; empty otherwise. `None` means no owned slot yet.
@@ -797,79 +908,66 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                     return;
                 }
             };
-            let stream = format!("{prefix_owned}{seg}{suffix}");
-            let registry = format!("{prefix_owned}{seg}#streams");
-
-            // XADD <stream> [MAXLEN ~ <n>] * event <event> key <key> db <db>
-            let maxlen_s = maxlen.to_string();
-            let db_s = db.to_string();
-            let mut args: Vec<&[u8]> = Vec::with_capacity(12);
-            args.push(stream.as_bytes());
-            if maxlen > 0 {
-                args.push(&b"MAXLEN"[..]);
-                args.push(&b"~"[..]);
-                args.push(maxlen_s.as_bytes());
-            }
-            args.push(&b"*"[..]);
-            args.push(&b"event"[..]);
-            args.push(event_owned.as_bytes());
-            args.push(&b"key"[..]);
-            args.push(key_owned.as_slice());
-            args.push(&b"db"[..]);
-            args.push(db_s.as_bytes());
-
-            // Per-event trace (SPEC.md section 13); the server filters by
-            // loglevel. Key bytes are ASCII-escaped: the wrapper's logger builds
-            // a CString and panics across the FFI boundary on interior NUL, so
-            // raw key bytes (which may contain NUL) must never reach it.
-            ctx.log_debug(&format!(
-                "eventstream: {} key={} -> {}",
-                event_owned,
-                key_owned.escape_ascii(),
-                stream
-            ));
-
-            let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
-            match res {
-                Ok(_) => {
-                    FORWARDED.fetch_add(1, Ordering::Relaxed);
-                    // First write to a destination stream: register it in the
-                    // persistent set at `<prefix>#streams` (replicated, so
-                    // EVENTSTREAM.STREAMS survives restart and works on replicas)
-                    // and count it. KNOWN_STREAMS is the in-process dedupe cache;
-                    // it is cleared on flush (see the flush handler) so a FLUSHALL
-                    // that deleted the registry rebuilds it on the next write. The
-                    // registry key is under the prefix, so its own SADD
-                    // notification is dropped by the feedback guard.
-                    let mut known = KNOWN_STREAMS.lock(ctx);
-                    if !known.contains(&stream) {
-                        let sadd: CallResult = ctx.call_ext(
-                            "SADD",
-                            &xadd_call_options(),
-                            &[registry.as_bytes(), stream.as_bytes()][..],
-                        );
-                        if sadd.is_ok() {
-                            known.insert(stream.clone());
-                            ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+            match mirror_entry(
+                ctx,
+                &prefix_owned,
+                &seg,
+                &suffix,
+                event_owned.as_bytes(),
+                &key_owned,
+                &db_s,
+                maxlen,
+            ) {
+                MirrorOutcome::Written => {}
+                MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+                MirrorOutcome::Failed(msg) => {
+                    count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
                 }
-                Err(e) => {
-                    let msg = e.to_utf8_string().unwrap_or_default();
-                    if msg.starts_with("OOM") {
-                        count_drop(
-                            ctx,
-                            &DROPPED_OOM,
-                            &LOGGED_OOM,
-                            &format!("XADD to '{stream}' refused under maxmemory: {msg}"),
-                        );
-                    } else {
-                        count_drop(
+                MirrorOutcome::SlotMigrated => {
+                    // The pinned slot migrated away in a reshard (issue #46).
+                    // Clear the cached tag, re-select a currently owned slot,
+                    // mark the discontinuity, and retry the entry once on the new
+                    // tag so this event is captured rather than dropped.
+                    *NODE_TAG.lock().unwrap() = None;
+                    REPINS.fetch_add(1, Ordering::Relaxed);
+                    let seg2 = match tag_segment(ctx) {
+                        Some(s) => s,
+                        None => {
+                            // No slot owned now; capture resumes on a later event
+                            // once this node owns a slot again.
+                            count_no_slot_drop(ctx);
+                            return;
+                        }
+                    };
+                    // A `repinned` gap marker on the new control stream delimits
+                    // the window where this node's stream name changed
+                    // (SPEC.md section 9).
+                    write_marker(
+                        ctx,
+                        &format!("{prefix_owned}{seg2}#control"),
+                        "repinned",
+                        maxlen,
+                    );
+                    match mirror_entry(
+                        ctx,
+                        &prefix_owned,
+                        &seg2,
+                        &suffix,
+                        event_owned.as_bytes(),
+                        &key_owned,
+                        &db_s,
+                        maxlen,
+                    ) {
+                        MirrorOutcome::Written => {}
+                        MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+                        // Still refused (slot in flux) or another failure: the
+                        // event is a counted drop, delimited by the marker above.
+                        MirrorOutcome::SlotMigrated | MirrorOutcome::Failed(_) => count_drop(
                             ctx,
                             &DROPPED_XADD_ERROR,
                             &LOGGED_XADD_ERROR,
-                            &format!("XADD to '{stream}' failed: {msg}"),
-                        );
+                            "XADD refused after re-pin; entry dropped in migration window",
+                        ),
                     }
                 }
             }
@@ -1104,6 +1202,7 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
             "dropped_no_owned_slot",
             DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed),
         )?
+        .field("repins", REPINS.load(Ordering::Relaxed))?
         .field("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64)?
         .field(
             "cluster_pinned_tag",
@@ -1138,7 +1237,7 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 15] = [
+    let pairs: [(&str, i64); 16] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         ("dropped", dropped as i64),
@@ -1176,6 +1275,7 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
             "dropped_no_owned_slot",
             DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed) as i64,
         ),
+        ("repins", REPINS.load(Ordering::Relaxed) as i64),
         ("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64),
         (
             "last_error_time",

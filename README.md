@@ -156,9 +156,11 @@ failure mode).
 - Cluster mode: the module refuses to load by default. Setting
   `eventstream.cluster-streams per-node` enables per-node capture, where each
   master pins its streams to a slot it owns via a shared hash tag; single-shard
-  clusters are the safest deployment. Dynamic re-pinning after a reshard is not
-  implemented yet, so a slot migration stops capture on the affected node until
-  reload (SPEC.md section 10; design in
+  clusters are the safest deployment. After a reshard that moves a node's pinned
+  slot, the node re-pins to a slot it still owns and resumes capture on a new
+  tag (the old entries move with the slot to its new owner); events refused
+  during the brief migration window are counted drops delimited by gap markers
+  (SPEC.md section 10; design in
   [docs/cluster-design.md](docs/cluster-design.md)).
 
 ## Performance
@@ -202,8 +204,8 @@ drain-latency profiling and CI-gated regression thresholds are future work
 - [docs/loss-windows.md](docs/loss-windows.md): every way an event can be
   lost, how to detect it, and how to reconcile a gap window without a full
   scan.
-- [docs/cluster-design.md](docs/cluster-design.md): proposed cluster support
-  (not implemented).
+- [docs/cluster-design.md](docs/cluster-design.md): the cluster per-node design
+  (refuse-by-default, slot-pinned per-node tags, re-pinning on reshard).
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
