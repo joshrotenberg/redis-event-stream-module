@@ -97,7 +97,7 @@ claimed:
 | Redis 7.2 | 7.2.8 (minimum supported) |
 | Redis 7.4 | 7.4.5 |
 | Redis 8.x | 8.8.0 |
-| Valkey 8.x | 8.2.0 |
+| Valkey 8.x | 8.1.6 |
 
 Servers below 7.2 are not supported: the module fails to load (see SPEC.md
 section 14 for the exact failure mode).

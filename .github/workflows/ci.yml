@@ -43,7 +43,7 @@ jobs:
             version: 8.8.0
           - name: valkey-8
             kind: valkey
-            version: 8.2.0
+            version: 8.1.6
     name: integration (${{ matrix.name }})
     env:
       SERVER_DIR: ${{ github.workspace }}/.server/${{ matrix.name }}
