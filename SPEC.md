@@ -110,13 +110,15 @@ Escaping the prefix is impossible by construction: the destination is plain conc
 
 ### Discovery
 
-v0.1 discovery is deterministic naming. With the default configuration the streams are `events:expired` plus the control stream `events:#control` (section 9). For wider filters, the documented fallback is:
+Discovery has two paths. The `EVENTSTREAM.STREAMS` command (section 8) returns every destination stream registered since the registry existed, read live from a persistent set at `<prefix>#streams`. The set is SADD-ed on the first write to each stream through the same replicated, OOM-checked call as the mirrored entry, so it survives restart under RDB or AOF and is present on replicas; an in-process cache suppresses the SADD on subsequent writes and is cleared on flush so a `FLUSHALL` that deleted the set rebuilds it on the next capture. The registry is an append-only log of stream names ever written, not a liveness check: a listed stream may since have been trimmed to empty or deleted.
+
+Deterministic naming still works when the filter is known. With the default configuration the streams are `events:expired` plus the control stream `events:#control` (section 9). A `SCAN` fallback also works:
 
 ```
 SCAN 0 MATCH events:* TYPE stream
 ```
 
-(The prefix validation rules in section 7 reject glob metacharacters precisely so this pattern never needs escaping.) The pattern also matches the control stream; consumers enumerating event streams should skip keys under `<prefix>#`, which is safe because the sanitizer can never emit `#` in an event-derived name. A persistent registry set and an `EVENTSTREAM.STREAMS` command are deferred to Future work.
+(The prefix validation rules in section 7 reject glob metacharacters precisely so this pattern never needs escaping.) The pattern also matches the control and registry keys; consumers enumerating event streams should skip keys under `<prefix>#`, which is safe because the sanitizer can never emit `#` in an event-derived name.
 
 ### Namespace ownership
 
@@ -236,9 +238,16 @@ Since post-notification jobs run atomically within the triggering command and `C
 
 ## 8. Commands
 
-v0.1 registers no commands. Everything that changes behavior goes through `CONFIG SET`; everything observable is exposed through the module INFO section (section 13) and standard Redis commands on the destination streams (`XLEN`, `XRANGE`, `XINFO STREAM`, `XINFO GROUPS`). This keeps one source of truth for behavior, requires no arity or ACL story, and works from redis.conf and orchestration tooling with no module-specific verbs.
+Behavior changes go through `CONFIG SET`; nothing observable requires a module command, since the INFO section (section 13) and standard stream commands (`XLEN`, `XRANGE`, `XINFO STREAM`, `XINFO GROUPS`) cover it. v0.1 shipped with no commands on that basis.
 
-`EVENTSTREAM.STATS` and `EVENTSTREAM.STREAMS` (a stats echo command and a stream-discovery command backed by a persistent registry set) are specified in Future work.
+Two readonly, keyless introspection commands were added after v0.1:
+
+| Command | Reply | Flags |
+|---|---|---|
+| `EVENTSTREAM.STATS` | The section 13 counters as a flat array of field/value pairs, agreeing with the INFO section at call time | `readonly fast`, keyless |
+| `EVENTSTREAM.STREAMS` | The registered destination streams (section 5 Discovery), read live from `<prefix>#streams` | `readonly`, keyless (O(N) in registered streams, so not `fast`) |
+
+`EVENTSTREAM.STREAMS` reads a set that lives in database 0; the command selects database 0 for the read and restores the caller's database before returning. Both commands touch only keys under the prefix (or no keys), so a least-privilege consumer ACL that already grants `~<prefix>*` covers them; grant the `eventstream.*` commands explicitly if the ACL restricts by command.
 
 ## 9. Delivery semantics
 

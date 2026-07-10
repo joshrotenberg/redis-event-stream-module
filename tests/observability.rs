@@ -8,7 +8,7 @@ use redis::Commands;
 use std::time::Duration;
 
 #[test]
-fn info_section_has_all_fields_and_stats_command_is_gone() {
+fn info_section_has_all_fields() {
     let s = TestServer::start(&[]);
     let mut c = s.conn();
 
@@ -28,9 +28,6 @@ fn info_section_has_all_fields_and_stats_command_is_gone() {
     ] {
         let _ = info_field(&mut c, f); // panics if missing
     }
-
-    let res: Result<redis::Value, _> = redis::cmd("EVENTSTREAM.STATS").query(&mut c);
-    assert!(res.is_err(), "the stats command must not exist");
 }
 
 #[test]
