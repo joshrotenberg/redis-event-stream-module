@@ -53,7 +53,35 @@ static LOGGED_OOM: AtomicBool = AtomicBool::new(false);
 static LOGGED_DEFER_ERROR: AtomicBool = AtomicBool::new(false);
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
-static MAXLEN: AtomicI64 = AtomicI64::new(10_000);
+static MAXLEN: MaxlenConfig = MaxlenConfig {
+    value: AtomicI64::new(10_000),
+};
+
+/// `eventstream.maxlen` config binding. Redis enforces the registered 0 to
+/// i64::MAX range on CONFIG SET and redis.conf paths, but a module-arg value
+/// becomes the registered default and bypasses that boundary check entirely
+/// (verified against the wrapper at v2.1.3 and redis 7.2 module.c/config.c),
+/// so `set()` re-validates: a negative value would silently disable trimming,
+/// the module's only memory bound. Rejection aborts the load like any other
+/// malformed module arg.
+struct MaxlenConfig {
+    value: AtomicI64,
+}
+
+impl ConfigurationValue<i64> for MaxlenConfig {
+    fn get(&self, _ctx: &ConfigurationContext) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+    fn set(&self, _ctx: &ConfigurationContext, val: i64) -> Result<(), RedisError> {
+        if val < 0 {
+            return Err(RedisError::String(format!(
+                "maxlen must be 0 (trimming disabled) or positive, got {val}"
+            )));
+        }
+        self.value.store(val, Ordering::Relaxed);
+        Ok(())
+    }
+}
 
 /// Parsed form of the `eventstream.events` filter (SPEC.md section 7 grammar).
 #[derive(Clone)]
@@ -83,7 +111,9 @@ impl ParsedFilter {
 /// `NOTIFY_ALL` are accepted; `missed`/`new`/`loaded`/`trimmed` are not
 /// capturable in v0.1 (SPEC.md section 5).
 fn class_bit(class: &str) -> Option<NotifyEvent> {
-    match class.to_ascii_lowercase().as_str() {
+    // Byte-exact lowercase literals per the SPEC.md section 7 grammar; no
+    // case folding (`@HASH` is an unknown class token and is rejected).
+    match class {
         "generic" => Some(NotifyEvent::GENERIC),
         "string" => Some(NotifyEvent::STRING),
         "list" => Some(NotifyEvent::LIST),
@@ -258,8 +288,9 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     }
 
     // 2. Feedback guard: our own XADD/XTRIM activity fires notifications on
-    // `<prefix>*` keys; mirroring those would loop forever.
-    let prefix = PREFIX.value.lock(ctx).clone();
+    // `<prefix>*` keys; mirroring those would loop forever. Borrow, do not
+    // clone: skip paths stay allocation-free (SPEC.md section 11 cost model).
+    let prefix = PREFIX.value.lock(ctx);
     if key.starts_with(prefix.as_bytes()) {
         SKIPPED_SELF.fetch_add(1, Ordering::Relaxed);
         return;
@@ -289,8 +320,8 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     // itself always lives in db 0 (SPEC.md section 6).
     let db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
 
-    let stream = format!("{prefix}{suffix}");
-    let maxlen = MAXLEN.load(Ordering::Relaxed);
+    let stream = format!("{}{}", &*prefix, suffix);
+    let maxlen = MAXLEN.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
 
@@ -394,7 +425,7 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     let filter = FILTER.raw.lock(ctx).clone();
     ctx.log_notice(&format!(
         "eventstream loaded: stream-prefix='{prefix}' events='{filter}' maxlen={} enabled={}",
-        MAXLEN.load(Ordering::Relaxed),
+        MAXLEN.value.load(Ordering::Relaxed),
         ENABLED.load(Ordering::Relaxed),
     ));
     Status::Ok
@@ -414,7 +445,7 @@ fn stats(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
         RedisValue::SimpleStringStatic("events"),
         RedisValue::BulkString(filter),
         RedisValue::SimpleStringStatic("maxlen"),
-        RedisValue::Integer(MAXLEN.load(Ordering::Relaxed)),
+        RedisValue::Integer(MAXLEN.value.load(Ordering::Relaxed)),
         RedisValue::SimpleStringStatic("forwarded"),
         RedisValue::Integer(FORWARDED.load(Ordering::Relaxed) as i64),
         RedisValue::SimpleStringStatic("dropped_xadd_error"),
@@ -492,8 +523,8 @@ mod tests {
         assert!(f.matches(NotifyEvent::HASH, "hset"));
         assert!(f.matches(NotifyEvent::EXPIRED, "expired"));
         assert!(!f.matches(NotifyEvent::STRING, "set"));
-        // Class tokens are case-insensitive.
-        assert!(parse_filter("@HASH").is_ok());
+        // Class tokens are byte-exact lowercase literals per the grammar.
+        assert!(parse_filter("@HASH").is_err());
     }
 
     #[test]

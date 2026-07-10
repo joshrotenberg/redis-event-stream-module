@@ -151,7 +151,7 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | `eventstream.enabled` | bool | `yes` | yes | `yes` / `no` |
 | `eventstream.stream-prefix` | string | `events:` | no (IMMUTABLE) | non-empty; at most 128 bytes; characters limited to `A-Z a-z 0-9 : . _ - { }`; glob metacharacters (`*`, `?`, `[`, `]`, `\`) rejected |
 | `eventstream.events` | string | `expired` | yes | filter grammar below; empty string rejected |
-| `eventstream.maxlen` | i64 | `10000` | yes | `0` to `i64::MAX`; `0` disables trimming (range enforced by Redis's numeric config registration) |
+| `eventstream.maxlen` | i64 | `10000` | yes | `0` to `i64::MAX`; `0` disables trimming. Redis enforces the registered range on `CONFIG SET` and redis.conf paths only; a module-arg value becomes the registered default and bypasses the boundary check (verified against redis 7.2 `module.c`/`config.c`), so the module's config binding re-validates and rejects negatives, aborting the load |
 
 **`eventstream.enabled`.** Master kill switch. There is no unsubscribe API for keyspace notifications, so `no` is an early return at the top of the notification handler (one atomic load per event). Flipping back to `yes` does not replay events that occurred while disabled.
 
@@ -434,7 +434,7 @@ Measurement plan (one-time, documented in the README, not CI-gated in v0.1): mem
 | Slow consumer | Trimming outruns it; detectable via first-entry ID and `XINFO GROUPS` `lag` | n/a | Alert on lag over ~50 percent of `maxlen`; scale consumers in the group |
 | Non-UTF-8 module event name | Panic inside the wrapper-generated handler, before module code runs | n/a | redismodule-rs limitation; see Open questions |
 | Cluster mode | Module refuses to load | n/a | Deploy on standalone/replicated topologies |
-| Server below 7.2 | Module refuses to load | n/a | Upgrade; see section 14 |
+| Server below 7.2 | Module load fails; process abort at startup, not a clean refusal | n/a | Upgrade; see section 14 |
 | Events during unload/downtime | Not mirrored, not recoverable | n/a | Documented gap; not a write-ahead log. Window boundaries are machine-readable via the gap-marker control stream (section 9) |
 
 The module's own writes run server-side with module privileges and are not subject to any client's ACL: a user with no access to `events:*` can still cause writes to those keys by touching watched keys. That is by design (a server-level facility), documented for security review. Consumers need explicit grants, for example `ACL SETUSER consumer on >pw ~events:* +xread +xreadgroup +xack +xautoclaim +xinfo +xlen`.
@@ -500,9 +500,9 @@ The safe deferred-write path requires `RedisModule_AddPostNotificationJob`, mapp
 |---|---|
 | 8.x, 7.4 | Supported, same code path |
 | 7.2 | Minimum supported |
-| 7.0 and below | Module refuses to load with an error naming the 7.2 requirement |
+| 7.1 and below | Module load fails; on pre-7.2 servers the failure is a process abort at startup, not a clean refusal (below) |
 
-The crate builds with the wrapper's `min-redis-compatibility-version-7-2` feature, under which the generated binding unwraps the raw function pointer directly and would panic at capture time on an older server; the guardrail is therefore an explicit `ctx.get_redis_version()` check in `init`, returning an error so `MODULE LOAD` aborts with a clear log line. Alternatives rejected: writing inside the callback on older servers (documented unsafe, loses atomicity) and buffering through a `DetachedContext` background thread (loses atomicity, can drop on crash, adds GIL contention).
+The crate builds with the wrapper's `min-redis-compatibility-version-7-2` feature. Under it, the macro-generated registration path (commands, then configs) unwraps 7.2-only API pointers before `init` ever runs, so on any pre-7.2 server the load panics inside the wrapper and aborts the redis-server process; with `loadmodule` in redis.conf that is a startup abort with the panic in the log, not the polite error message a clean refusal would give (verified against the wrapper source at v2.1.3). The explicit `ctx.get_redis_version()` check in `init` is retained as defense in depth: it is the path that would fire if the wrapper's registration behavior ever becomes graceful, and it documents the requirement in code. Alternatives rejected: writing inside the callback on older servers (documented unsafe, loses atomicity) and buffering through a `DetachedContext` background thread (loses atomicity, can drop on crash, adds GIL contention).
 
 ## 15. v0.1 scope
 
