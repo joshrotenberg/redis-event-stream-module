@@ -175,6 +175,62 @@ Skip keys under `events:#`: that namespace holds the module's own control stream
 sanitizer never produces `#` in an event-derived name, so `events:#*` is always
 internal.
 
+In cluster per-node mode the registry is itself per-node and tagged
+(`events:{tag}#streams`), so `EVENTSTREAM.STREAMS` returns only the streams of
+the node it runs on. Enumerating the whole cluster is a fan-out; see the next
+section.
+
+## Cluster consumers
+
+In cluster mode with `eventstream.cluster-streams per-node`, capture is
+node-local: each master pins a hash tag `{tag}` that hashes to a slot it owns and
+writes all of its streams under it (`events:{tag}expired`, `events:{tag}#control`,
+`events:{tag}#streams`). One logical event type is therefore spread across N
+streams, one per master, with distinct tags. A cluster consumer reads all of
+them and merges.
+
+Discovery is a client-side fan-out. A module command runs locally and cannot
+read another master's keyspace, so `EVENTSTREAM.STREAMS` reports only its own
+node. Enumerate the masters and union their answers:
+
+```
+# for each master (from CLUSTER SHARDS / your client's topology):
+redis-cli -h <master> -p <port> EVENTSTREAM.STREAMS
+# union the results; each name already carries the owning node's {tag}
+```
+
+Once you have the names, read them from any node: a cluster-aware client routes
+each `events:{tag}event` to its slot owner by the tag. To follow one logical
+event type, `XREAD` across that type's per-node streams and merge by entry ID:
+
+```
+XREAD COUNT 100 BLOCK 1000 STREAMS \
+  events:{tag_a}expired events:{tag_b}expired events:{tag_c}expired \
+  $ $ $
+```
+
+Merge caveat. Entry IDs are millisecond timestamps assigned independently on
+each node, so two entries from different nodes can share a millisecond. Merging
+by entry ID orders within a node but cannot totally order a same-millisecond tie
+across nodes (SPEC.md section 9, ordering). Treat cross-node order within one
+millisecond as unspecified; if you need a total order, carry an application
+timestamp in the value, not the entry ID.
+
+Re-pinning. A reshard that moves a node's pinned slot makes the node re-pin to a
+new tag and continue under a new stream name; it writes a `repinned` marker to
+the new control stream (`events:{new_tag}#control`) at the boundary. Consumers
+that cache the discovered stream set should re-run discovery periodically, or
+when they observe a `repinned` marker, so they pick up the new name. The old
+stream's history is not lost: it lives in the migrated slot's keys, which moved
+to the slot's new owner and remain readable by name through the cluster.
+
+Failover. Tag selection is deterministic in a node's owned-slot set (the module
+picks the first slot it owns in a fixed walk), so a replica promoted to master
+owns the same slots and re-derives the same tag, continuing the same `{tag}`
+streams (which replicated to it before promotion). Stream names are stable across
+a failover, and the MASTER-only gate means the demoted node stops capturing, so
+there is no double capture.
+
 ## Sizing maxlen
 
 `maxlen` is a retention cap, not a delivery guarantee. An entry is trimmed once

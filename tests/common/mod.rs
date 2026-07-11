@@ -132,6 +132,19 @@ impl TestCluster {
             .to_string()
     }
 
+    /// The stream names a node reports from `EVENTSTREAM.STREAMS` (its own
+    /// local, tagged registry in per-node mode). The wrapper returns array
+    /// replies as raw newline-separated values.
+    pub fn node_streams(&self, index: usize) -> Vec<String> {
+        self.node_run(index, &["EVENTSTREAM.STREAMS"])
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
     /// A node's cluster id (`CLUSTER MYID`).
     pub fn node_id(&self, index: usize) -> String {
         self.node_run(index, &["CLUSTER", "MYID"])

@@ -294,6 +294,73 @@ fn per_node_repins_after_slot_migration() {
 }
 
 #[test]
+fn cluster_wide_discovery_unions_per_node_streams() {
+    // Read side (issue #47): each master reports only its own tagged streams
+    // from EVENTSTREAM.STREAMS, and the union across masters is the complete
+    // set. Reading every discovered stream recovers every captured event.
+    let cluster =
+        TestCluster::try_start(3, Some(&["events", "set", "cluster-streams", "per-node"]))
+            .expect("per-node cluster forms");
+    let n = cluster.num_masters();
+    assert_eq!(n, 3);
+    let mut conn = cluster.cluster_conn();
+
+    let total = 150;
+    for i in 0..total {
+        let _: () = redis::cmd("SET")
+            .arg(format!("k:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET");
+    }
+    wait_until(Duration::from_secs(15), "all captured", || {
+        (0..n)
+            .map(|i| cluster.node_info_field(i, "forwarded"))
+            .sum::<i64>()
+            == total
+    });
+
+    // Discovery fan-out: each node reports only its own tag, and the union has
+    // exactly one `set` stream per master (distinct tags).
+    let mut union: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..n {
+        let tag = cluster.node_pinned_tag(i);
+        let local = cluster.node_streams(i);
+        assert!(
+            local.iter().all(|s| s.contains(&format!("{{{tag}}}"))),
+            "node {i} reports only its own tag {tag}: {local:?}"
+        );
+        assert!(
+            local.contains(&format!("events:{{{tag}}}set")),
+            "node {i} lists its own set stream"
+        );
+        union.extend(local);
+    }
+    let set_streams: Vec<&String> = union.iter().filter(|s| s.ends_with("set")).collect();
+    assert_eq!(
+        set_streams.len(),
+        n,
+        "the union has one set stream per master: {set_streams:?}"
+    );
+
+    // Completeness: reading every discovered stream (routed to its owner) and
+    // summing the entries recovers every seeded event, with none double-counted.
+    let merged: i64 = set_streams
+        .iter()
+        .map(|s| {
+            redis::cmd("XLEN")
+                .arg(s.as_str())
+                .query::<i64>(&mut conn)
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(
+        merged, total,
+        "the union of per-node streams contains every event exactly once"
+    );
+}
+
+#[test]
 fn invalid_cluster_streams_value_aborts_load() {
     // A bad cluster-streams value fails config validation, which happens during
     // module load ahead of the cluster-mode check, so it aborts the load in
