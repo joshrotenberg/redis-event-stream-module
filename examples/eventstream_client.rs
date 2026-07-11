@@ -177,12 +177,25 @@ impl Target {
     }
 }
 
-/// Extract the `host:port` of every master from `CLUSTER NODES` output.
+/// Extract the `host:port` of every serving master from `CLUSTER NODES` output.
+/// Skips replicas and any node that is not currently reachable and serving:
+/// `fail`/`fail?` (down or suspected), `noaddr` (address unknown), and
+/// `handshake` (not yet joined). Without this a just-killed master lingers in
+/// the listing until the cluster forgets it, so a chaos run would query a dead
+/// node.
 fn masters_from_cluster_nodes(nodes: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in nodes.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 3 || !f[2].contains("master") {
+        if f.len() < 3 {
+            continue;
+        }
+        let flags = f[2];
+        if !flags.contains("master")
+            || flags.contains("fail")
+            || flags.contains("noaddr")
+            || flags.contains("handshake")
+        {
             continue;
         }
         // field 1 is ip:port@busport; strip the bus port.
