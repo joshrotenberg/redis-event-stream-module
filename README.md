@@ -55,6 +55,14 @@ The expired event for `foo` is now a stream entry.
   (reachability, module presence, config, an end-to-end probe expiration,
   discovery, counters) and exits nonzero on any failure. All arguments pass
   through to `redis-cli`.
+- `cargo run --example eventstream_client -- <command>` drives events into the
+  module and reads them back, against a standalone server or a per-node cluster
+  (auto-detected). Commands: `info`, `produce` (drive sets, expirations, a
+  mass-expiry burst, or an enabled-toggle gap-marker pair), `consume` (discover
+  streams cluster-wide and tail them merged by entry ID), `watch` (a live
+  counters-and-lengths dashboard), and `soak` (sustained produce, then verify
+  capture). It doubles as a consumer reference for the cluster fan-out; see
+  [docs/consumer-patterns.md](docs/consumer-patterns.md).
 
 ## Configuration
 
