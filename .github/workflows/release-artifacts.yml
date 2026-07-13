@@ -92,7 +92,7 @@ jobs:
 
       - name: Upload as workflow artifact (PR validation runs)
         if: github.event_name != 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
           path: dist/
