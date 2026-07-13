@@ -51,6 +51,10 @@ cargo test --release --tests
   `tests/common`), never assert after a bare sleep.
 - Prose style, everywhere including docs and PR bodies: factual, no marketing
   language, no em dashes.
+- Dependency updates for GitHub Actions and crates arrive as weekly dependabot
+  PRs. The `redis-module`/`redis-module-macros` git-tag pin in Cargo.toml is
+  excluded from that automation and is bumped by hand when
+  RedisLabsModules/redismodule-rs tags a new release.
 
 ## Reporting problems
 
