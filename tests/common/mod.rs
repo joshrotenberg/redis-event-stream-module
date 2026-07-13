@@ -328,6 +328,22 @@ impl TestServer {
         });
     }
 
+    /// Start a bare cluster-enabled node with the module loaded and no slots
+    /// assigned, for tests that build a topology by hand (`CLUSTER MEET` plus
+    /// manual slot assignment). `redis-cli --cluster create` only deals in
+    /// equal splits, so skewed slot ownership needs this route.
+    pub fn start_cluster_node(module_args: &[&str]) -> TestServer {
+        let port = next_cluster_base();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle = Self::builder(port, &dir, module_args)
+            .extra("cluster-enabled", "yes")
+            .extra("cluster-config-file", "nodes.conf")
+            .extra("cluster-node-timeout", "2000")
+            .start()
+            .expect("failed to start cluster-enabled server");
+        TestServer { handle, port, dir }
+    }
+
     /// Restart on the same working directory (persistence across restarts).
     /// The previous process must already be stopped.
     pub fn restart(self, module_args: &[&str]) -> TestServer {

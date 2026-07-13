@@ -370,6 +370,105 @@ fn cluster_wide_discovery_unions_per_node_streams() {
 }
 
 #[test]
+fn per_node_captures_on_a_node_owning_a_single_slot() {
+    // Skewed ownership (issue #116): a node owning a single slot must still
+    // find a tag. Slot 16377 is chosen because none of the candidates the old
+    // probabilistic 7.2 fallback generated (`es{i}` for i in 0..16384) hashes
+    // to it, so on 7.2 this deterministically dropped everything before the
+    // exhaustive mapping; the 7.4+ canonical-name path always covered it.
+    // `redis-cli --cluster create` only deals in equal splits, so the topology
+    // is built by hand: two bare nodes, MEET, manual slot assignment.
+    let a = TestServer::start_cluster_node(&["events", "set", "cluster-streams", "per-node"]);
+    let b = TestServer::start_cluster_node(&["events", "set", "cluster-streams", "per-node"]);
+    let mut ca = a.conn();
+    let mut cb = b.conn();
+    let _: () = redis::cmd("CLUSTER")
+        .arg("MEET")
+        .arg("127.0.0.1")
+        .arg(b.port)
+        .query(&mut ca)
+        .expect("meet");
+    let _: () = redis::cmd("CLUSTER")
+        .arg("ADDSLOTSRANGE")
+        .arg(0)
+        .arg(16376)
+        .arg(16378)
+        .arg(16383)
+        .query(&mut ca)
+        .expect("assign all but one slot to node a");
+    let _: () = redis::cmd("CLUSTER")
+        .arg("ADDSLOTS")
+        .arg(16377)
+        .query(&mut cb)
+        .expect("assign the single slot to node b");
+    // Same epoch settling as the single-shard helper (7.2 stays in fail with
+    // config epoch 0); a colliding bump self-resolves.
+    for c in [&mut ca, &mut cb] {
+        let _: () = redis::cmd("CLUSTER")
+            .arg("BUMPEPOCH")
+            .query(c)
+            .expect("bump epoch");
+    }
+    wait_until(
+        Duration::from_secs(20),
+        "skewed cluster ok on both nodes",
+        || {
+            let ok = |c: &mut redis::Connection| {
+                redis::cmd("CLUSTER")
+                    .arg("INFO")
+                    .query::<String>(c)
+                    .unwrap_or_default()
+                    .contains("cluster_state:ok")
+            };
+            ok(&mut ca) && ok(&mut cb)
+        },
+    );
+
+    // Sanity: the key about to be written really lives in node b's only slot,
+    // as the server computes it.
+    let slot: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg("k21277")
+        .query(&mut cb)
+        .expect("keyslot");
+    assert_eq!(slot, 16377, "test fixture: k21277 must hash to slot 16377");
+
+    // One event on the single-slot node; tag selection runs on it and must
+    // find the one owned slot.
+    let _: () = redis::cmd("SET")
+        .arg("k21277")
+        .arg("v")
+        .query(&mut cb)
+        .expect("SET on the single-slot node");
+    wait_until(Duration::from_secs(10), "single-slot node captures", || {
+        info_field(&mut cb, "forwarded") == 1
+    });
+    assert_eq!(info_field(&mut cb, "dropped_no_owned_slot"), 0);
+    assert_eq!(info_field(&mut cb, "dropped_xadd_error"), 0);
+
+    // The pinned tag hashes to the node's only slot and the tagged stream has
+    // the entry.
+    let raw: String = redis::cmd("INFO")
+        .arg("eventstream")
+        .query(&mut cb)
+        .expect("INFO");
+    let tag = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
+        .expect("pinned tag field")
+        .trim()
+        .to_string();
+    assert!(!tag.is_empty(), "the single-slot node must pin a tag");
+    let tag_slot: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg(format!("{{{tag}}}x"))
+        .query(&mut cb)
+        .expect("tag keyslot");
+    assert_eq!(tag_slot, 16377, "the tag must hash to the only owned slot");
+    assert_eq!(xlen(&mut cb, &format!("events:{{{tag}}}set")), 1);
+}
+
+#[test]
 fn invalid_cluster_streams_value_aborts_load() {
     // A bad cluster-streams value fails config validation, which happens during
     // module load ahead of the cluster-mode check, so it aborts the load in
