@@ -165,7 +165,8 @@ failure mode).
   recoverable. The control stream makes the windows detectable, not the
   events.
 - Clean restarts and crashes are indistinguishable: neither writes a closing
-  marker (SPEC.md section 9).
+  marker (structural: the shutdown event fires after the final save; see
+  SPEC.md section 9).
 - Cluster mode: the module refuses to load by default. Setting
   `eventstream.cluster-streams per-node` enables per-node capture, where each
   master pins its streams to a slot it owns via a shared hash tag; single-shard

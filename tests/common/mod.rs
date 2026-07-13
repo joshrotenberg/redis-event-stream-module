@@ -309,6 +309,25 @@ impl TestServer {
         server
     }
 
+    /// SIGKILL the server process (crash simulation: the server's shutdown
+    /// path never runs) and wait until it stops accepting connections, so a
+    /// same-port `restart`/`restart_aof` cannot race the dying listener. The
+    /// wrapper's kill-on-drop tolerates the corpse.
+    pub fn kill9(&self) {
+        let pid = self.handle.pid().to_string();
+        let status = std::process::Command::new("kill")
+            .args(["-9", &pid])
+            .status()
+            .expect("spawn kill -9");
+        assert!(status.success(), "kill -9 {pid} failed");
+        let url = format!("redis://127.0.0.1:{}/", self.port);
+        wait_until(Duration::from_secs(10), "SIGKILLed server down", || {
+            redis::Client::open(url.as_str())
+                .and_then(|client| client.get_connection())
+                .is_err()
+        });
+    }
+
     /// Restart on the same working directory (persistence across restarts).
     /// The previous process must already be stopped.
     pub fn restart(self, module_args: &[&str]) -> TestServer {
