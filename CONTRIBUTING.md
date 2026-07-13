@@ -29,6 +29,10 @@ cargo test --release --tests
 CI runs the full suite against pinned Redis 7.2, 7.4, 8.x, and Valkey 8.x, so
 a change must hold across that matrix, not just your local server.
 
+Dependency advisories, license policy, and source provenance are enforced by
+`cargo deny check` (policy in [deny.toml](deny.toml)); run it locally with
+[cargo-deny](https://github.com/EmbarkStudios/cargo-deny) installed.
+
 ## Before pushing
 
 All three must pass, unmodified and unfiltered:
