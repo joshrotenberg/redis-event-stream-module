@@ -54,7 +54,7 @@ jobs:
 
       - name: Cache server build
         id: server-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.SERVER_DIR }}
           key: server-${{ matrix.name }}-${{ matrix.version }}-${{ runner.os }}
