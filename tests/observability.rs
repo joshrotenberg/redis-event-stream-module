@@ -19,6 +19,8 @@ fn info_section_has_all_fields() {
         "dropped_xadd_error",
         "dropped_oom",
         "dropped_defer_error",
+        "dropped_migrating",
+        "repins_probe_detected",
         "skipped_self",
         "skipped_filtered",
         "skipped_invalid",

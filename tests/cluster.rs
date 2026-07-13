@@ -120,6 +120,10 @@ fn per_node_mode_forms_cluster_and_captures_on_every_node() {
             "node {i} must not hit non-local-key errors in per-node mode"
         );
         assert_eq!(cluster.node_info_field(i, "dropped_no_owned_slot"), 0);
+        // Steady state, no reshard: no migration-window drops and no
+        // probe-detected re-pins (issues #75, #76).
+        assert_eq!(cluster.node_info_field(i, "dropped_migrating"), 0);
+        assert_eq!(cluster.node_info_field(i, "repins_probe_detected"), 0);
         assert_eq!(cluster.node_info_field(i, "cluster_per_node"), 1);
         assert!(
             cluster.node_info_field(i, "forwarded") > 0,
@@ -260,6 +264,11 @@ fn per_node_repins_after_slot_migration() {
         "the re-pin retry captures the event; no leaked write errors"
     );
     assert_eq!(cluster.node_info_field(victim, "dropped_no_owned_slot"), 0);
+    // The migration completed before the second batch, so the recognized
+    // error text (not the probe fallback) triggered the re-pin, and no event
+    // was refused in a migration window (issues #75, #76).
+    assert_eq!(cluster.node_info_field(victim, "repins_probe_detected"), 0);
+    assert_eq!(cluster.node_info_field(victim, "dropped_migrating"), 0);
 
     // The victim pinned a new, different tag and captures on it.
     let new_tag = cluster.node_pinned_tag(victim);

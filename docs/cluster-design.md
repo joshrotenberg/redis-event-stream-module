@@ -90,7 +90,14 @@ its pinned slot stays locally owned.
   the local-refusal error (`Attempted to access a non local key in a cluster
   node`, the observed error when the pinned slot has migrated away). When the
   currently pinned slot `S` is no longer owned, re-pin: pick a new owned slot
-  `S'`, switch new writes to `<prefix>{tag(S')}`.
+  `S'`, switch new writes to `<prefix>{tag(S')}`. A `TRYAGAIN`/`ASK` refusal
+  re-pins the same way (issue #75): it fires while `S` is still mid-migration,
+  an earlier signal of the same departure. The refusal text is observed
+  behavior, not a documented error code, so detection also has a
+  text-independent fallback (issue #76): an unclassified `XADD` failure
+  re-verifies ownership of the pinned tag with the selection probe (at most
+  once per pinned tag), and a failing probe re-pins regardless of the message
+  text, counted in `repins_probe_detected`.
 - Fate of existing entries. The streams under `{tag(S)}` are ordinary keys in
   slot `S`. When slot `S` migrates to another node, those streams migrate with
   it (that is what slot migration does). So no entries are lost; the history for
@@ -100,11 +107,14 @@ its pinned slot stays locally owned.
   which routes to the current slot owner).
 - Capture window during migration. Slot migration moves keys and briefly makes
   a slot unavailable for writes on the source (`MIGRATING`/`IMPORTING`). Events
-  that fire on the source node for keys in the migrating slot during that window
-  may fail to capture (the XADD to `{tag(S)}` can hit `TRYAGAIN`/`ASK`). These
-  are counted drops, delimited by gap markers, and reconciled like any other
-  loss window (SPEC.md section 9). This window is the one data-safety caveat and
-  must be documented as such.
+  that fire on the source node during that window can hit `TRYAGAIN`/`ASK` on
+  the XADD to `{tag(S)}`; the refusal triggers an immediate re-pin to a
+  still-owned slot with one retry (issue #75), so the triggering event is
+  usually captured on the new tag. An event still refused after the retry is
+  counted under `dropped_migrating` (not the generic `dropped_xadd_error`),
+  delimited by gap markers, and reconciled like any other loss window (SPEC.md
+  section 9). This window is the one data-safety caveat and must be documented
+  as such.
 
 ### Failover
 
