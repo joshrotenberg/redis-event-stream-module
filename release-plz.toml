@@ -1,15 +1,23 @@
-# Release automation (issue #27). Releases are hand-prepped: bump the version in
-# Cargo.toml and add a CHANGELOG entry in a "chore: release prep for vX.Y.Z" PR
-# (v0.1.0 in #40, v0.2.0 in #53). Merging it to main triggers this workflow's
-# `release-plz release` step, which tags the version and creates the GitHub
-# release; the release-artifacts workflow then attaches the prebuilt binaries.
+# Release process (issue #27). Fully manual, in three steps:
+#   1. Bump the version in Cargo.toml and add a CHANGELOG entry in a
+#      "chore: release prep for vX.Y.Z" PR (v0.1.0 in #40, v0.2.0 in #53).
+#   2. Merge it to main.
+#   3. Create the GitHub release from the tag by hand, e.g.
+#        awk '/^## \[X.Y.Z\]/{f=1} /^## \[/{if(f && !/X.Y.Z/)f=0} f' CHANGELOG.md > notes.md
+#        gh release create vX.Y.Z --target main --title vX.Y.Z --notes-file notes.md
+#      Publishing the release triggers release-artifacts.yml (on
+#      `release: published`), which builds and attaches the prebuilt binaries.
 #
-# release-plz's automatic version-bump PR does NOT run here, by design. It needs
-# either a crates.io baseline (this crate is publish = false, never published)
-# or `git_only = true`, and git_only mode runs `cargo package`, which fails
-# because the redis-module dependencies are git-pinned with no crates.io version
-# (redis-module-macros resolves to a 99.99.99 placeholder). So the bump is
-# manual and only `release-plz release` (tag + GitHub release) is used.
+# release-plz does NOT tag or release this crate, despite this config. Its
+# `release` step reports "nothing to release": the crate is publish = false, so
+# there is no crates.io baseline to diff against, and switching to
+# `git_only = true` fails because git_only mode runs `cargo package`, which
+# rejects the git-pinned redis-module dependencies (no crates.io version;
+# redis-module-macros is a 99.99.99 placeholder). Its automatic version-bump PR
+# does not open for the same reason. The workflow is kept only for the git
+# config it sets and in case a future release-plz handles this dependency shape;
+# enabling "Actions may create PRs" in repo settings does not change this,
+# because release-plz never gets as far as trying to open a PR.
 #
 # This crate is a cdylib Redis module: consumers load a compiled artifact, not a
 # Rust dependency, so crates.io publishing adds nothing and is disabled here (and
