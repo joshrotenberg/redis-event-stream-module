@@ -1,0 +1,19 @@
+[book]
+title = "redis-event-stream-module"
+description = "Durable, replayable Redis keyspace events via per-event Streams."
+authors = ["Josh Rotenberg"]
+language = "en"
+# The Rust crate owns `src/`, so the book source is the existing `docs/`
+# directory. Chapters are the docs there; root files (SPEC.md, CONTRIBUTING.md,
+# SECURITY.md) are pulled in with `{{#include ../<file>}}` so they stay the
+# single source of truth and their "SPEC.md section N" references keep working.
+src = "docs"
+
+[output.html]
+git-repository-url = "https://github.com/joshrotenberg/redis-event-stream-module"
+edit-url-template = "https://github.com/joshrotenberg/redis-event-stream-module/edit/main/{path}"
+default-theme = "rust"
+
+[output.html.fold]
+enable = true
+level = 1
