@@ -65,11 +65,11 @@ maps to a currently owned slot.
    local node's slot ranges. Pick one owned slot `S` deterministically (for
    example the lowest owned slot number) so the choice is stable across reloads
    while the topology is unchanged.
-2. Map `S` to a tag. Ship a precomputed table `slot -> short tag` (16384 short
-   strings, a few tens of KB, generated once by brute-forcing `CRC16`). The tag
-   is opaque; it exists only to steer slot placement. Using the lowest owned
-   slot keeps the tag stable, which keeps the stream name stable, which matters
-   for consumers (below).
+2. Map `S` to a tag. A table `slot -> short tag` (16384 short strings, 64 KiB,
+   built once at runtime by brute-forcing `CRC16`; open question 3 below). The
+   tag is opaque; it exists only to steer slot placement. Using the lowest
+   owned slot keeps the tag stable, which keeps the stream name stable, which
+   matters for consumers (below).
 3. No owned slots. A master that owns zero slots (possible transiently during
    resharding, or a misconfigured empty shard) cannot place a local stream at
    all. In that state the module captures nothing and counts the drops under a
@@ -197,3 +197,10 @@ cluster-wide operation:
    happens.
 3. Is the precomputed `slot -> tag` table (a generated source file) acceptable,
    or is a runtime CRC16 search preferred to avoid shipping the table?
+   Resolved (issue #116): runtime CRC16 search. The module carries the
+   ~15-line CRC16-CCITT key-hashing function and builds the table once at
+   runtime, on first fallback use (Redis 7.2 only; 7.4+ asks the server via
+   the canonical-name API). No `build.rs`, no 16384-entry generated file to
+   review; the one-time build costs a few milliseconds and is cached like the
+   tag itself. An exhaustive unit test proves every slot's tag hashes back to
+   that slot.

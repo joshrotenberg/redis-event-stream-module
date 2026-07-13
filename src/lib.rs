@@ -43,7 +43,7 @@ use std::ffi::CStr;
 #[cfg(not(test))]
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Longest stream-key suffix the sanitizer will emit, in bytes (SPEC.md section 5).
 const MAX_EVENT_NAME_LEN: usize = 128;
@@ -121,6 +121,13 @@ static NODE_TAG: Mutex<Option<String>> = Mutex::new(None);
 /// unrelated persistent `XADD` failure costs one extra probe total, not one
 /// per failure. Cleared on re-pin. Same locking rationale as `NODE_TAG`.
 static PROBE_VERIFIED_TAG: Mutex<Option<String>> = Mutex::new(None);
+/// Slot -> synthetic-tag table for the Redis 7.2 fallback, which has no
+/// canonical-name API (issue #116). Filled once, on first fallback use, by
+/// hashing candidates `es{i}` until every slot has one; stores the candidate
+/// index per slot (64 KiB). CRC16 is a fixed function, so the fill
+/// deterministically completes (at candidate index 156393, a few ms); the
+/// exhaustive unit test proves completion and coverage of all 16384 slots.
+static FALLBACK_SLOT_TAGS: OnceLock<Vec<u32>> = OnceLock::new();
 
 /// The `MISSED`/`NEW` bits the module subscribed to at load. The keyspace
 /// subscription mask is fixed when the module loads and cannot be widened at
@@ -463,6 +470,47 @@ fn tag_segment_cached() -> Option<String> {
         .map(|t| format!("{{{t}}}"))
 }
 
+/// CRC16-CCITT (XMODEM: polynomial 0x1021, initial value 0, no reflection),
+/// the exact variant Redis uses for key hash slots (`CRC16(key) mod 16384`).
+/// Only the 7.2 fallback below needs it; unit-tested against the cluster
+/// spec's reference vector and the well-known slot anchors.
+fn crc16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// The synthetic tag for `slot` on the 7.2 fallback path: the lowest-index
+/// `es{i}` whose CRC16 lands on it, from [`FALLBACK_SLOT_TAGS`]. Tags are
+/// ASCII alphanumerics, so they never contain `{` or `}` and cannot break the
+/// `{tag}` wrap.
+fn fallback_tag_for_slot(slot: u32) -> String {
+    let table = FALLBACK_SLOT_TAGS.get_or_init(|| {
+        let mut table = vec![u32::MAX; SLOT_COUNT as usize];
+        let mut remaining = SLOT_COUNT;
+        let mut i: u32 = 0;
+        while remaining > 0 {
+            let s = u32::from(crc16(format!("es{i}").as_bytes())) % SLOT_COUNT;
+            if table[s as usize] == u32::MAX {
+                table[s as usize] = i;
+                remaining -= 1;
+            }
+            i += 1;
+        }
+        table
+    });
+    format!("es{}", table[slot as usize])
+}
+
 /// Find a hash tag whose slot this node owns, probing ownership with a
 /// non-destructive write: `XADD {tag}#slotprobe NOMKSTREAM * f v`. The
 /// slot-ownership check that rejects a non-local key applies to writes, not
@@ -477,16 +525,18 @@ fn tag_segment_cached() -> Option<String> {
 /// API was added after Redis 7.2, though: on 7.2 the bound function pointer is
 /// null (bindgen declares it from the vendored header, but the server does not
 /// provide it), and calling it would panic across the FFI boundary and abort
-/// the server (issue #45). When it is unavailable, fall back to synthetic
-/// candidate tags, which land on an owned slot on any balanced cluster. Slots
-/// are visited in a scattered order (odd stride, coprime with 16384) so an
-/// owned slot is found within a few probes on a typical cluster while still
-/// covering all slots in the worst case.
+/// the server (issue #45). When it is unavailable, fall back to the
+/// [`FALLBACK_SLOT_TAGS`] runtime CRC16 search (issue #116), which maps each
+/// probed slot to a synthetic tag hashing to it, so coverage is exhaustive on
+/// both paths: a node that owns any slot finds a tag. Slots are visited in a
+/// scattered order (odd stride, coprime with 16384) so an owned slot is found
+/// within a few probes on a typical cluster while still covering all slots in
+/// the worst case.
 #[cfg(not(test))]
 fn select_owned_tag(ctx: &Context) -> Option<String> {
     let canonical = unsafe { raw::RedisModule_ClusterCanonicalKeyNameInSlot };
     let mut slot: u32 = 0;
-    for i in 0..SLOT_COUNT {
+    for _ in 0..SLOT_COUNT {
         // A candidate tag whose hash slot we then test for ownership.
         let candidate: Option<String> = match canonical {
             Some(canonical_in_slot) => {
@@ -504,10 +554,10 @@ fn select_owned_tag(ctx: &Context) -> Option<String> {
                     }
                 }
             }
-            // Redis 7.2: no canonical-name API. A synthetic tag hashes to some
-            // slot; scanning enough of them covers an owned slot on a balanced
-            // cluster (a node owning only a handful of slots is the sole gap).
-            None => Some(format!("es{i}")),
+            // Redis 7.2: no canonical-name API. The table gives a synthetic
+            // tag hashing to the probed slot, so the walk covers every slot a
+            // node could own, however skewed the ownership (issue #116).
+            None => Some(fallback_tag_for_slot(slot)),
         };
         if let Some(tag) = candidate {
             if probe_tag_owned(ctx, &tag).is_ok() {
@@ -580,15 +630,18 @@ fn pinned_tag_lost_by_probe(ctx: &Context) -> bool {
 }
 
 /// Record an event dropped for want of an owned slot (per-node mode), logging
-/// the first occurrence.
+/// the first occurrence. The message states what was observed (the walk found
+/// no slot that accepted a local write), not an inference about ownership
+/// (issue #116); on 7.4+ a slot whose canonical name is unusable is skipped
+/// rather than probed, so "probed every slot" would overstate it.
 fn count_no_slot_drop(ctx: &Context) {
     count_drop(
         ctx,
         &DROPPED_NO_OWNED_SLOT,
         &LOGGED_NO_OWNED_SLOT,
-        "this node owns no cluster slot to pin streams to; event dropped \
-         (dropped_no_owned_slot). Static per-node mode does not re-pin; \
-         reload once the node owns slots",
+        "tag selection walked all 16384 slots and found none that accepted a \
+         local write; event dropped (dropped_no_owned_slot). Selection is \
+         retried on the next captured event",
     );
 }
 
@@ -1659,5 +1712,28 @@ mod tests {
         assert!(validate_prefix("ev*ents:").is_err());
         assert!(validate_prefix("ev?ents:").is_err());
         assert!(validate_prefix(&"p".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn crc16_matches_redis_key_hashing() {
+        // Reference vector from the cluster spec's CRC16 appendix, plus the
+        // well-known slot anchors from the spec's key-distribution examples.
+        assert_eq!(crc16(b"123456789"), 0x31C3);
+        assert_eq!(u32::from(crc16(b"foo")) % SLOT_COUNT, 12182);
+        assert_eq!(u32::from(crc16(b"bar")) % SLOT_COUNT, 5061);
+        assert_eq!(crc16(b""), 0);
+    }
+
+    #[test]
+    fn fallback_tag_covers_every_slot() {
+        // The 7.2 fallback's exhaustiveness guarantee (issue #116). Completing
+        // at all proves the candidate walk terminates; the round trip proves
+        // every slot's tag hashes back to it; the charset check proves no tag
+        // can break the `{tag}` wrap.
+        for slot in 0..SLOT_COUNT {
+            let tag = fallback_tag_for_slot(slot);
+            assert_eq!(u32::from(crc16(tag.as_bytes())) % SLOT_COUNT, slot);
+            assert!(tag.bytes().all(|b| b.is_ascii_alphanumeric()), "{tag}");
+        }
     }
 }
