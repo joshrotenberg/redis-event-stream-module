@@ -1,0 +1,26 @@
+name: Security
+
+# Dependency advisories, license policy, and source provenance via cargo-deny
+# (policy in deny.toml). The scheduled run owns advisory drift between
+# commits; PRs are only gated when they touch the dependency graph.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/security.yml
+  schedule:
+    # Weekly, Monday 07:00 UTC.
+    - cron: "0 7 * * 1"
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources

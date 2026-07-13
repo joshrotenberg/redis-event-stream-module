@@ -1,0 +1,45 @@
+# cargo-deny policy (#96). Run locally with: cargo deny check
+
+[advisories]
+# Vulnerabilities fail the job. Unmaintained is limited to direct workspace
+# deps so a stale transitive dep (bindgen's tree is a likely source) does not
+# block unrelated PRs before we can act on it.
+version = 2
+unmaintained = "workspace"
+yanked = "warn"
+
+[licenses]
+version = 2
+# Licenses actually present in the current tree (cargo deny check licenses).
+# The crate itself is MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# `common` is an internal workspace crate of redismodule-rs with no license
+# field; the repository is BSD-3-Clause (RedisLabsModules/redismodule-rs).
+# The spec pins the version so a future crates.io crate named `common`
+# cannot silently inherit the clarification.
+[[licenses.clarify]]
+crate = "common@0.1.0"
+expression = "BSD-3-Clause"
+license-files = []
+
+[bans]
+# Duplicate versions are common in the transitive graph (bindgen et al.);
+# warn only, this crate is publish = false.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# redis-module / redis-module-macros are pinned to a git tag of
+# redismodule-rs, not a registry release; allow exactly that source.
+allow-git = ["https://github.com/RedisLabsModules/redismodule-rs"]
