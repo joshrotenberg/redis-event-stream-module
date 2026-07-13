@@ -26,6 +26,7 @@ captured at least once, within the retention window.
 | `XADD` refused under `maxmemory` | The `M` flag refuses writes at the memory limit | `dropped_oom` | Alert on any increase; free memory or raise `maxmemory`; reconcile over the pressure window |
 | `XADD` failed (`WRONGTYPE` etc.) | A non-stream key already occupies the destination name | `dropped_xadd_error` | The module never deletes the offending key; remove or rename it, then reconcile |
 | Job scheduling failed | `add_post_notification_job` returned an error | `dropped_defer_error` | Rare; alert on any increase |
+| Cluster migration window (per-node mode) | `XADD` refused with `TRYAGAIN`/`ASK` while the pinned slot is mid-migration, and the one post-re-pin retry was also refused | `dropped_migrating` | Delimited by `repinned` gap markers; reconcile over the reshard window (SPEC.md section 10) |
 | Stream trimming | `MAXLEN` evicts entries before a slow consumer reads them | (see below) | Size `maxlen` for the slowest consumer; detectable via resume ID vs first entry ID |
 | Crash before fsync | Server persistence config | (none) | Bounded by `appendfsync` (see Persistence); reconcile since last durable point |
 | Failover | Entries not yet replicated to the promoted replica | (none) | Standard async-replication caveat; reconcile over the failover window |

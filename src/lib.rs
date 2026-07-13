@@ -97,6 +97,17 @@ static LOGGED_NO_OWNED_SLOT: AtomicBool = AtomicBool::new(false);
 /// away (issue #46). Each re-pin writes a `repinned` gap marker and changes the
 /// destination stream name; a nonzero value records reshard activity.
 static REPINS: AtomicU64 = AtomicU64::new(0);
+/// Re-pins triggered by the ownership-probe fallback rather than the
+/// recognized error text (issue #76), counted in addition to `repins`. A
+/// nonzero value means the server's local-refusal message is no longer
+/// recognized; report the new form upstream.
+static REPINS_PROBE_DETECTED: AtomicU64 = AtomicU64::new(0);
+/// Events refused while the pinned slot was mid-migration (issue #75):
+/// `TRYAGAIN`/`ASK` refusals that persisted through the one re-pin retry.
+/// Distinct from `dropped_xadd_error` so routine resharding does not read as
+/// a broken write path; included in the `dropped` sum.
+static DROPPED_MIGRATING: AtomicU64 = AtomicU64::new(0);
+static LOGGED_MIGRATING: AtomicBool = AtomicBool::new(false);
 /// Redis has 16384 hash slots.
 const SLOT_COUNT: u32 = 16384;
 /// The hash tag this node pins its streams to in per-node cluster mode (issue
@@ -105,6 +116,11 @@ const SLOT_COUNT: u32 = 16384;
 /// (not a `RedisGILGuard`) so the INFO handler, whose context is not a lock
 /// indicator, can read it; the GIL already serializes all access.
 static NODE_TAG: Mutex<Option<String>> = Mutex::new(None);
+/// The pinned tag most recently probe-verified as owned (issue #76): bounds
+/// the text-independent fallback at one ownership probe per pinned tag, so an
+/// unrelated persistent `XADD` failure costs one extra probe total, not one
+/// per failure. Cleared on re-pin. Same locking rationale as `NODE_TAG`.
+static PROBE_VERIFIED_TAG: Mutex<Option<String>> = Mutex::new(None);
 
 /// The `MISSED`/`NEW` bits the module subscribed to at load. The keyspace
 /// subscription mask is fixed when the module loads and cannot be widened at
@@ -494,24 +510,7 @@ fn select_owned_tag(ctx: &Context) -> Option<String> {
             None => Some(format!("es{i}")),
         };
         if let Some(tag) = candidate {
-            let probe = format!("{{{tag}}}#slotprobe");
-            // Probe with the SAME call options as the real mirrored write: the
-            // replicate flag is what makes RM_Call enforce slot ownership (a
-            // plain call runs locally and passes on every node). NOMKSTREAM
-            // makes it a no-op on a non-existent stream, so nothing is written.
-            // Owned slot -> Ok(nil); non-owned -> Err (the non-local-key error).
-            let res: CallResult = ctx.call_ext(
-                "XADD",
-                &xadd_call_options(),
-                &[
-                    probe.as_bytes(),
-                    &b"NOMKSTREAM"[..],
-                    &b"*"[..],
-                    &b"f"[..],
-                    &b"v"[..],
-                ][..],
-            );
-            if res.is_ok() {
+            if probe_tag_owned(ctx, &tag).is_ok() {
                 return Some(tag);
             }
         }
@@ -524,6 +523,60 @@ fn select_owned_tag(ctx: &Context) -> Option<String> {
 #[cfg(test)]
 fn select_owned_tag(_ctx: &Context) -> Option<String> {
     None
+}
+
+/// Probe whether this node owns `tag`'s slot, with a non-destructive write:
+/// `XADD {tag}#slotprobe NOMKSTREAM * f v`, using the SAME call options as the
+/// real mirrored write (the replicate flag is what makes RM_Call enforce slot
+/// ownership; a plain call runs locally and passes on every node). NOMKSTREAM
+/// makes it a no-op on a non-existent stream, so nothing is written. Owned
+/// slot -> Ok; non-owned -> Err (the non-local-key error); mid-migration ->
+/// Err (`TRYAGAIN`/`ASK`), so selection never picks a slot that is leaving
+/// (issue #75). The Err carries the error text for the caller to classify.
+fn probe_tag_owned(ctx: &Context, tag: &str) -> Result<(), String> {
+    let probe = format!("{{{tag}}}#slotprobe");
+    let res: CallResult = ctx.call_ext(
+        "XADD",
+        &xadd_call_options(),
+        &[
+            probe.as_bytes(),
+            &b"NOMKSTREAM"[..],
+            &b"*"[..],
+            &b"f"[..],
+            &b"v"[..],
+        ][..],
+    );
+    res.map(|_| ())
+        .map_err(|e| e.to_utf8_string().unwrap_or_default())
+}
+
+/// Text-independent migration check (issue #76): true when the node's pinned
+/// tag no longer probes as owned, meaning an unclassified `XADD` failure was
+/// really the local-refusal in a message form `is_slot_migrated` does not
+/// recognize. A tag the probe verifies as owned is cached in
+/// `PROBE_VERIFIED_TAG` and not re-probed until a re-pin or a successful
+/// mirrored write resets the cache; the reset bounds probes to one per
+/// unclassified-failure streak rather than one per pinned tag, so a stale
+/// verification cannot mask a later migration. An OOM probe error is
+/// inconclusive (the probe was refused, not the slot) and neither
+/// reclassifies nor caches.
+fn pinned_tag_lost_by_probe(ctx: &Context) -> bool {
+    if !PER_NODE.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Some(tag) = NODE_TAG.lock().unwrap().clone() else {
+        return false;
+    };
+    if PROBE_VERIFIED_TAG.lock().unwrap().as_deref() == Some(tag.as_str()) {
+        return false;
+    }
+    match probe_tag_owned(ctx, &tag) {
+        Ok(()) => {
+            *PROBE_VERIFIED_TAG.lock().unwrap() = Some(tag);
+            false
+        }
+        Err(msg) => !msg.starts_with("OOM"),
+    }
 }
 
 /// Record an event dropped for want of an owned slot (per-node mode), logging
@@ -731,6 +784,15 @@ fn is_slot_migrated(msg: &str) -> bool {
     msg.contains("non local key")
 }
 
+/// True if an `XADD` failure is a migration-window refusal (issue #75): while
+/// the pinned slot is `MIGRATING`/`IMPORTING`, a cluster write is refused with
+/// `TRYAGAIN` or redirected with `ASK <slot> <node>`. Both are error codes, so
+/// they lead the message; either way the slot is leaving this node, an earlier
+/// signal of the same departure `is_slot_migrated` detects after the fact.
+fn is_migration_refusal(msg: &str) -> bool {
+    msg.starts_with("TRYAGAIN ") || msg == "TRYAGAIN" || msg.starts_with("ASK ")
+}
+
 /// Classification of one mirrored-write attempt, so the caller can decide
 /// whether to re-pin and retry.
 enum MirrorOutcome {
@@ -738,6 +800,12 @@ enum MirrorOutcome {
     Written,
     /// The pinned slot is no longer local: re-pin to a new owned slot and retry.
     SlotMigrated,
+    /// The pinned slot is mid-migration (`TRYAGAIN`/`ASK`, issue #75): an
+    /// early re-pin signal, handled like [`MirrorOutcome::SlotMigrated`] but
+    /// counted as `dropped_migrating` if the retry is also refused. Carries
+    /// the server's error text so the first-failure log names the actual
+    /// refusal (TRYAGAIN vs ASK, slot, target node).
+    Migrating(String),
     /// Refused under `maxmemory`.
     Oom(String),
     /// Any other `XADD` failure.
@@ -793,6 +861,16 @@ fn mirror_entry(
     match res {
         Ok(_) => {
             FORWARDED.fetch_add(1, Ordering::Relaxed);
+            // A successful write proves current ownership, so reset the probe
+            // budget: without this, a tag verified once (after an unrelated
+            // transient failure) would never be re-probed, and a later
+            // migration under a reworded refusal message would degrade into
+            // permanent unclassified drops — the exact failure issue #76
+            // exists to prevent. Cost: one uncontended lock per written event
+            // in per-node mode, matching the KNOWN_STREAMS lock below.
+            if PER_NODE.load(Ordering::Relaxed) {
+                *PROBE_VERIFIED_TAG.lock().unwrap() = None;
+            }
             // First write to a destination stream: register it in the persistent
             // set at `<prefix><seg>#streams` (replicated, so EVENTSTREAM.STREAMS
             // survives restart and works on replicas) and count it. KNOWN_STREAMS
@@ -820,9 +898,68 @@ fn mirror_entry(
                 MirrorOutcome::Oom(format!("XADD to '{stream}' refused under maxmemory: {msg}"))
             } else if is_slot_migrated(&msg) {
                 MirrorOutcome::SlotMigrated
+            } else if is_migration_refusal(&msg) {
+                MirrorOutcome::Migrating(format!("XADD to '{stream}' refused mid-migration: {msg}"))
             } else {
                 MirrorOutcome::Failed(format!("XADD to '{stream}' failed: {msg}"))
             }
+        }
+    }
+}
+
+/// Re-pin after the pinned slot left this node, either because a migration
+/// completed (the local-refusal error, issue #46) or is in progress
+/// (`TRYAGAIN`/`ASK`, issue #75): clear the cached tag, re-select a currently
+/// owned slot (the selection probe fails with the same refusal on a slot
+/// mid-migration, so the leaving slot is never re-picked), delimit the
+/// discontinuity with a `repinned` gap marker on the new control stream, and
+/// retry the entry once so the triggering event is captured rather than
+/// dropped. Bounded: a refusal on the retry is a counted drop, never another
+/// re-pin. Runs only in a write-safe context (a post-notification job).
+fn repin_and_retry(
+    ctx: &Context,
+    prefix: &str,
+    suffix: &str,
+    event: &[u8],
+    key: &[u8],
+    db: &str,
+    maxlen: i64,
+) {
+    *NODE_TAG.lock().unwrap() = None;
+    *PROBE_VERIFIED_TAG.lock().unwrap() = None;
+    REPINS.fetch_add(1, Ordering::Relaxed);
+    let seg = match tag_segment(ctx) {
+        Some(s) => s,
+        None => {
+            // No slot owned now; capture resumes on a later event once this
+            // node owns a slot again.
+            count_no_slot_drop(ctx);
+            return;
+        }
+    };
+    // A `repinned` gap marker on the new control stream delimits the window
+    // where this node's stream name changed (SPEC.md section 9).
+    write_marker(ctx, &format!("{prefix}{seg}#control"), "repinned", maxlen);
+    match mirror_entry(ctx, prefix, &seg, suffix, event, key, db, maxlen) {
+        MirrorOutcome::Written => {}
+        MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+        // Still refused (slot in flux): a migration-window drop, delimited by
+        // the marker above (SPEC.md section 10).
+        MirrorOutcome::SlotMigrated => count_drop(
+            ctx,
+            &DROPPED_MIGRATING,
+            &LOGGED_MIGRATING,
+            "XADD still refused as non-local after re-pin; entry dropped in \
+             migration window (dropped_migrating)",
+        ),
+        MirrorOutcome::Migrating(msg) => count_drop(
+            ctx,
+            &DROPPED_MIGRATING,
+            &LOGGED_MIGRATING,
+            &format!("{msg} (after re-pin; entry dropped in migration window)"),
+        ),
+        MirrorOutcome::Failed(msg) => {
+            count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
         }
     }
 }
@@ -920,54 +1057,37 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
             ) {
                 MirrorOutcome::Written => {}
                 MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+                // The pinned slot migrated away in a reshard (issue #46) or is
+                // mid-migration (issue #75): re-pin and retry once.
+                MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => repin_and_retry(
+                    ctx,
+                    &prefix_owned,
+                    &suffix,
+                    event_owned.as_bytes(),
+                    &key_owned,
+                    &db_s,
+                    maxlen,
+                ),
                 MirrorOutcome::Failed(msg) => {
-                    count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
-                }
-                MirrorOutcome::SlotMigrated => {
-                    // The pinned slot migrated away in a reshard (issue #46).
-                    // Clear the cached tag, re-select a currently owned slot,
-                    // mark the discontinuity, and retry the entry once on the new
-                    // tag so this event is captured rather than dropped.
-                    *NODE_TAG.lock().unwrap() = None;
-                    REPINS.fetch_add(1, Ordering::Relaxed);
-                    let seg2 = match tag_segment(ctx) {
-                        Some(s) => s,
-                        None => {
-                            // No slot owned now; capture resumes on a later event
-                            // once this node owns a slot again.
-                            count_no_slot_drop(ctx);
-                            return;
-                        }
-                    };
-                    // A `repinned` gap marker on the new control stream delimits
-                    // the window where this node's stream name changed
-                    // (SPEC.md section 9).
-                    write_marker(
-                        ctx,
-                        &format!("{prefix_owned}{seg2}#control"),
-                        "repinned",
-                        maxlen,
-                    );
-                    match mirror_entry(
-                        ctx,
-                        &prefix_owned,
-                        &seg2,
-                        &suffix,
-                        event_owned.as_bytes(),
-                        &key_owned,
-                        &db_s,
-                        maxlen,
-                    ) {
-                        MirrorOutcome::Written => {}
-                        MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
-                        // Still refused (slot in flux) or another failure: the
-                        // event is a counted drop, delimited by the marker above.
-                        MirrorOutcome::SlotMigrated | MirrorOutcome::Failed(_) => count_drop(
+                    // The re-pin trigger is an empirically observed error
+                    // string, so an unclassified failure could be the
+                    // local-refusal in a reworded message. Re-verify ownership
+                    // of the pinned tag before counting the drop (issue #76);
+                    // a failing probe re-pins exactly as if the text had
+                    // matched, counted in `repins_probe_detected`.
+                    if pinned_tag_lost_by_probe(ctx) {
+                        REPINS_PROBE_DETECTED.fetch_add(1, Ordering::Relaxed);
+                        repin_and_retry(
                             ctx,
-                            &DROPPED_XADD_ERROR,
-                            &LOGGED_XADD_ERROR,
-                            "XADD refused after re-pin; entry dropped in migration window",
-                        ),
+                            &prefix_owned,
+                            &suffix,
+                            event_owned.as_bytes(),
+                            &key_owned,
+                            &db_s,
+                            maxlen,
+                        );
+                    } else {
+                        count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg);
                     }
                 }
             }
@@ -1158,7 +1278,8 @@ fn deinit(ctx: &Context) -> Status {
         FORWARDED.load(Ordering::Relaxed),
         DROPPED_XADD_ERROR.load(Ordering::Relaxed)
             + DROPPED_OOM.load(Ordering::Relaxed)
-            + DROPPED_DEFER_ERROR.load(Ordering::Relaxed),
+            + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
+            + DROPPED_MIGRATING.load(Ordering::Relaxed),
         SKIPPED_SELF.load(Ordering::Relaxed),
         SKIPPED_FILTERED.load(Ordering::Relaxed),
         SKIPPED_INVALID.load(Ordering::Relaxed),
@@ -1177,7 +1298,8 @@ fn deinit(ctx: &Context) -> Status {
 fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
-        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
+        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
+        + DROPPED_MIGRATING.load(Ordering::Relaxed);
     ctx.builder()
         .add_section("stats")
         .field("enabled", ENABLED.load(Ordering::Relaxed) as i64)?
@@ -1202,7 +1324,15 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
             "dropped_no_owned_slot",
             DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed),
         )?
+        .field(
+            "dropped_migrating",
+            DROPPED_MIGRATING.load(Ordering::Relaxed),
+        )?
         .field("repins", REPINS.load(Ordering::Relaxed))?
+        .field(
+            "repins_probe_detected",
+            REPINS_PROBE_DETECTED.load(Ordering::Relaxed),
+        )?
         .field("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64)?
         .field(
             "cluster_pinned_tag",
@@ -1236,8 +1366,9 @@ fn on_flush(ctx: &Context, event: FlushSubevent) {
 fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
-        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 16] = [
+        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
+        + DROPPED_MIGRATING.load(Ordering::Relaxed);
+    let pairs: [(&str, i64); 18] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         ("dropped", dropped as i64),
@@ -1275,7 +1406,15 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
             "dropped_no_owned_slot",
             DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed) as i64,
         ),
+        (
+            "dropped_migrating",
+            DROPPED_MIGRATING.load(Ordering::Relaxed) as i64,
+        ),
         ("repins", REPINS.load(Ordering::Relaxed) as i64),
+        (
+            "repins_probe_detected",
+            REPINS_PROBE_DETECTED.load(Ordering::Relaxed) as i64,
+        ),
         ("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64),
         (
             "last_error_time",
@@ -1454,6 +1593,62 @@ mod tests {
     fn sanitize_truncates_at_128() {
         let long = "x".repeat(300);
         assert_eq!(sanitize(&long).len(), 128);
+    }
+
+    #[test]
+    fn slot_migrated_matches_known_local_refusal_forms() {
+        // The bare text observed empirically (#19), and with a leading
+        // error-code token, which the substring match must tolerate.
+        assert!(is_slot_migrated(
+            "Attempted to access a non local key in a cluster node"
+        ));
+        assert!(is_slot_migrated(
+            "ERR Attempted to access a non local key in a cluster node"
+        ));
+    }
+
+    #[test]
+    fn slot_migrated_rejects_unrelated_errors() {
+        // None of these may trigger a re-pin.
+        assert!(!is_slot_migrated(
+            "OOM command not allowed when used memory > 'maxmemory'."
+        ));
+        assert!(!is_slot_migrated("ERR some arbitrary error"));
+        assert!(!is_slot_migrated(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        ));
+        assert!(!is_slot_migrated(""));
+    }
+
+    #[test]
+    fn migration_refusal_matches_tryagain_and_ask() {
+        // TRYAGAIN and ASK are error codes, so they lead the message.
+        assert!(is_migration_refusal(
+            "TRYAGAIN Multiple keys request during rehashing of slot"
+        ));
+        assert!(is_migration_refusal("TRYAGAIN"));
+        assert!(is_migration_refusal("ASK 3999 127.0.0.1:6381"));
+    }
+
+    #[test]
+    fn migration_refusal_rejects_unrelated_errors() {
+        assert!(!is_migration_refusal(
+            "Attempted to access a non local key in a cluster node"
+        ));
+        assert!(!is_migration_refusal(
+            "OOM command not allowed when used memory > 'maxmemory'."
+        ));
+        assert!(!is_migration_refusal("ERR some arbitrary error"));
+        assert!(!is_migration_refusal(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        ));
+        // Codes lead the message; a mention elsewhere is not a refusal, and a
+        // word merely prefixed with the code is not the code (ASKING is a real
+        // command; TRYAGAINX guards any hypothetical future sibling code).
+        assert!(!is_migration_refusal("ERR TRYAGAIN is not a code here"));
+        assert!(!is_migration_refusal("ASKING requires a cluster"));
+        assert!(!is_migration_refusal("TRYAGAINX something else"));
+        assert!(!is_migration_refusal(""));
     }
 
     #[test]
