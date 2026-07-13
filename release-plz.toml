@@ -1,12 +1,19 @@
-# Release automation (issue #27). release-plz opens a release PR on each push
-# to main (version bump + changelog from conventional commits); merging that PR
-# tags the release and creates the GitHub release. The release-artifacts
-# workflow then attaches prebuilt module binaries to it.
+# Release automation (issue #27). Releases are hand-prepped: bump the version in
+# Cargo.toml and add a CHANGELOG entry in a "chore: release prep for vX.Y.Z" PR
+# (v0.1.0 in #40, v0.2.0 in #53). Merging it to main triggers this workflow's
+# `release-plz release` step, which tags the version and creates the GitHub
+# release; the release-artifacts workflow then attaches the prebuilt binaries.
 #
-# This crate is a cdylib Redis module: consumers load a compiled artifact, not
-# a Rust dependency, so crates.io publishing adds nothing and is disabled here
-# (and via publish = false in Cargo.toml). Versions, tags, changelog, and
-# GitHub releases still flow through release-plz.
+# release-plz's automatic version-bump PR does NOT run here, by design. It needs
+# either a crates.io baseline (this crate is publish = false, never published)
+# or `git_only = true`, and git_only mode runs `cargo package`, which fails
+# because the redis-module dependencies are git-pinned with no crates.io version
+# (redis-module-macros resolves to a 99.99.99 placeholder). So the bump is
+# manual and only `release-plz release` (tag + GitHub release) is used.
+#
+# This crate is a cdylib Redis module: consumers load a compiled artifact, not a
+# Rust dependency, so crates.io publishing adds nothing and is disabled here (and
+# via publish = false in Cargo.toml).
 
 [workspace]
 publish = false
