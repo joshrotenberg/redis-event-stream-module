@@ -1,5 +1,10 @@
 # redis-event-stream-module
 
+[![CI](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/joshrotenberg/redis-event-stream-module)](https://github.com/joshrotenberg/redis-event-stream-module/releases/latest)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+![Redis 7.2+ | Valkey 8.x](https://img.shields.io/badge/Redis_7.2%2B_%7C_Valkey_8.x-informational)
+
 A Redis module that mirrors keyspace notifications into per-event Redis
 Streams. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
 stream entry, written atomically with the keyspace change, so events are
