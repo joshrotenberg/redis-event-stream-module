@@ -116,14 +116,17 @@ exactly the edge of the gap, so the two marker IDs bound the window in time.
 
 ### Two limitations
 
-- Crashes write no closing marker.
-- Clean server shutdowns write none either: `deinit` runs only on
-  `MODULE UNLOAD`, never at server shutdown.
+- Crashes write no closing marker: nothing runs the server's shutdown path.
+- Clean server shutdowns cannot write one either, by construction: the server
+  fires the Shutdown module event only after the final AOF flush and RDB save,
+  so nothing written there persists, and replicating the write from the
+  shutdown path aborts the server (investigated in issue #67; SPEC.md
+  section 9).
 
-So v0.1 cannot distinguish a clean restart from a crash: both appear as a
-`loaded` marker with no preceding `unloading` or `disabled`. Treat any such
-`loaded` as the end of a gap that opened at the last entry across your streams
-before it. A shutdown-event marker is future work.
+So a clean restart and a crash are permanently indistinguishable: both appear
+as a `loaded` marker with no preceding `unloading` or `disabled`. Treat any
+such `loaded` as the end of a gap that opened at the last entry across your
+streams before it.
 
 ### Zero-traffic caveat
 

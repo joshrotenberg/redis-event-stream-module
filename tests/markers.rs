@@ -1,5 +1,7 @@
-//! Gap-marker lifecycle (issues #12 and #23): pending-marker delivery,
+//! Gap-marker lifecycle (issues #12, #23, and #67): pending-marker delivery,
 //! marker ordering, unload semantics, crash-gap detection, restart safety.
+//! The shutdown tests pin the #67 finding: no closing marker is writable at
+//! server shutdown, so clean restarts and crashes read identically.
 
 mod common;
 
@@ -145,6 +147,115 @@ fn enabled_no_load_queues_loaded_then_disabled() {
         "a bare loaded marker must not close the gap while capture is off"
     );
     assert_eq!(xlen(&mut c, "events:set"), 0, "capture must be off");
+}
+
+#[test]
+fn clean_shutdown_leaves_no_closing_marker_rdb() {
+    // Pins the issue #67 finding, RDB path: no closing marker is writable at
+    // clean shutdown. finishShutdown (server.c, verified at Redis 7.2.0 and
+    // 8.0.0; Valkey inherits) orders the final AOF flush, then the final RDB
+    // save, then the Shutdown module event, then the replica output-buffer
+    // flush, so a marker written from the shutdown event can never reach the
+    // persisted dataset — and a replicated write from that handler trips
+    // propagateNow's shutdown-pause assertion when replicas are attached,
+    // aborting the server. The module therefore writes nothing at shutdown,
+    // and a clean restart reads exactly like a crash (SPEC.md section 9):
+    // the pre-shutdown markers, then the post-restart loaded marker, with no
+    // closing marker between them.
+    let s = TestServer::start(&["events", "set"]);
+    {
+        let mut c = s.conn();
+        let _: () = c.set("x", "1").expect("SET");
+        wait_until(Duration::from_secs(5), "loaded marker", || {
+            xlen(&mut c, CONTROL) == 1
+        });
+        // SAVE forces the final RDB even with save points disabled, making
+        // the persistence path deterministic.
+        let _ = redis::cmd("SHUTDOWN").arg("SAVE").query::<()>(&mut c);
+    }
+
+    let s = s.restart(&["events", "set"]);
+    let mut c = s.conn();
+    assert_eq!(
+        marker_actions(&mut c),
+        vec!["loaded"],
+        "no closing marker may follow the pre-shutdown markers"
+    );
+
+    let _: () = c.set("y", "1").expect("SET after restart");
+    wait_until(Duration::from_secs(5), "second loaded marker", || {
+        xlen(&mut c, CONTROL) == 2
+    });
+    assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
+}
+
+#[test]
+fn clean_shutdown_leaves_no_closing_marker_aof() {
+    // The AOF side of the #67 finding (full citation on the RDB variant
+    // above): finishShutdown flushes and fsyncs the AOF before firing the
+    // Shutdown event and the process exits without flushing again, so a
+    // shutdown-time XADD would die in the AOF buffer. Same shape as the RDB
+    // variant: no closing marker between the two loaded markers.
+    let s = TestServer::start_aof(&["events", "set"]);
+    {
+        let mut c = s.conn();
+        let _: () = c.set("x", "1").expect("SET");
+        wait_until(Duration::from_secs(5), "loaded marker", || {
+            xlen(&mut c, CONTROL) == 1
+        });
+        // Plain SHUTDOWN: no save points and no SAVE flag, so durability is
+        // the AOF's alone.
+        let _ = redis::cmd("SHUTDOWN").query::<()>(&mut c);
+    }
+
+    let s = s.restart_aof(&["events", "set"]);
+    let mut c = s.conn();
+    assert_eq!(
+        marker_actions(&mut c),
+        vec!["loaded"],
+        "no closing marker may follow the pre-shutdown markers"
+    );
+
+    let _: () = c.set("y", "1").expect("SET after restart");
+    wait_until(Duration::from_secs(5), "second loaded marker", || {
+        xlen(&mut c, CONTROL) == 2
+    });
+    assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
+}
+
+#[test]
+fn crash_leaves_no_closing_marker() {
+    // The crash side of the #67 finding: SIGKILL never runs the server's
+    // shutdown path, so nothing could write a closing marker even if clean
+    // shutdown had one. Deliberately the same shape as the clean-shutdown
+    // tests above — SPEC.md section 9 documents that the two are permanently
+    // indistinguishable from the node's own control stream.
+    let s = TestServer::start_aof(&["events", "set"]);
+    {
+        let mut c = s.conn();
+        let _: () = c.set("x", "1").expect("SET");
+        // Once XLEN observes the marker, a later event-loop iteration has
+        // already written the AOF buffer to the page cache, which survives a
+        // process kill (only an OS crash would need the fsync).
+        wait_until(Duration::from_secs(5), "loaded marker", || {
+            xlen(&mut c, CONTROL) == 1
+        });
+    }
+    s.kill9();
+
+    let s = s.restart_aof(&["events", "set"]);
+    let mut c = s.conn();
+    assert_eq!(
+        marker_actions(&mut c),
+        vec!["loaded"],
+        "a crash must leave no closing marker"
+    );
+
+    let _: () = c.set("y", "1").expect("SET after restart");
+    wait_until(Duration::from_secs(5), "second loaded marker", || {
+        xlen(&mut c, CONTROL) == 2
+    });
+    assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
 }
 
 #[test]
