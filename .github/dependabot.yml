@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["area:ci"]
+    commit-message:
+      prefix: "chore"
+    groups:
+      github-actions:
+        update-types: ["minor", "patch"]
+
+  # Does not cover the redis-module / redis-module-macros git-tag pin
+  # (Cargo.toml); dependabot cannot bump git-tag dependencies, so that
+  # pin is updated by hand when redismodule-rs tags a new release.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["area:ci"]
+    commit-message:
+      prefix: "chore"
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
