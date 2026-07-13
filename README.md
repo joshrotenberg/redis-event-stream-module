@@ -6,9 +6,9 @@ stream entry, written atomically with the keyspace change, so events are
 durable, replayable, and consumable with `XREAD` or consumer groups. Runs on
 Redis 7.2+ and Valkey 8.x, standalone or with replicas.
 
-Status: early release. The code implements the v0.1 scope of
-[SPEC.md](SPEC.md), the authoritative design, plus the introspection commands
-added after it. Interfaces may change before 1.0.
+Status: early release. The code implements the [SPEC.md](SPEC.md) design, the
+authoritative reference: the v0.1 capture and introspection surface, plus v0.2
+opt-in cluster per-node support. Interfaces may change before 1.0.
 
 ## Install
 

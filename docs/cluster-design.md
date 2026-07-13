@@ -1,9 +1,11 @@
-# Cluster support: design proposal
+# Cluster support: design
 
-Status: proposal, not implemented. This document is the design deliverable for
-issue #19. It needs maintainer acceptance before any implementation issue is
-filed. v0.1 refuses to load in cluster mode (SPEC.md section 10); this proposes
-how a later version could support it.
+Status: implemented in v0.2 (issues #45, #46, #47 under epic #19); the shipped
+behavior follows this document. v0.1 refused to load in cluster mode (SPEC.md
+section 10); v0.2 adds opt-in per-node support via
+`eventstream.cluster-streams per-node`. The design below is written as the
+original proposal; where it says "could" or "proposes", read it as what the
+implementation now does.
 
 ## The problem
 
