@@ -35,7 +35,7 @@ echo "----  CONFIG GET eventstream.*"
 PREFIX=$("${R[@]}" CONFIG GET eventstream.stream-prefix | tail -1)
 EVENTS=$("${R[@]}" CONFIG GET eventstream.events | tail -1)
 ENABLED=$("${R[@]}" CONFIG GET eventstream.enabled | tail -1)
-[[ "$ENABLED" == "yes" ]] && ok "capture enabled" || fail "capture enabled" "eventstream.enabled=$ENABLED"
+if [[ "$ENABLED" == "yes" ]]; then ok "capture enabled"; else fail "capture enabled" "eventstream.enabled=$ENABLED"; fi
 
 # 3. Filter covers expirations (the demo events).
 if [[ "$EVENTS" == "*" || ",$EVENTS," == *",expired,"* || "$EVENTS" == *"@expired"* ]]; then
@@ -56,16 +56,19 @@ while (( SECONDS < DEADLINE )); do
   if (( AFTER > BEFORE )); then CAPTURED=yes; break; fi
   sleep 0.2
 done
-[[ "$CAPTURED" == "yes" ]] && ok "probe expiration captured ($STREAM XLEN $BEFORE -> $AFTER)" \
-                           || fail "probe expiration captured" "$STREAM did not grow within 10s"
+if [[ "$CAPTURED" == "yes" ]]; then
+  ok "probe expiration captured ($STREAM XLEN $BEFORE -> $AFTER)"
+else
+  fail "probe expiration captured" "$STREAM did not grow within 10s"
+fi
 
 # 5. Discovery and counters.
 STREAMS=$("${R[@]}" EVENTSTREAM.STREAMS 2>/dev/null | tr '\n' ' ')
-[[ -n "${STREAMS// /}" ]] && ok "EVENTSTREAM.STREAMS lists: $STREAMS" || fail "EVENTSTREAM.STREAMS" "empty reply"
+if [[ -n "${STREAMS// /}" ]]; then ok "EVENTSTREAM.STREAMS lists: $STREAMS"; else fail "EVENTSTREAM.STREAMS" "empty reply"; fi
 FWD=$("${R[@]}" INFO eventstream 2>/dev/null | grep '^eventstream_forwarded:' | cut -d: -f2 | tr -d '\r')
 DROP=$("${R[@]}" INFO eventstream 2>/dev/null | grep '^eventstream_dropped:' | cut -d: -f2 | tr -d '\r')
-[[ "${FWD:-0}" -ge 1 ]] && ok "forwarded counter climbing (forwarded=$FWD)" || fail "forwarded counter" "forwarded=${FWD:-missing}"
-[[ "${DROP:-0}" -eq 0 ]] && ok "no drops (dropped=0)" || fail "no drops" "dropped=$DROP, check INFO eventstream and the server log"
+if [[ "${FWD:-0}" -ge 1 ]]; then ok "forwarded counter climbing (forwarded=$FWD)"; else fail "forwarded counter" "forwarded=${FWD:-missing}"; fi
+if [[ "${DROP:-0}" -eq 0 ]]; then ok "no drops (dropped=0)"; else fail "no drops" "dropped=$DROP, check INFO eventstream and the server log"; fi
 
 echo "----"
 echo "PASS=$PASS FAIL=$FAIL"

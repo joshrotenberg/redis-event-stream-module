@@ -26,8 +26,9 @@ TEST_REDIS_CLI_BIN=/path/to/redis-cli \
 cargo test --release --tests
 ```
 
-CI runs the full suite against pinned Redis 7.2, 7.4, 8.x, and Valkey 8.x, so
-a change must hold across that matrix, not just your local server.
+CI runs the full suite against pinned Redis 7.2, 7.4, 8.x, Valkey 8.x, and
+Valkey 9.x, so a change must hold across that matrix, not just your local
+server.
 
 Dependency advisories, license policy, and source provenance are enforced by
 `cargo deny check` (policy in [deny.toml](deny.toml)); run it locally with

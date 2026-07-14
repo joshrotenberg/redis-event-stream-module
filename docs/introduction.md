@@ -4,7 +4,7 @@
 notifications into per-event Redis Streams. Each selected event (key
 expiration, `SET`, `DEL`, ...) becomes a stream entry, written atomically with
 the keyspace change, so events are durable, replayable, and consumable with
-`XREAD` or consumer groups. It runs on Redis 7.2+ and Valkey 8.x, standalone,
+`XREAD` or consumer groups. It runs on Redis 7.2+ and Valkey 8.x/9.x, standalone,
 with replicas, or in a cluster with opt-in per-node capture.
 
 This site is the reference documentation. For a quick overview, install steps,
