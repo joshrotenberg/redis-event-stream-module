@@ -1490,7 +1490,9 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
 /// Readonly, keyless. The registry lives in db 0, so the command selects db 0
 /// for the read and restores the caller's database. In per-node cluster mode
 /// this returns only the local node's registry (`<prefix>{tag}#streams`);
-/// cluster-wide fan-out is issue #47.
+/// cluster-wide discovery is resolved client-side — callers fan out over the
+/// masters and merge (issue #47; docs/consumer-patterns.md, cluster
+/// consumers).
 #[cfg(not(test))]
 fn cmd_streams(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     // No owned slot selected yet in per-node mode: nothing local to report.
