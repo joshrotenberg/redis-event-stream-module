@@ -100,6 +100,20 @@ static FORWARDED: AtomicU64 = AtomicU64::new(0);
 /// meaning "captured events", not "XADDs issued"; firehose write failures
 /// share the existing `dropped_*` counters.
 static FIREHOSE_FORWARDED: AtomicU64 = AtomicU64::new(0);
+/// Consumer groups auto-provisioned on destination streams when
+/// `eventstream.auto-group` names one (issue #109): one `XGROUP CREATE` per
+/// stream on the write that first sees the config set (or the write that
+/// re-creates a stream a flush destroyed). Counts genuine creations only; a
+/// BUSYGROUP reply — the group already existed, e.g. on a stream that survived
+/// a restart — is idempotent success and not counted here. Kept apart from
+/// `forwarded` because provisioning a group is not capturing an event.
+static AUTOGROUP_CREATED: AtomicU64 = AtomicU64::new(0);
+/// `XGROUP CREATE` failures other than BUSYGROUP (issue #109). The triggering
+/// event was still captured (the group provisioning is a side effect of a
+/// successful `XADD`), so this stays out of the `dropped_*` sum; it follows the
+/// drop-counter and first-failure-log policy (SPEC.md section 13), latching on
+/// `LOGGED_AUTOGROUP`.
+static AUTOGROUP_FAILED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_XADD_ERROR: AtomicU64 = AtomicU64::new(0);
 static DROPPED_OOM: AtomicU64 = AtomicU64::new(0);
 static DROPPED_DEFER_ERROR: AtomicU64 = AtomicU64::new(0);
@@ -164,6 +178,12 @@ static LOGGED_PANIC: AtomicBool = AtomicBool::new(false);
 /// stream, so it uses a process-level latch like the other no-destination
 /// drop reasons rather than the per-stream window (SPEC.md section 13).
 static LOGGED_ENCODE_ERROR: AtomicBool = AtomicBool::new(false);
+/// First-failure latch for `autogroup_failed` (issue #109). A group-creation
+/// failure depends on the configured group name and the server's `XGROUP`
+/// support, not on a specific destination, so it uses a process-level latch
+/// like the other no-destination reasons rather than the per-stream window;
+/// the logged text names the stream and the server's error (SPEC.md section 13).
+static LOGGED_AUTOGROUP: AtomicBool = AtomicBool::new(false);
 
 /// Repeat-failure warning window per destination stream, in seconds (issue
 /// #68, SPEC.md section 13): after a stream's first-failure warning, further
@@ -242,6 +262,12 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 /// (it doubles write amplification per captured event, SPEC.md section 11);
 /// runtime-mutable, read in the post-notification job.
 static FIREHOSE: AtomicBool = AtomicBool::new(false);
+/// Cheap gate for `eventstream.auto-group` (issue #109) so the write path pays
+/// one atomic load, not a string-guard lock, while the feature is off (the
+/// default). Kept in sync from the config's `set()` on every transition
+/// between empty (disabled) and a group name; read per successful write to
+/// decide whether to consult the group name at all.
+static AUTO_GROUP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// `eventstream.verify-oom` (issue #65): when on (the default), mirrored writes
 /// carry the `M` flag so an `XADD` is refused under `maxmemory` and counted as
 /// `dropped_oom` (SPEC.md sections 10, 11) — bounded, counted loss. When off,
@@ -942,6 +968,72 @@ impl ConfigurationValue<RedisString> for ClusterStreamsConfig {
     }
 }
 
+/// Validate `eventstream.auto-group` (issue #109). Empty disables the feature
+/// (the default); a non-empty value names the consumer group the module
+/// auto-creates on each destination stream. Borrows the spirit of
+/// [`validate_prefix`]: at most 128 bytes over `A-Z a-z 0-9 : . _ -`, which
+/// rejects empty tokens and whitespace (neither is in the charset) so the name
+/// never needs quoting in the `XGROUP CREATE` call. `{`/`}` are excluded (a
+/// group name is a plain token, not a key needing a hash tag). Rejection
+/// surfaces as the CONFIG SET / load error.
+fn validate_auto_group(name: &str) -> Result<(), RedisError> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    if name.len() > MAX_PREFIX_LEN {
+        return Err(RedisError::String(format!(
+            "auto-group exceeds {MAX_PREFIX_LEN} bytes"
+        )));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | ':' | '.' | '_' | '-'))
+    {
+        return Err(RedisError::String(format!(
+            "auto-group contains disallowed character '{bad}'"
+        )));
+    }
+    Ok(())
+}
+
+/// `eventstream.auto-group` config binding (issue #109). Runtime-mutable
+/// (DEFAULT): setting a group name provisions it on each stream's next write
+/// (`AUTO_GROUP_ENABLED` gates the write path; the per-stream `group_created`
+/// bit dedupes). Setting it does not retroactively sweep the registry (SPEC.md
+/// section 9): a registered stream that never fires again keeps no group.
+struct AutoGroupConfig {
+    value: RedisGILGuard<String>,
+}
+
+impl AutoGroupConfig {
+    /// The configured group name, or `None` when disabled (empty). Read on the
+    /// write path only after `AUTO_GROUP_ENABLED` confirms a name is set, so
+    /// the disabled default never locks this guard.
+    fn group_name<G: redis_module::RedisLockIndicator>(&self, ctx: &G) -> Option<String> {
+        let g = self.value.lock(ctx);
+        if g.is_empty() {
+            None
+        } else {
+            Some(g.clone())
+        }
+    }
+}
+
+impl ConfigurationValue<RedisString> for AutoGroupConfig {
+    fn get(&self, ctx: &ConfigurationContext) -> RedisString {
+        RedisString::create(None, self.value.lock(ctx).as_str())
+    }
+    fn set(&self, ctx: &ConfigurationContext, val: RedisString) -> Result<(), RedisError> {
+        let s = val.try_as_str()?;
+        validate_auto_group(s)?;
+        // The cheap write-path gate mirrors the stored value; set before the
+        // guard so a concurrent reader that sees the flag also sees the name.
+        AUTO_GROUP_ENABLED.store(!s.is_empty(), Ordering::Relaxed);
+        *self.value.lock(ctx) = s.to_owned();
+        Ok(())
+    }
+}
+
 /// Per-stream in-process state (issues #68 and #71), keyed by destination
 /// stream name in `STREAM_STATS`. One record carries the per-stream counters
 /// (the `EVENTSTREAM.STREAMS WITHSTATS` join, SPEC.md section 8), the
@@ -961,6 +1053,14 @@ struct StreamStats {
     /// Present in the persistent `<prefix><seg>#streams` set. Cleared with
     /// the whole map on flush so the next write re-registers.
     registered: bool,
+    /// The `eventstream.auto-group` consumer group has been provisioned on
+    /// this stream (issue #109). Deduped separately from `registered` so
+    /// enabling the config provisions an already-registered ("warm") stream on
+    /// its next write, and a transient `XGROUP CREATE` failure retries on the
+    /// next write instead of waiting for a flush. Cleared with the whole map on
+    /// flush, so a `FLUSHALL` that destroyed the group re-creates it. Never set
+    /// while the config is empty, so the next write after it is set provisions.
+    group_created: bool,
     /// Drops since the last successful write to this stream; nonzero means
     /// the stream is failing, and the next success logs the recovery notice.
     failing_drops: u64,
@@ -1048,6 +1148,11 @@ lazy_static! {
     };
     static ref CLUSTER_STREAMS: ClusterStreamsConfig = ClusterStreamsConfig {
         value: RedisGILGuard::new("refuse".to_owned()),
+    };
+    /// `eventstream.auto-group` (issue #109). Default empty: no group is
+    /// created, today's operator-side `XGROUP CREATE` behavior unchanged.
+    static ref AUTO_GROUP: AutoGroupConfig = AutoGroupConfig {
+        value: RedisGILGuard::new(String::new()),
     };
     /// `eventstream.entry-format` (issue #60), the module's first enum config.
     /// Default `fixed` reproduces the historical three-field schema exactly, so
@@ -1894,6 +1999,58 @@ enum MirrorOutcome {
     },
 }
 
+/// Provision the `eventstream.auto-group` consumer group on a destination
+/// stream just written (issue #109): `XGROUP CREATE <stream> <group> 0`, at ID
+/// `0` so the group sees the whole retained stream (not just entries after its
+/// creation — the module-before-consumers deployment order then matches the
+/// consumers-first order, SPEC.md section 9). Uses the same replicated,
+/// OOM-checked options as the mirrored `XADD`, so the group replicates and
+/// persists with the entry that triggered it. Idempotent: BUSYGROUP (the group
+/// already exists, e.g. on a stream that outlived a restart, or a concurrent
+/// write beat this one) is treated as success. Returns `true` when the group
+/// now exists (created or already present) so the caller marks it done; `false`
+/// on a real failure, which is counted and left un-deduped so the next write to
+/// the stream retries. Runs GIL-held in a write-safe context (a
+/// post-notification job), with `STREAM_STATS` locked by the caller — the same
+/// context and lock discipline as the sibling registry `SADD`.
+fn create_auto_group(ctx: &Context, stream: &str, group: &str) -> bool {
+    let res: CallResult = ctx.call_ext(
+        "XGROUP",
+        &xadd_call_options(),
+        &[
+            &b"CREATE"[..],
+            stream.as_bytes(),
+            group.as_bytes(),
+            &b"0"[..],
+        ][..],
+    );
+    match res {
+        Ok(_) => {
+            AUTOGROUP_CREATED.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            let msg = e.to_utf8_string().unwrap_or_default();
+            if msg.starts_with("BUSYGROUP") {
+                // The group already exists: idempotent success, not a new
+                // creation, so it is deduped but not counted (SPEC.md section 9).
+                true
+            } else {
+                count_drop(
+                    ctx,
+                    &AUTOGROUP_FAILED,
+                    &LOGGED_AUTOGROUP,
+                    &format!(
+                        "XGROUP CREATE {group} on '{stream}' failed: {msg} \
+                         (autogroup_failed); event captured, group not provisioned"
+                    ),
+                );
+                false
+            }
+        }
+    }
+}
+
 /// Write one mirrored entry to `<prefix><seg><suffix>`, and on the first write
 /// to a stream register it in `<prefix><seg>#streams`. A success increments
 /// `counter`: `FORWARDED` for per-event entries, `FIREHOSE_FORWARDED` for
@@ -2022,6 +2179,23 @@ fn mirror_entry(
                     // Currently-registered count backing the max-streams cap
                     // (issue #64); resets on flush with STREAM_STATS.
                     CURRENT_STREAMS.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            // Auto-group provisioning (issue #109): once `eventstream.auto-group`
+            // names a group, create it on this stream, deduped per stream by
+            // `group_created` (separate from `registered`, so enabling the
+            // config provisions an already-registered stream on its next write,
+            // and a flush that cleared the map re-creates a group it destroyed).
+            // Runs under the same lock as the registry SADD. The control stream
+            // never reaches here — markers write through `write_marker` — so it
+            // is excluded by construction; per-event and firehose streams both
+            // provision. Gated by the cheap atomic so the default-off path never
+            // locks the config guard.
+            if AUTO_GROUP_ENABLED.load(Ordering::Relaxed) && !entry.group_created {
+                if let Some(group) = AUTO_GROUP.group_name(ctx) {
+                    if create_auto_group(ctx, &stream, &group) {
+                        entry.group_created = true;
+                    }
                 }
             }
             MirrorOutcome::Written
@@ -2755,6 +2929,11 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
             "firehose_forwarded",
             FIREHOSE_FORWARDED.load(Ordering::Relaxed),
         )?
+        .field(
+            "autogroup_created",
+            AUTOGROUP_CREATED.load(Ordering::Relaxed),
+        )?
+        .field("autogroup_failed", AUTOGROUP_FAILED.load(Ordering::Relaxed))?
         .field("dropped", dropped)?
         .field(
             "dropped_xadd_error",
@@ -2971,12 +3150,20 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
         + DROPPED_MIGRATING.load(Ordering::Relaxed)
         + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
         + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 23] = [
+    let pairs: [(&str, i64); 25] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         (
             "firehose_forwarded",
             FIREHOSE_FORWARDED.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "autogroup_created",
+            AUTOGROUP_CREATED.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "autogroup_failed",
+            AUTOGROUP_FAILED.load(Ordering::Relaxed) as i64,
         ),
         ("dropped", dropped as i64),
         (
@@ -3179,6 +3366,15 @@ redis_module! {
             // empty. Runtime-mutable like `maxlen`.
             ["maxlen-overrides", &*MAXLEN_OVERRIDES, "", ConfigurationFlags::DEFAULT, None],
             ["cluster-streams", &*CLUSTER_STREAMS, "refuse", ConfigurationFlags::IMMUTABLE, None],
+            // Consumer-group auto-provisioning (issue #109): empty (default)
+            // leaves group creation operator-side, unchanged. A non-empty name
+            // makes the module `XGROUP CREATE <stream> <name> 0` on each
+            // destination stream at first write. Runtime-mutable; setting it
+            // provisions on the next write to each stream, not retroactively.
+            // No on-changed callback: the ConfigurationContext cannot issue
+            // commands, and next-write provisioning needs none (the write path
+            // reads `AUTO_GROUP_ENABLED`, set in `set()`).
+            ["auto-group", &*AUTO_GROUP, "", ConfigurationFlags::DEFAULT, None],
         ],
         bool: [
             ["enabled", &ENABLED, true, ConfigurationFlags::DEFAULT, Some(Box::new(enabled_changed))],
@@ -3766,6 +3962,21 @@ mod tests {
         assert!(validate_prefix("ev*ents:").is_err());
         assert!(validate_prefix("ev?ents:").is_err());
         assert!(validate_prefix(&"p".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn auto_group_validation() {
+        // Empty is the disabled default and must validate (issue #109).
+        assert!(validate_auto_group("").is_ok());
+        assert!(validate_auto_group("workers").is_ok());
+        assert!(validate_auto_group("expiry-workers").is_ok());
+        assert!(validate_auto_group("grp.1:v2_a").is_ok());
+        // Whitespace and glob/quoting metacharacters are outside the charset,
+        // so a name never needs quoting in the XGROUP CREATE call.
+        assert!(validate_auto_group("two words").is_err());
+        assert!(validate_auto_group("grp*").is_err());
+        assert!(validate_auto_group("{tag}").is_err());
+        assert!(validate_auto_group(&"g".repeat(129)).is_err());
     }
 
     #[test]
