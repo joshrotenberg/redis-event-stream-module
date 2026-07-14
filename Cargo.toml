@@ -35,6 +35,10 @@ linkme = "0.3"
 lazy_static = "1"
 
 [dev-dependencies]
+# Property tests over the filter grammar and event-name sanitizer (issue #94).
+# No default features: fork/timeout process isolation buys nothing for pure
+# in-process functions and would drag in extra dependencies.
+proptest = { version = "1", default-features = false, features = ["std"] }
 redis-server-wrapper = { version = "0.4.3", default-features = false, features = [
     "blocking",
 ] }

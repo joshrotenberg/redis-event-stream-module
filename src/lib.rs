@@ -2097,3 +2097,239 @@ mod tests {
         }
     }
 }
+
+// Property tests over the attack-adjacent pure surfaces (issue #94):
+// `parse_filter` takes CONFIG SET input from any admin connection (SPEC.md
+// section 7) and `sanitize` takes event names fired by arbitrary co-loaded
+// modules, which SPEC.md section 12 treats as possibly hostile or buggy. The
+// runtime catch_unwind wrappers would convert an undiscovered panic here into
+// dropped entries; these properties search for such panics instead of waiting
+// for them. Non-UTF-8 never reaches `sanitize` -- the raw callback
+// lossy-decodes the C string before any module logic runs -- so the byte-level
+// property models that pipeline rather than feeding raw bytes to `sanitize`.
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Every `@class` token the grammar accepts, paired with the subscription
+    // bit the parser must map it to (SPEC.md section 7). Kept in sync with
+    // `class_bit` by the constructed-filter property below.
+    const CAPTURABLE_CLASSES: [(&str, NotifyEvent); 12] = [
+        ("generic", NotifyEvent::GENERIC),
+        ("string", NotifyEvent::STRING),
+        ("list", NotifyEvent::LIST),
+        ("set", NotifyEvent::SET),
+        ("hash", NotifyEvent::HASH),
+        ("zset", NotifyEvent::ZSET),
+        ("stream", NotifyEvent::STREAM),
+        ("expired", NotifyEvent::EXPIRED),
+        ("evicted", NotifyEvent::EVICTED),
+        ("module", NotifyEvent::MODULE),
+        ("missed", NotifyEvent::MISSED),
+        ("new", NotifyEvent::NEW),
+    ];
+
+    // The sanitizer's output alphabet and the bare-name charset are the same
+    // set (SPEC.md section 5): names drawn from it cannot collide with the
+    // `*`, `@class`, or `,` grammar structure, and cannot carry whitespace.
+    const NAME_PATTERN: &str = "[A-Za-z0-9_.:-]{1,24}";
+
+    /// One grammar token together with the parse outcome it must produce.
+    #[derive(Clone, Debug)]
+    enum Token {
+        Star,
+        Class(&'static str, NotifyEvent),
+        Name(String),
+    }
+
+    impl Token {
+        fn text(&self) -> String {
+            match self {
+                Token::Star => "*".to_owned(),
+                Token::Class(class, _) => format!("@{class}"),
+                Token::Name(name) => name.clone(),
+            }
+        }
+    }
+
+    fn token() -> impl Strategy<Value = Token> {
+        prop_oneof![
+            1 => Just(Token::Star),
+            4 => prop::sample::select(&CAPTURABLE_CLASSES[..])
+                .prop_map(|(class, bit)| Token::Class(class, bit)),
+            4 => NAME_PATTERN.prop_map(Token::Name),
+        ]
+    }
+
+    proptest! {
+        // The default case count (256, PROPTEST_CASES overrides for longer
+        // local searches; CONTRIBUTING.md) rides the existing `cargo test
+        // --lib` budget. Shrinking is capped by iteration count so a failure
+        // cannot stall CI, and regression persistence is off: there is no
+        // corpus directory in a cdylib crate and CI runners would discard it.
+        #![proptest_config(ProptestConfig {
+            max_shrink_iters: 2048,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn parse_is_total_and_accepted_names_are_wellformed(s in any::<String>()) {
+            // Err is the only rejection channel (it becomes the CONFIG SET
+            // error reply); anything accepted as an exact name must be a
+            // plausible routable event name.
+            if let Ok(f) = parse_filter(&s) {
+                for name in &f.names {
+                    prop_assert!(!name.is_empty());
+                    prop_assert!(!name.chars().any(char::is_whitespace), "{:?}", name);
+                    prop_assert!(!name.contains(','), "{:?}", name);
+                    prop_assert!(!name.starts_with('@'), "{:?}", name);
+                    prop_assert_ne!(name.as_str(), "*");
+                }
+            }
+        }
+
+        // The idempotence property from issue #94, stated over the raw string:
+        // `ParsedFilter` has no Display and CONFIG GET returns the stored raw
+        // string, so a parse -> format -> parse round trip is not expressible.
+        #[test]
+        fn accepted_filters_reparse_identically(s in any::<String>()) {
+            if let Ok(a) = parse_filter(&s) {
+                let b = parse_filter(&s).expect("second parse of an accepted string");
+                prop_assert_eq!(a.star, b.star);
+                prop_assert_eq!(a.classes, b.classes);
+                prop_assert_eq!(a.names, b.names);
+            }
+        }
+
+        #[test]
+        fn constructed_valid_filters_parse_exactly(
+            parts in prop::collection::vec((token(), "[ \t]{0,2}", "[ \t]{0,2}"), 1..8)
+        ) {
+            let raw = parts
+                .iter()
+                .map(|(t, lead, trail)| format!("{lead}{}{trail}", t.text()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut star = false;
+            let mut classes = NotifyEvent::empty();
+            let mut names = HashSet::new();
+            for (t, _, _) in &parts {
+                match t {
+                    Token::Star => star = true,
+                    Token::Class(_, bit) => classes |= *bit,
+                    Token::Name(name) => {
+                        names.insert(name.clone());
+                    }
+                }
+            }
+            let parsed = parse_filter(&raw);
+            prop_assert!(parsed.is_ok(), "rejected {:?}", raw);
+            let f = parsed.unwrap();
+            prop_assert_eq!(f.star, star);
+            prop_assert_eq!(f.classes, classes);
+            prop_assert_eq!(f.names, names);
+        }
+
+        #[test]
+        fn empty_tokens_always_rejected(
+            front in prop::collection::vec(token(), 0..4),
+            back in prop::collection::vec(token(), 0..4),
+            pad in "[ \t]{0,3}",
+        ) {
+            let mut tokens: Vec<String> = front.iter().map(Token::text).collect();
+            tokens.push(pad);
+            tokens.extend(back.iter().map(Token::text));
+            prop_assert!(parse_filter(&tokens.join(",")).is_err());
+        }
+
+        // Covers both arms behind `@`: unknown classes and the two known
+        // uncapturable ones; every `@` token outside `class_bit` is rejected.
+        #[test]
+        fn non_capturable_classes_always_rejected(class in "[A-Za-z0-9]{0,12}") {
+            prop_assume!(class_bit(&class).is_none());
+            let token = format!("@{class}");
+            prop_assert!(parse_filter(&token).is_err());
+        }
+
+        #[test]
+        fn whitespace_inside_names_always_rejected(
+            a in NAME_PATTERN,
+            ws in "[ \t]{1,2}",
+            b in NAME_PATTERN,
+        ) {
+            // prop_assert! stringifies its condition into a format string, so
+            // the format! call must live outside the macro's argument.
+            let name = format!("{a}{ws}{b}");
+            prop_assert!(parse_filter(&name).is_err());
+        }
+
+        // Matching runs on the notification hot path under the GIL; it must
+        // be a plain bool for any event name against any subscription bit.
+        #[test]
+        fn matching_is_total(s in any::<String>(), event in any::<String>()) {
+            if let Ok(f) = parse_filter(&s) {
+                let _ = f.matches(NotifyEvent::empty(), &event);
+                for (_, bit) in CAPTURABLE_CLASSES {
+                    let _ = f.matches(bit, &event);
+                }
+            }
+        }
+
+        #[test]
+        fn sanitize_output_is_always_stream_key_safe(
+            bytes in prop::collection::vec(any::<u8>(), 0..300)
+        ) {
+            let event = String::from_utf8_lossy(&bytes);
+            let out = sanitize(&event);
+            prop_assert!(out.len() <= MAX_EVENT_NAME_LEN);
+            // The output alphabet excludes `#` (no event name can alias the
+            // reserved firehose key, issue #58) and `{`/`}` (no event name
+            // can inject into or break the destination key's hash tag).
+            prop_assert!(
+                out.bytes().all(
+                    |b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b':' | b'-')
+                ),
+                "{:?}",
+                out
+            );
+            // Empty-after-sanitization (the skipped_invalid path) happens
+            // only for an empty name: every input char maps to some output
+            // char, and lossy decode never empties a non-empty byte string.
+            prop_assert_eq!(out.is_empty(), bytes.is_empty());
+        }
+
+        // The SPEC.md section 5 "every built-in event name passes through
+        // byte-identical" guarantee, generalized to the whole alphabet.
+        #[test]
+        fn sanitize_passes_alphabet_input_through(s in "[A-Za-z0-9_.:-]{0,128}") {
+            prop_assert_eq!(sanitize(&s), s);
+        }
+
+        #[test]
+        fn sanitize_is_idempotent(s in any::<String>()) {
+            let once = sanitize(&s);
+            prop_assert_eq!(sanitize(&once), once);
+        }
+
+        // Exact acceptance predicate (SPEC.md section 7): non-empty, at most
+        // MAX_PREFIX_LEN bytes, charset without glob metacharacters so the
+        // discovery `SCAN MATCH <prefix>*` pattern never needs escaping.
+        #[test]
+        fn prefix_validation_is_total_and_exact(s in any::<String>()) {
+            let accepted = validate_prefix(&s).is_ok();
+            let wellformed = !s.is_empty()
+                && s.len() <= MAX_PREFIX_LEN
+                && s.chars().all(|c| {
+                    matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | ':' | '.' | '_' | '-' | '{' | '}')
+                });
+            prop_assert_eq!(accepted, wellformed);
+        }
+
+        #[test]
+        fn charset_prefixes_always_accepted(s in "[A-Za-z0-9:._{}-]{1,128}") {
+            prop_assert!(validate_prefix(&s).is_ok());
+        }
+    }
+}
