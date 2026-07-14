@@ -20,6 +20,11 @@
 #   REDIS_SERVER_BIN=/path/to/redis-server REDIS_CLI_BIN=/path/to/redis-cli \
 #     chaos/run.sh               # pin to a specific build (defaults: PATH)
 #
+# CI knobs (default off, so local runs are unchanged): CHAOS_WORK_DIR pins the
+# scratch dir to a known path instead of a fresh mktemp, and CHAOS_KEEP_WORK
+# leaves it in place on exit so a failed scheduled run can upload the per-node
+# redis.log / soak.log as an artifact (the .github/workflows/chaos.yml suite).
+#
 # `set -e` is deliberately omitted: scenarios kill nodes on purpose, so many
 # commands return nonzero by design. Failures are detected by explicit checks.
 
@@ -38,13 +43,14 @@ EXT=so
 [[ "$(uname)" == "Darwin" ]] && EXT=dylib
 MODULE="$PWD/target/release/libredis_event_stream_module.${EXT}"
 EX="$PWD/target/release/examples/eventstream_client"
-WORK="$(mktemp -d)"
+WORK="${CHAOS_WORK_DIR:-$(mktemp -d)}"
+mkdir -p "$WORK"
 PORTS=()   # every server port we start, for cleanup
 
 cleanup() {
     for p in "${PORTS[@]:-}"; do "$RC" -p "$p" shutdown nosave >/dev/null 2>&1; done
     pkill -9 -f "redis-server .*${WORK}" >/dev/null 2>&1
-    rm -rf "$WORK"
+    [[ -n "${CHAOS_KEEP_WORK:-}" ]] || rm -rf "$WORK"
 }
 trap cleanup EXIT
 

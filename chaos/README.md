@@ -17,8 +17,21 @@ chaos/run.sh reshard      # one scenario (reshard | failover | massexpiry | repe
 Requires `redis-server` (7.2+) and `redis-cli` on `PATH`; override with
 `REDIS_SERVER_BIN` / `REDIS_CLI_BIN` to pin a specific build. The module and the
 example client are built in release automatically. The script exits nonzero if
-any assertion fails, so it can gate changes if wired into a workflow (it is not,
-by default, because of its runtime and the timing sensitivity of failover).
+any assertion fails.
+
+## CI
+
+The suite runs on a weekly schedule (and on demand) via
+[`.github/workflows/chaos.yml`](../.github/workflows/chaos.yml), not on pull
+requests: its multi-minute runtime and the timing sensitivity of `failover`
+would slow and flake the PR gate. The workflow builds one server (the newest
+line in the CI matrix) from source, then runs the three deterministic scenarios
+(`reshard`, `massexpiry`, `repeated`) as a gating step and `failover` as a
+separate step retried once, so a single replica-promotion timing flake does not
+fail the run while two consecutive failures still do. A failed scheduled run
+opens (or comments on) a `kind:bug`/`area:ci` issue and uploads the per-node
+`redis.log` / `soak.log` as an artifact. `workflow_dispatch` takes an optional
+`scenario` input to run a single scenario.
 
 ## Scenarios
 
