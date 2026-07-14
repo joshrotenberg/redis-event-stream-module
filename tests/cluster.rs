@@ -502,6 +502,225 @@ fn per_node_captures_on_a_node_owning_a_single_slot() {
 }
 
 #[test]
+fn per_node_drops_on_a_zero_slot_node_and_resumes_once_it_gains_one() {
+    // A master owning ZERO slots (issue #89): freshly met, or every slot moved
+    // away. It has no slot to pin its streams to, yet it can still capture
+    // events — ASK'd writes into a slot it is importing execute locally, which
+    // is exactly how a new node sees its first traffic during a reshard. Those
+    // events must be dropped and counted as `dropped_no_owned_slot` (never
+    // captured under a foreign tag, never a crash), the read commands must
+    // still answer, and capture must resume once the node gains a slot,
+    // because selection is retried on the next captured event.
+    let a = TestServer::start_cluster_node(&["events", "set", "cluster-streams", "per-node"]);
+    let b = TestServer::start_cluster_node(&["events", "set", "cluster-streams", "per-node"]);
+    let mut ca = a.conn();
+    let mut cb = b.conn();
+    let _: () = redis::cmd("CLUSTER")
+        .arg("MEET")
+        .arg("127.0.0.1")
+        .arg(b.port)
+        .query(&mut ca)
+        .expect("meet");
+    // All 16384 slots to node a: b is a slotless master. Full coverage means
+    // both nodes still reach cluster_state:ok and serve commands.
+    let _: () = redis::cmd("CLUSTER")
+        .arg("ADDSLOTSRANGE")
+        .arg(0)
+        .arg(16383)
+        .query(&mut ca)
+        .expect("assign every slot to node a");
+    // Same epoch settling as the single-shard helper (7.2 stays in fail with
+    // config epoch 0); b owns nothing, so only a needs the bump.
+    let _: () = redis::cmd("CLUSTER")
+        .arg("BUMPEPOCH")
+        .query(&mut ca)
+        .expect("bump epoch");
+    wait_until(
+        Duration::from_secs(20),
+        "cluster ok with a slotless master",
+        || {
+            let ok = |c: &mut redis::Connection| {
+                redis::cmd("CLUSTER")
+                    .arg("INFO")
+                    .query::<String>(c)
+                    .unwrap_or_default()
+                    .contains("cluster_state:ok")
+            };
+            ok(&mut ca) && ok(&mut cb)
+        },
+    );
+
+    // Begin importing one slot into b — the ASK dance a reshard performs.
+    // While the import is open, ASKING-prefixed writes run on b even though
+    // it owns zero slots, and each fires a `set` notification there.
+    let a_id: String = redis::cmd("CLUSTER")
+        .arg("MYID")
+        .query(&mut ca)
+        .expect("a id");
+    let b_id: String = redis::cmd("CLUSTER")
+        .arg("MYID")
+        .query(&mut cb)
+        .expect("b id");
+    let slot: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg("k0")
+        .query(&mut cb)
+        .expect("keyslot");
+    let _: () = redis::cmd("CLUSTER")
+        .arg("SETSLOT")
+        .arg(slot)
+        .arg("IMPORTING")
+        .arg(&a_id)
+        .query(&mut cb)
+        .expect("mark importing on b");
+    let _: () = redis::cmd("CLUSTER")
+        .arg("SETSLOT")
+        .arg(slot)
+        .arg("MIGRATING")
+        .arg(&b_id)
+        .query(&mut ca)
+        .expect("mark migrating on a");
+
+    // A handful of events is enough to pin the counter: with no tag cached,
+    // every captured event re-runs selection, which probes up to all 16384
+    // slots; hundreds of writes would only make the test slow. The module's
+    // probe does not send ASKING, so on the slot b is importing it is refused
+    // (the node does not own the slot yet — a MOVED redirect surfaces as the
+    // module-level non-local-key error), not OK, so selection cannot pick the
+    // slot mid-import.
+    for k in ["a", "b", "c"] {
+        let _: () = redis::cmd("ASKING").query(&mut cb).expect("ASKING");
+        let _: () = redis::cmd("SET")
+            .arg(format!("{{k0}}{k}"))
+            .arg("v")
+            .query(&mut cb)
+            .expect("ASK'd SET on the slotless node");
+    }
+    // 4 = the 3 events plus the `loaded` control marker: pending markers are
+    // drained at the top of the first notification, ahead of the event's own
+    // job, and a marker with no owned slot is dropped under the same policy
+    // as a mirrored entry (SPEC.md section 9).
+    wait_until(Duration::from_secs(15), "slotless drops counted", || {
+        info_field(&mut cb, "dropped_no_owned_slot") == 4
+    });
+    assert_eq!(
+        info_field(&mut cb, "forwarded"),
+        0,
+        "nothing may be captured while the node owns no slot"
+    );
+    assert_eq!(info_field(&mut cb, "dropped_xadd_error"), 0);
+    assert_eq!(info_field(&mut cb, "dropped_migrating"), 0);
+    assert_eq!(info_field(&mut cb, "repins"), 0);
+    assert_eq!(info_field(&mut cb, "cluster_per_node"), 1);
+    let pinned_while_slotless: String = {
+        let raw: String = redis::cmd("INFO")
+            .arg("eventstream")
+            .query(&mut cb)
+            .expect("INFO");
+        raw.lines()
+            .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
+            .expect("pinned tag field")
+            .trim()
+            .to_string()
+    };
+    assert!(
+        pinned_while_slotless.is_empty(),
+        "no tag may be pinned while the node owns no slot"
+    );
+
+    // The read commands stay usable. STREAMS takes the never-selected fast
+    // path (the non-probing cached lookup) and answers an empty array rather
+    // than erroring; STATS is keyless and needs no pinned tag.
+    let streams: Vec<String> = redis::cmd("EVENTSTREAM.STREAMS")
+        .query(&mut cb)
+        .expect("STREAMS answers on a slotless node");
+    assert!(
+        streams.is_empty(),
+        "no tag was ever selected: the registry lookup short-circuits to an \
+         empty array, got {streams:?}"
+    );
+    let stats: Vec<redis::Value> = redis::cmd("EVENTSTREAM.STATS")
+        .query(&mut cb)
+        .expect("STATS answers on a slotless node");
+    assert!(
+        !stats.is_empty() && stats.len().is_multiple_of(2),
+        "STATS returns the flat name/value array"
+    );
+
+    // The one-time log line states the observation — the walk found no slot
+    // that accepted a local write — not an ownership inference (issue #116),
+    // and points at the retry semantics.
+    let log = b.log();
+    assert!(
+        log.contains("walked all 16384 slots"),
+        "the first drop logs the walked-all-slots line"
+    );
+    assert!(log.contains("retried on the next captured event"));
+
+    // Finish the migration: the importing side claims the slot first (which
+    // also bumps its epoch), then the source relinquishes it. b now owns its
+    // first slot.
+    for c in [&mut cb, &mut ca] {
+        let _: () = redis::cmd("CLUSTER")
+            .arg("SETSLOT")
+            .arg(slot)
+            .arg("NODE")
+            .arg(&b_id)
+            .query(c)
+            .expect("assign the slot to b");
+    }
+
+    // Selection is retried on the next captured event: one plain write in the
+    // newly owned slot is captured, and the node pins a tag hashing to it.
+    let _: () = redis::cmd("SET")
+        .arg("{k0}resume")
+        .arg("v")
+        .query(&mut cb)
+        .expect("plain SET once b owns the slot");
+    wait_until(
+        Duration::from_secs(10),
+        "capture resumes on the gained slot",
+        || info_field(&mut cb, "forwarded") == 1,
+    );
+    assert_eq!(
+        info_field(&mut cb, "dropped_no_owned_slot"),
+        4,
+        "the drop counter is history, not state; resuming does not reset it"
+    );
+    // The dropped `loaded` marker stays dropped: this first-ever selection is
+    // not a re-pin, so nothing writes the control stream retroactively.
+    assert_eq!(info_field(&mut cb, "control_markers"), 0);
+    assert_eq!(info_field(&mut cb, "dropped_xadd_error"), 0);
+    let raw: String = redis::cmd("INFO")
+        .arg("eventstream")
+        .query(&mut cb)
+        .expect("INFO");
+    let tag = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
+        .expect("pinned tag field")
+        .trim()
+        .to_string();
+    assert!(!tag.is_empty(), "the node pins a tag once it owns a slot");
+    let tag_slot: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg(format!("{{{tag}}}x"))
+        .query(&mut cb)
+        .expect("tag keyslot");
+    assert_eq!(tag_slot, slot, "the tag must hash to the only owned slot");
+    assert_eq!(xlen(&mut cb, &format!("events:{{{tag}}}set")), 1);
+    assert_eq!(xlen(&mut cb, &format!("events:{{{tag}}}#control")), 0);
+    // And the registry reports the stream now that a tag exists.
+    let streams: Vec<String> = redis::cmd("EVENTSTREAM.STREAMS")
+        .query(&mut cb)
+        .expect("STREAMS after resume");
+    assert!(
+        streams.contains(&format!("events:{{{tag}}}set")),
+        "the resumed stream is discoverable: {streams:?}"
+    );
+}
+
+#[test]
 fn invalid_cluster_streams_value_aborts_load() {
     // A bad cluster-streams value fails config validation, which happens during
     // module load ahead of the cluster-mode check, so it aborts the load in
