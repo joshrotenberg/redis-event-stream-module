@@ -37,7 +37,7 @@ use redis_module::{
 };
 #[cfg(not(test))]
 use redis_module_macros::{flush_event_handler, info_command_handler};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::ffi::CStr;
 #[cfg(not(test))]
@@ -65,7 +65,7 @@ static SKIPPED_FILTERED: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_INVALID: AtomicU64 = AtomicU64::new(0);
 static CONTROL_MARKERS: AtomicU64 = AtomicU64::new(0);
 /// Distinct destination streams written since load, excluding the control
-/// stream; the membership set lives in `KNOWN_STREAMS`.
+/// stream; the membership records live in `STREAM_STATS`.
 static ACTIVE_STREAMS: AtomicU64 = AtomicU64::new(0);
 /// Unix seconds of the most recent drop, 0 if none (SPEC.md section 13).
 static LAST_ERROR_TIME: AtomicU64 = AtomicU64::new(0);
@@ -78,11 +78,22 @@ static LAST_ENABLED: AtomicBool = AtomicBool::new(true);
 /// a gap marker is actually pending (SPEC.md section 9 delivery mechanics).
 static MARKERS_DIRTY: AtomicBool = AtomicBool::new(false);
 
-// First-failure log latches, one per drop reason (SPEC.md section 13 logging policy).
+// First-failure log latches for drop reasons with no destination stream in
+// hand (SPEC.md section 13 logging policy). Stream-scoped failures (an XADD
+// refused by a named destination) log through the per-stream rate-limited
+// state in `STREAM_STATS` instead (issue #68); these latches remain for the
+// process-level failures: SelectDb(0) in a job (`LOGGED_XADD_ERROR`) and
+// job-registration failure (`LOGGED_DEFER_ERROR`), where name resolution is
+// exactly what never ran.
 static LOGGED_XADD_ERROR: AtomicBool = AtomicBool::new(false);
-static LOGGED_OOM: AtomicBool = AtomicBool::new(false);
 static LOGGED_DEFER_ERROR: AtomicBool = AtomicBool::new(false);
 static LOGGED_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// Repeat-failure warning window per destination stream, in seconds (issue
+/// #68, SPEC.md section 13): after a stream's first-failure warning, further
+/// failures on that stream are counted silently until the window elapses,
+/// then the next failure logs again with the suppressed count.
+const LOG_WINDOW_SECS: u64 = 60;
 
 /// Panics caught at an FFI boundary, in either the notification callback or a
 /// post-notification job (SPEC.md section 5). A nonzero value is a bug in this
@@ -420,6 +431,74 @@ impl ConfigurationValue<RedisString> for ClusterStreamsConfig {
     }
 }
 
+/// Per-stream in-process state (issues #68 and #71), keyed by destination
+/// stream name in `STREAM_STATS`. One record carries the per-stream counters
+/// (the `EVENTSTREAM.STREAMS WITHSTATS` join, SPEC.md section 8), the
+/// registry-membership bit the write path dedupes SADD on, and the
+/// failure-logging window (SPEC.md section 13). One map so the per-event
+/// success path pays its single existing lock acquisition, never two.
+#[derive(Default)]
+struct StreamStats {
+    /// Entries written to this stream since load or the last flush
+    /// invalidation. For the firehose stream this is the per-stream view of
+    /// `firehose_forwarded`; for the control stream markers are counted in
+    /// `control_markers`, never here.
+    forwarded: u64,
+    /// Entries dropped by a refused XADD to this stream (`dropped_xadd_error`
+    /// and `dropped_oom` scopes) since load or the last flush invalidation.
+    dropped: u64,
+    /// Present in the persistent `<prefix><seg>#streams` set. Cleared with
+    /// the whole map on flush so the next write re-registers.
+    registered: bool,
+    /// Drops since the last successful write to this stream; nonzero means
+    /// the stream is failing, and the next success logs the recovery notice.
+    failing_drops: u64,
+    /// Unix seconds of this stream's last logged failure warning, 0 if none.
+    /// Reset on recovery so a recurrence logs immediately, not into a stale
+    /// window.
+    last_warned: u64,
+    /// Failures counted but not logged since `last_warned`.
+    suppressed: u64,
+}
+
+impl StreamStats {
+    /// Failure half of the per-stream logging state machine (issue #68):
+    /// count the drop and decide whether it may log. `Some(n)` means log
+    /// now, `n` being the failures suppressed since the last warning. The
+    /// window is per stream, not per (stream, reason): the logged text
+    /// carries the server's error, which names the reason, and one lock plus
+    /// one timestamp per stream keeps the state minimal.
+    fn record_failure(&mut self, now: u64) -> Option<u64> {
+        self.dropped += 1;
+        self.failing_drops += 1;
+        if self.last_warned == 0 || now.saturating_sub(self.last_warned) >= LOG_WINDOW_SECS {
+            let suppressed = self.suppressed;
+            self.last_warned = now;
+            self.suppressed = 0;
+            Some(suppressed)
+        } else {
+            self.suppressed += 1;
+            None
+        }
+    }
+
+    /// Success half: if the stream was failing, end the streak and return its
+    /// drop count for the recovery notice. Resets the warning window so the
+    /// next failing streak starts with a fresh first-failure warning. Does
+    /// not count the success; `forwarded` is the write path's concern (marker
+    /// writes recover a stream without counting as forwarded).
+    fn record_success(&mut self) -> Option<u64> {
+        let streak = self.failing_drops;
+        if streak == 0 {
+            return None;
+        }
+        self.failing_drops = 0;
+        self.last_warned = 0;
+        self.suppressed = 0;
+        Some(streak)
+    }
+}
+
 lazy_static! {
     static ref FILTER: FilterConfig = FilterConfig {
         raw: RedisGILGuard::new("expired".to_owned()),
@@ -439,10 +518,13 @@ lazy_static! {
     /// notification callback's post-notification job (SPEC.md section 9).
     static ref PENDING_MARKERS: RedisGILGuard<Vec<&'static str>> =
         RedisGILGuard::new(Vec::new());
-    /// Membership set behind `ACTIVE_STREAMS`; only touched on the capture
-    /// path, with the GIL held.
-    static ref KNOWN_STREAMS: RedisGILGuard<HashSet<String>> =
-        RedisGILGuard::new(HashSet::new());
+    /// Per-stream records behind `ACTIVE_STREAMS` and the WITHSTATS join
+    /// (issues #68, #71): registry membership, counters, failure-log state.
+    /// Touched on the capture and marker write paths, with the GIL held.
+    /// Bounded by the distinct destination names, exactly as the former
+    /// membership set was (the #64 max-streams cap remains future work).
+    static ref STREAM_STATS: RedisGILGuard<HashMap<String, StreamStats>> =
+        RedisGILGuard::new(HashMap::new());
 }
 
 /// The hash-tag segment inserted between the prefix and the rest of a
@@ -665,20 +747,57 @@ fn xadd_call_options() -> CallOptions {
         .build()
 }
 
-/// Log the first failure per drop reason at warning; subsequent failures are
-/// only counted (SPEC.md section 13). Stamps `LAST_ERROR_TIME`.
-fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool, detail: &str) {
-    counter.fetch_add(1, Ordering::Relaxed);
-    let now = std::time::SystemTime::now()
+/// Unix seconds for `LAST_ERROR_TIME` and the per-stream warning window.
+/// Only called on drop paths, so the syscall never taxes a healthy event.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    LAST_ERROR_TIME.store(now, Ordering::Relaxed);
+        .unwrap_or(0)
+}
+
+/// Log the first failure per drop reason at warning; subsequent failures are
+/// only counted (SPEC.md section 13). Stamps `LAST_ERROR_TIME`. For drops
+/// with no destination stream in hand; a refused XADD to a named stream goes
+/// through [`count_stream_drop`] instead.
+fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool, detail: &str) {
+    counter.fetch_add(1, Ordering::Relaxed);
+    LAST_ERROR_TIME.store(unix_now(), Ordering::Relaxed);
     if latch
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
         ctx.log_warning(&format!("eventstream: {detail}"));
+    }
+}
+
+/// Count a drop against its destination stream (issue #68): the global
+/// counter and `LAST_ERROR_TIME` as in [`count_drop`], plus the per-stream
+/// `dropped` counter, rate-limited per stream instead of latched per reason —
+/// the first failure on each stream logs the full error text at warning, then
+/// at most one warning per stream per [`LOG_WINDOW_SECS`], carrying the
+/// suppressed count. Runs GIL-held (a post-notification job or deinit).
+fn count_stream_drop(ctx: &Context, stream: &str, counter: &AtomicU64, detail: &str) {
+    counter.fetch_add(1, Ordering::Relaxed);
+    let now = unix_now();
+    LAST_ERROR_TIME.store(now, Ordering::Relaxed);
+    let mut stats = STREAM_STATS.lock(ctx);
+    if !stats.contains_key(stream) {
+        // A stream can fail before it ever succeeds (say, WRONGTYPE on first
+        // write); its record starts unregistered and joins the registry on
+        // its first successful write.
+        stats.insert(stream.to_owned(), StreamStats::default());
+    }
+    let entry = stats.get_mut(stream).expect("inserted above");
+    if let Some(suppressed) = entry.record_failure(now) {
+        if suppressed > 0 {
+            ctx.log_warning(&format!(
+                "eventstream: {detail} ({suppressed} earlier failures on this \
+                 stream suppressed in the last {LOG_WINDOW_SECS}s)"
+            ));
+        } else {
+            ctx.log_warning(&format!("eventstream: {detail}"));
+        }
     }
 }
 
@@ -741,21 +860,33 @@ fn write_marker(ctx: &Context, control_stream: &str, action: &str, maxlen: i64) 
     match res {
         Ok(_) => {
             CONTROL_MARKERS.fetch_add(1, Ordering::Relaxed);
+            // The control stream participates in the per-stream failure log
+            // (issue #68): if it was dropping markers, this success ends the
+            // streak. Markers are never counted as forwarded, and the control
+            // stream is not in the registry, so its record stays out of the
+            // WITHSTATS join (SPEC.md section 8).
+            if let Some(entry) = STREAM_STATS.lock(ctx).get_mut(control_stream) {
+                if let Some(drops) = entry.record_success() {
+                    ctx.log_notice(&format!(
+                        "eventstream: {control_stream} recovered after {drops} drops"
+                    ));
+                }
+            }
         }
         Err(e) => {
             let msg = e.to_utf8_string().unwrap_or_default();
             if msg.starts_with("OOM") {
-                count_drop(
+                count_stream_drop(
                     ctx,
+                    control_stream,
                     &DROPPED_OOM,
-                    &LOGGED_OOM,
                     &format!("gap marker '{action}' refused under maxmemory: {msg}"),
                 );
             } else {
-                count_drop(
+                count_stream_drop(
                     ctx,
+                    control_stream,
                     &DROPPED_XADD_ERROR,
-                    &LOGGED_XADD_ERROR,
                     &format!("gap marker '{action}' failed: {msg}"),
                 );
             }
@@ -869,19 +1000,23 @@ enum MirrorOutcome {
     /// the server's error text so the first-failure log names the actual
     /// refusal (TRYAGAIN vs ASK, slot, target node).
     Migrating(String),
-    /// Refused under `maxmemory`.
-    Oom(String),
-    /// Any other `XADD` failure.
-    Failed(String),
+    /// Refused under `maxmemory`. Carries the destination stream so the
+    /// caller can attribute the drop per stream (issue #68) without
+    /// reassembling the name.
+    Oom { stream: String, msg: String },
+    /// Any other `XADD` failure; stream carried as in [`MirrorOutcome::Oom`].
+    Failed { stream: String, msg: String },
 }
 
 /// Write one mirrored entry to `<prefix><seg><suffix>`, and on the first write
 /// to a stream register it in `<prefix><seg>#streams`. A success increments
 /// `counter`: `FORWARDED` for per-event entries, `FIREHOSE_FORWARDED` for
 /// firehose copies (issue #58), so `forwarded` stays a pure captured-event
-/// count. Returns a classified outcome; the caller counts drops and, on
-/// [`MirrorOutcome::SlotMigrated`], re-pins. Runs only in a write-safe context
-/// (a post-notification job).
+/// count; the stream's own record in `STREAM_STATS` counts either kind, so
+/// the firehose entry's per-stream `forwarded` is the per-stream view of
+/// `firehose_forwarded` (issue #71). Returns a classified outcome; the caller
+/// counts drops and, on [`MirrorOutcome::SlotMigrated`], re-pins. Runs only
+/// in a write-safe context (a post-notification job).
 #[allow(clippy::too_many_arguments)]
 fn mirror_entry(
     ctx: &Context,
@@ -938,22 +1073,37 @@ fn mirror_entry(
             if PER_NODE.load(Ordering::Relaxed) {
                 *PROBE_VERIFIED_TAG.lock().unwrap() = None;
             }
-            // First write to a destination stream: register it in the persistent
-            // set at `<prefix><seg>#streams` (replicated, so EVENTSTREAM.STREAMS
-            // survives restart and works on replicas) and count it. KNOWN_STREAMS
-            // is the in-process dedupe cache; it is cleared on flush so a FLUSHALL
-            // that deleted the registry rebuilds it on the next write. The
-            // registry key is under the prefix, so its own SADD notification is
-            // dropped by the feedback guard.
-            let mut known = KNOWN_STREAMS.lock(ctx);
-            if !known.contains(&stream) {
+            // Per-stream accounting under the map's one lock (issues #68,
+            // #71): the counter, the recovery notice if the stream was
+            // failing, and on the first write the registration in the
+            // persistent set at `<prefix><seg>#streams` (replicated, so
+            // EVENTSTREAM.STREAMS survives restart and works on replicas).
+            // STREAM_STATS is the in-process cache behind the dedupe; it is
+            // cleared on flush so a FLUSHALL that deleted the registry
+            // rebuilds it on the next write. The registry key is under the
+            // prefix, so its own SADD notification is dropped by the
+            // feedback guard.
+            let mut stats = STREAM_STATS.lock(ctx);
+            if !stats.contains_key(&stream) {
+                stats.insert(stream.clone(), StreamStats::default());
+            }
+            let entry = stats.get_mut(&stream).expect("inserted above");
+            entry.forwarded += 1;
+            if let Some(drops) = entry.record_success() {
+                // Notice-level recovery line (issue #68): the stream was
+                // dropping and writes again.
+                ctx.log_notice(&format!(
+                    "eventstream: {stream} recovered after {drops} drops"
+                ));
+            }
+            if !entry.registered {
                 let sadd: CallResult = ctx.call_ext(
                     "SADD",
                     &xadd_call_options(),
                     &[registry.as_bytes(), stream.as_bytes()][..],
                 );
                 if sadd.is_ok() {
-                    known.insert(stream.clone());
+                    entry.registered = true;
                     ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -962,13 +1112,19 @@ fn mirror_entry(
         Err(e) => {
             let msg = e.to_utf8_string().unwrap_or_default();
             if msg.starts_with("OOM") {
-                MirrorOutcome::Oom(format!("XADD to '{stream}' refused under maxmemory: {msg}"))
+                MirrorOutcome::Oom {
+                    msg: format!("XADD to '{stream}' refused under maxmemory: {msg}"),
+                    stream,
+                }
             } else if is_slot_migrated(&msg) {
                 MirrorOutcome::SlotMigrated
             } else if is_migration_refusal(&msg) {
                 MirrorOutcome::Migrating(format!("XADD to '{stream}' refused mid-migration: {msg}"))
             } else {
-                MirrorOutcome::Failed(format!("XADD to '{stream}' failed: {msg}"))
+                MirrorOutcome::Failed {
+                    msg: format!("XADD to '{stream}' failed: {msg}"),
+                    stream,
+                }
             }
         }
     }
@@ -1011,9 +1167,11 @@ fn repin_and_retry(
         ctx, prefix, &seg, suffix, event, key, db, maxlen, &FORWARDED,
     ) {
         MirrorOutcome::Written => {}
-        MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+        MirrorOutcome::Oom { stream, msg } => count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg),
         // Still refused (slot in flux): a migration-window drop, delimited by
-        // the marker above (SPEC.md section 10).
+        // the marker above (SPEC.md section 10). Migration refusals stay on
+        // the process-wide latch: the condition is node-level (the pinned
+        // slot), not stream-level (issue #68 scope).
         MirrorOutcome::SlotMigrated => count_drop(
             ctx,
             &DROPPED_MIGRATING,
@@ -1027,8 +1185,8 @@ fn repin_and_retry(
             &LOGGED_MIGRATING,
             &format!("{msg} (after re-pin; entry dropped in migration window)"),
         ),
-        MirrorOutcome::Failed(msg) => {
-            count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
+        MirrorOutcome::Failed { stream, msg } => {
+            count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg)
         }
     }
 }
@@ -1066,7 +1224,7 @@ fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &s
         &FIREHOSE_FORWARDED,
     ) {
         MirrorOutcome::Written => {}
-        MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+        MirrorOutcome::Oom { stream, msg } => count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg),
         MirrorOutcome::SlotMigrated => count_drop(
             ctx,
             &DROPPED_MIGRATING,
@@ -1081,8 +1239,8 @@ fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &s
             &LOGGED_MIGRATING,
             &format!("{msg} (firehose copy dropped in migration window)"),
         ),
-        MirrorOutcome::Failed(msg) => {
-            count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
+        MirrorOutcome::Failed { stream, msg } => {
+            count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg)
         }
     }
 }
@@ -1180,7 +1338,9 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 &FORWARDED,
             ) {
                 MirrorOutcome::Written => {}
-                MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+                MirrorOutcome::Oom { stream, msg } => {
+                    count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg)
+                }
                 // The pinned slot migrated away in a reshard (issue #46) or is
                 // mid-migration (issue #75): re-pin and retry once.
                 MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => repin_and_retry(
@@ -1192,7 +1352,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                     &db_s,
                     maxlen,
                 ),
-                MirrorOutcome::Failed(msg) => {
+                MirrorOutcome::Failed { stream, msg } => {
                     // The re-pin trigger is an empirically observed error
                     // string, so an unclassified failure could be the
                     // local-refusal in a reworded message. Re-verify ownership
@@ -1211,7 +1371,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                             maxlen,
                         );
                     } else {
-                        count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg);
+                        count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
                     }
                 }
             }
@@ -1486,18 +1646,22 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
     Ok(())
 }
 
-/// Invalidate the in-process stream registry cache on flush. FLUSHALL (or
-/// FLUSHDB in db 0) deletes the `<prefix>#streams` set, so the cache must be
-/// cleared for the next capture to re-register its stream. A FLUSHDB in
-/// another database does not delete the registry, so clearing here is
-/// conservative: the following re-SADD is idempotent, at the cost of
-/// re-counting `active_streams`, which is therefore "distinct streams written
-/// since load or last flush" (SPEC.md section 5).
+/// Invalidate the in-process per-stream state on flush. FLUSHALL (or FLUSHDB
+/// in db 0) deletes the `<prefix>#streams` set, so the registry-membership
+/// bits must be cleared for the next capture to re-register its stream. The
+/// whole record goes with them (issue #71): the per-stream counters count
+/// "since load or last flush", the simplest semantics consistent with the
+/// registry itself being deleted; the process-wide counters in INFO/STATS
+/// remain strictly since-load. A FLUSHDB in another database does not delete
+/// the registry, so clearing here is conservative: the following re-SADD is
+/// idempotent, at the cost of re-counting `active_streams`, which is
+/// therefore "distinct streams written since load or last flush" (SPEC.md
+/// section 5).
 #[cfg(not(test))]
 #[flush_event_handler]
 fn on_flush(ctx: &Context, event: FlushSubevent) {
     if let FlushSubevent::Started = event {
-        KNOWN_STREAMS.lock(ctx).clear();
+        STREAM_STATS.lock(ctx).clear();
     }
 }
 
@@ -1575,19 +1739,36 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     Ok(RedisValue::Array(out))
 }
 
-/// `EVENTSTREAM.STREAMS`: the destination streams registered since the
-/// registry existed, read live from the persistent `<prefix>#streams` set so
-/// the answer survives restart and works on replicas. The registry is an
-/// append-only log of stream names ever written; a listed stream may since
-/// have been trimmed to empty or deleted, so this is not a liveness check.
-/// Readonly, keyless. The registry lives in db 0, so the command selects db 0
-/// for the read and restores the caller's database. In per-node cluster mode
-/// this returns only the local node's registry (`<prefix>{tag}#streams`);
-/// cluster-wide discovery is resolved client-side — callers fan out over the
-/// masters and merge (issue #47; docs/consumer-patterns.md, cluster
-/// consumers).
+/// `EVENTSTREAM.STREAMS [WITHSTATS]`: the destination streams registered
+/// since the registry existed, read live from the persistent
+/// `<prefix>#streams` set so the answer survives restart and works on
+/// replicas. The registry is an append-only log of stream names ever written;
+/// a listed stream may since have been trimmed to empty or deleted, so this
+/// is not a liveness check. With `WITHSTATS` (issue #71), each stream comes
+/// with this process's counters: `[name, "forwarded", n, "dropped", n]`. The
+/// registry persists across restarts while the counters are process-local
+/// (reset on load and on flush invalidation), so a registered stream with no
+/// writes since load reports zeros. Readonly, keyless. The registry lives in
+/// db 0, so the command selects db 0 for the read and restores the caller's
+/// database. In per-node cluster mode this returns only the local node's
+/// registry (`<prefix>{tag}#streams`); cluster-wide discovery is resolved
+/// client-side — callers fan out over the masters and merge (issue #47;
+/// docs/consumer-patterns.md, cluster consumers).
 #[cfg(not(test))]
-fn cmd_streams(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
+fn cmd_streams(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+    let withstats = match args.len() {
+        1 => false,
+        2 => {
+            let arg = args[1].try_as_str()?;
+            if !arg.eq_ignore_ascii_case("withstats") {
+                return Err(RedisError::String(format!(
+                    "unknown EVENTSTREAM.STREAMS argument '{arg}'"
+                )));
+            }
+            true
+        }
+        _ => return Err(RedisError::WrongArity),
+    };
     // No owned slot selected yet in per-node mode: nothing local to report.
     // Use the non-probing lookup: this is a readonly command and must not
     // trigger the write that tag selection performs.
@@ -1603,8 +1784,36 @@ fn cmd_streams(ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     let members: RedisResult = ctx.call("SMEMBERS", &[registry.as_str()][..]);
     // Restore the caller's database before returning on any path.
     unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, orig_db) };
-    // Set membership is unordered; return it as SMEMBERS produced it.
-    members
+    if !withstats {
+        // Set membership is unordered; return it as SMEMBERS produced it.
+        return members;
+    }
+    // Join the registry (source of truth for discovery) with the
+    // process-local counters, in the registry's order. Records not in the
+    // registry (the control stream, or a stream whose every write failed and
+    // so never registered) are not listed; SPEC.md section 8 documents the
+    // reply as registered streams only.
+    let RedisValue::Array(names) = members? else {
+        return Err(RedisError::Str("unexpected registry reply"));
+    };
+    let stats = STREAM_STATS.lock(ctx);
+    let out = names
+        .into_iter()
+        .map(|name| {
+            let name: String = name.try_into()?;
+            let (forwarded, dropped) = stats
+                .get(&name)
+                .map_or((0, 0), |s| (s.forwarded, s.dropped));
+            Ok(RedisValue::Array(vec![
+                RedisValue::BulkString(name),
+                RedisValue::SimpleStringStatic("forwarded"),
+                RedisValue::Integer(forwarded as i64),
+                RedisValue::SimpleStringStatic("dropped"),
+                RedisValue::Integer(dropped as i64),
+            ]))
+        })
+        .collect::<Result<Vec<_>, RedisError>>()?;
+    Ok(RedisValue::Array(out))
 }
 
 // The macro installs the Redis allocator as the global allocator, which aborts
@@ -1830,6 +2039,49 @@ mod tests {
         assert_eq!(u32::from(crc16(b"foo")) % SLOT_COUNT, 12182);
         assert_eq!(u32::from(crc16(b"bar")) % SLOT_COUNT, 5061);
         assert_eq!(crc16(b""), 0);
+    }
+
+    #[test]
+    fn stream_stats_first_failure_logs_then_window_suppresses() {
+        let mut st = StreamStats::default();
+        // First failure on the stream logs, with nothing suppressed.
+        assert_eq!(st.record_failure(1000), Some(0));
+        // Repeats inside the window are counted, never logged.
+        assert_eq!(st.record_failure(1001), None);
+        assert_eq!(st.record_failure(1030), None);
+        assert_eq!(st.record_failure(1000 + LOG_WINDOW_SECS - 1), None);
+        // The first failure at or past the window logs the suppressed count.
+        assert_eq!(st.record_failure(1000 + LOG_WINDOW_SECS), Some(3));
+        assert_eq!(st.dropped, 5);
+        // The new warning opens a fresh window.
+        assert_eq!(st.record_failure(1000 + LOG_WINDOW_SECS + 1), None);
+    }
+
+    #[test]
+    fn stream_stats_recovery_reports_streak_and_rearms_logging() {
+        let mut st = StreamStats::default();
+        assert_eq!(st.record_failure(1000), Some(0));
+        assert_eq!(st.record_failure(1001), None);
+        assert_eq!(st.record_failure(1002), None);
+        // Success after drops ends the streak: recovery notice carries all
+        // three drops, logged or suppressed.
+        assert_eq!(st.record_success(), Some(3));
+        // The recovery reset the window, so a recurrence one second later
+        // logs immediately instead of falling into the stale window.
+        assert_eq!(st.record_failure(1003), Some(0));
+        // Counters are cumulative across streaks.
+        assert_eq!(st.dropped, 4);
+    }
+
+    #[test]
+    fn stream_stats_success_without_failures_is_silent() {
+        let mut st = StreamStats::default();
+        assert_eq!(st.record_success(), None);
+        assert_eq!(st.record_success(), None);
+        // A clock that goes backwards suppresses rather than floods: the
+        // saturating difference reads as within-window.
+        assert_eq!(st.record_failure(1000), Some(0));
+        assert_eq!(st.record_failure(900), None);
     }
 
     #[test]

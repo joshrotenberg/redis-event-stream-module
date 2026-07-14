@@ -88,6 +88,55 @@ fn mass_expiry_storm_is_fully_captured() {
 }
 
 #[test]
+fn wrongtype_destination_counts_per_stream_and_recovers() {
+    // Per-stream failure accounting (issues #68 and #71): break one
+    // destination stream with a WRONGTYPE occupant, watch its per-stream
+    // dropped counter move while forwarded stands still, then fix it and
+    // watch forwarded resume (the recovery notice fires here; the harness
+    // has no log access, so the counters carry the assertion).
+    let s = TestServer::start(&["events", "set"]);
+    let mut c = s.conn();
+
+    // A first successful write registers events:set in the registry.
+    let _: () = c.set("a", "1").expect("SET");
+    wait_until(Duration::from_secs(5), "stream registered", || {
+        info_field(&mut c, "forwarded") == 1
+    });
+
+    // Replace the destination stream with a plain string: the module's next
+    // XADD to it gets WRONGTYPE. Writes to prefix keys are guarded, never
+    // mirrored, so this cannot loop.
+    let _: () = redis::cmd("DEL")
+        .arg("events:set")
+        .query(&mut c)
+        .expect("DEL stream");
+    let _: () = c.set("events:set", "occupied").expect("SET occupant");
+
+    let _: () = c.set("b", "2").expect("SET into broken stream");
+    wait_until(Duration::from_secs(5), "wrongtype drop counted", || {
+        info_field(&mut c, "dropped_xadd_error") >= 1
+    });
+    let st = streams_withstats(&mut c);
+    assert_eq!(
+        st["events:set"],
+        (1, 1),
+        "the drop lands on the failing stream's row"
+    );
+    assert!(info_field(&mut c, "last_error_time") > 0);
+
+    // Fix the destination; the next capture succeeds and ends the streak.
+    let _: () = redis::cmd("DEL")
+        .arg("events:set")
+        .query(&mut c)
+        .expect("DEL occupant");
+    let _: () = c.set("d", "3").expect("SET after fix");
+    wait_until(Duration::from_secs(5), "capture recovers", || {
+        streams_withstats(&mut c)["events:set"] == (2, 1)
+    });
+    assert_eq!(info_field(&mut c, "dropped_xadd_error"), 1);
+}
+
+#[test]
 fn oom_refusal_is_a_counted_drop() {
     // Loss-window row: with the M flag, XADD is refused under maxmemory and
     // the event becomes a counted drop, not a forced write.
