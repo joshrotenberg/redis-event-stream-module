@@ -165,8 +165,9 @@ CONFIG SET eventstream.firehose yes
 ```
 
 Every captured event is then also written to `events:#firehose`, with the same
-three fields as its per-event copy. The per-event streams keep working
-unchanged, and all the patterns above apply to the firehose as-is:
+fields as its per-event copy (the same `entry-format`, and the same `seq` when
+enabled). The per-event streams keep working unchanged, and all the patterns
+above apply to the firehose as-is:
 
 ```
 XGROUP CREATE events:#firehose workers $ MKSTREAM
@@ -189,6 +190,52 @@ Toggling at runtime takes effect on the next captured event; events captured
 while the firehose was off are not replayed into it. In cluster per-node mode
 the firehose is per node (`events:{tag}#firehose`) and re-pins with the node's
 other streams; cross-node order is still not provided (see Cluster consumers).
+
+## Alternative entry shapes
+
+The default entry is three fields — `event`, `key`, `db` (see the top of this
+doc). `eventstream.entry-format` (SPEC.md section 6) selects another shape when
+a consumer needs one:
+
+```
+CONFIG SET eventstream.entry-format minimal   # drop the redundant event field
+CONFIG SET eventstream.entry-format verbose   # add a class field
+CONFIG SET eventstream.entry-format json       # one JSON document field
+```
+
+- `fixed` (default): `event`, `key`, `db`, byte-for-byte the historical schema.
+- `minimal`: `format=minimal`, `key`, `db` — the stream name already encodes the
+  event, so `event` is dropped.
+- `verbose`: adds a `class` field (`string`, `hash`, `expired`, …).
+- `json`: `format=json` plus a single `data` field holding
+  `{"event":…,"key":<base64>,"db":…}`. The key is base64 because keys are
+  arbitrary binary; decode it client-side.
+
+Every non-`fixed` entry carries a leading `format` field, so you can tell the
+shapes apart in a stream that mixes them. That matters because `entry-format` is
+live-settable: a `CONFIG SET` changes the shape of subsequent entries only, so a
+single stream can hold `fixed` entries (no `format`) followed by, say, `json`
+entries (`format=json`). Read the `format` field first and branch on it; treat a
+missing `format` as `fixed`. If you never change the format at runtime, the
+stream is uniform and you can skip the check.
+
+## Total order within a node (seq)
+
+Entry IDs order entries within one stream, but two entries in different streams
+that share a millisecond have no order from their IDs alone (SPEC.md section 9).
+Enable `eventstream.entry-seq` at load time to append a `seq` field — a
+process-global monotonic counter — to every entry:
+
+```
+# load-time only (immutable):  loadmodule ... entry-seq yes
+```
+
+Merging per-type streams by `seq` then totally orders same-millisecond entries
+on one node. `seq` is per node and per process: it resets to 0 on restart, and
+in cluster mode each node has its own counter, so it does **not** order entries
+across nodes or across a restart — for those, the entry ID (and, across nodes,
+an application timestamp) remains the answer below. For the `json` format `seq`
+appears inside the document rather than as a separate field.
 
 ## Origin database
 
@@ -279,9 +326,11 @@ XREAD COUNT 100 BLOCK 1000 STREAMS \
 Merge caveat. Entry IDs are millisecond timestamps assigned independently on
 each node, so two entries from different nodes can share a millisecond. Merging
 by entry ID orders within a node but cannot totally order a same-millisecond tie
-across nodes (SPEC.md section 9, ordering). Treat cross-node order within one
-millisecond as unspecified; if you need a total order, carry an application
-timestamp in the value, not the entry ID.
+across nodes (SPEC.md section 9, ordering). The `seq` field (`entry-seq`, above)
+tiebreaks per node, not across nodes: each node's counter is independent, so it
+does not resolve a cross-node tie. Treat cross-node order within one millisecond
+as unspecified; if you need a total order, carry an application timestamp in the
+value, not the entry ID.
 
 Re-pinning. A reshard that moves a node's pinned slot makes the node re-pin to a
 new tag and continue under a new stream name; it writes a `repinned` marker to
