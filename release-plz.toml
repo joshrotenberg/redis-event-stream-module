@@ -1,23 +1,26 @@
-# Release process (issue #27). Fully manual, in three steps:
+# Release process (issues #27, #85). Two manual steps plus one automated step:
 #   1. Bump the version in Cargo.toml and add a CHANGELOG entry in a
 #      "chore: release prep for vX.Y.Z" PR (v0.1.0 in #40, v0.2.0 in #53).
 #   2. Merge it to main.
-#   3. Create the GitHub release from the tag by hand, e.g.
-#        awk '/^## \[X.Y.Z\]/{f=1} /^## \[/{if(f && !/X.Y.Z/)f=0} f' CHANGELOG.md > notes.md
-#        gh release create vX.Y.Z --target main --title vX.Y.Z --notes-file notes.md
-#      Publishing the release triggers release-artifacts.yml (on
-#      `release: published`), which builds and attaches the prebuilt binaries.
+#   3. Tag the merged commit and push the tag:
+#        git tag vX.Y.Z && git push origin vX.Y.Z
+#      The tag push triggers .github/workflows/release.yml, which checks that
+#      the tag, Cargo.toml, and the top CHANGELOG section agree, creates the
+#      GitHub release from that CHANGELOG section, then calls
+#      release-artifacts.yml to build and attach the prebuilt binaries.
+# Steps 1-2 stay manual (the release-prep PR is a deliberate human decision);
+# only step 3, formerly a hand-run awk + `gh release create`, is automated.
 #
-# release-plz does NOT tag or release this crate, despite this config. Its
-# `release` step reports "nothing to release": the crate is publish = false, so
-# there is no crates.io baseline to diff against, and switching to
-# `git_only = true` fails because git_only mode runs `cargo package`, which
-# rejects the git-pinned redis-module dependencies (no crates.io version;
-# redis-module-macros is a 99.99.99 placeholder). Its automatic version-bump PR
-# does not open for the same reason. The workflow is kept only for the git
-# config it sets and in case a future release-plz handles this dependency shape;
-# enabling "Actions may create PRs" in repo settings does not change this,
-# because release-plz never gets as far as trying to open a PR.
+# release-plz does NOT tag or release this crate, despite this config, so its
+# workflow (.github/workflows/release-plz.yml) was removed in #85. Its `release`
+# step reports "nothing to release": the crate is publish = false, so there is
+# no crates.io baseline to diff against, and switching to `git_only = true`
+# fails because git_only mode runs `cargo package`, which rejects the git-pinned
+# redis-module dependencies (no crates.io version; redis-module-macros is a
+# 99.99.99 placeholder). Its automatic version-bump PR does not open for the
+# same reason. This file is kept for its git config and in case a future
+# release-plz handles this dependency shape; revisit only if the redis-module
+# pin ever ships on crates.io, at which point release.yml can be retired.
 #
 # This crate is a cdylib Redis module: consumers load a compiled artifact, not a
 # Rust dependency, so crates.io publishing adds nothing and is disabled here (and

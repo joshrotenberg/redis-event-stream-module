@@ -17,8 +17,8 @@ opt-in cluster per-node support. Interfaces may change before 1.0.
 
 ## Install
 
-Prebuilt modules for Linux (x86_64, aarch64) and macOS (aarch64) are attached
-to each [release](https://github.com/joshrotenberg/redis-event-stream-module/releases)
+Prebuilt modules for Linux (x86_64, aarch64) and macOS (x86_64, aarch64) are
+attached to each [release](https://github.com/joshrotenberg/redis-event-stream-module/releases)
 with sha256 checksums:
 
 ```sh
@@ -26,6 +26,18 @@ curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/lat
 curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so.sha256
 shasum -a 256 -c redis-event-stream-module-<version>-linux-x86_64.so.sha256
 ```
+
+Each artifact also carries a Sigstore build-provenance attestation that ties it
+back to this repo, the source commit, and the workflow run that built it. With
+the [GitHub CLI](https://cli.github.com/) you can verify provenance in addition
+to the checksum:
+
+```sh
+gh attestation verify redis-event-stream-module-<version>-linux-x86_64.so \
+  --repo joshrotenberg/redis-event-stream-module
+```
+
+The `.sha256` file remains the low-dependency check for users without `gh`.
 
 Or build from source (stable Rust):
 
