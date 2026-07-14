@@ -2,6 +2,14 @@
 name = "redis-event-stream-module"
 version = "0.2.0"
 edition = "2021"
+# MSRV is the floor of the resolved build graph, not a taste choice: the
+# git-pinned redis-module v2.1.3 drags in bindgen -> which -> home 0.5.12
+# (rust-version 1.88) as a build dependency, and the redis 1.3 test client
+# (dev-dependency) is also 1.88, so nothing older compiles this lockfile.
+# Gated by the msrv leg in .github/workflows/ci.yml; a dep bump that raises
+# the floor fails there loudly and is resolved by a deliberate bump commit.
+# Edition stays 2021 on purpose (see SPEC.md section 14, Toolchain).
+rust-version = "1.88"
 description = "Redis module that mirrors keyspace notifications into per-event Redis Streams for durable, replayable event consumption."
 repository = "https://github.com/joshrotenberg/redis-event-stream-module"
 license = "MIT OR Apache-2.0"

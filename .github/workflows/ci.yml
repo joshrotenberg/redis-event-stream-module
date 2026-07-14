@@ -26,6 +26,22 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  # MSRV gate: build the resolved graph on the exact floor declared in
+  # Cargo.toml (rust-version). --all-targets covers the lib, examples, and the
+  # test/dev-dependency graph, so a dependency bump that raises the floor above
+  # this pin fails here instead of silently moving the MSRV. Keep this toolchain
+  # version and Cargo.toml's rust-version in lockstep; a failure here is
+  # resolved by a deliberate rust-version bump commit, not by loosening the leg.
+  # No components/build: check only, since fmt and clippy run on stable above.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Check on MSRV
+        run: cargo check --all-targets --locked
+
   # shellcheck is preinstalled on ubuntu runners, so no action dependency.
   # `git ls-files` picks up new scripts automatically; -S style is the
   # strictest severity, held deliberately (see issue #100).

@@ -40,7 +40,8 @@ gh attestation verify redis-event-stream-module-<version>-linux-x86_64.so \
 
 The `.sha256` file remains the low-dependency check for users without `gh`.
 
-Or build from source (stable Rust):
+Or build from source (Rust 1.88 or newer; the MSRV is declared in
+`Cargo.toml` and gated in CI):
 
 ```sh
 cargo build --release
