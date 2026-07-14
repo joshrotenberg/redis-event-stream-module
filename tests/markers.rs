@@ -296,3 +296,203 @@ fn restart_reads_as_gap_and_persisted_control_stream_is_safe() {
     // neither unloading nor disabled, so the window between them is a gap.
     assert_ne!(actions[0], "unloading");
 }
+
+/// Number of consumer groups on `key`, or 0 if the stream is missing.
+fn group_count(conn: &mut redis::Connection, key: &str) -> usize {
+    let reply: redis::Value = redis::cmd("XINFO")
+        .arg("GROUPS")
+        .arg(key)
+        .query(conn)
+        .unwrap_or(redis::Value::Array(vec![]));
+    match reply {
+        redis::Value::Array(rows) => rows.len(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn flushall_writes_flushed_marker_db_all() {
+    // #74: FLUSHALL deletes the destination streams, their groups, the registry,
+    // and the control stream itself, firing no per-key notifications. The
+    // pending `flushed` marker lands on the recreated control stream ahead of
+    // the first post-flush entry, bounding the discontinuity. db is -1 (ALL).
+    let s = TestServer::start(&["events", "set"]);
+    let mut c = s.conn();
+
+    let _: () = c.set("x", "1").expect("SET");
+    wait_until(Duration::from_secs(5), "loaded marker", || {
+        xlen(&mut c, CONTROL) == 1
+    });
+    assert_eq!(xlen(&mut c, "events:set"), 1);
+
+    let _: () = redis::cmd("FLUSHALL").query(&mut c).expect("FLUSHALL");
+    // The control stream and the destination stream are both gone.
+    assert_eq!(
+        xlen(&mut c, CONTROL),
+        0,
+        "control stream deleted by FLUSHALL"
+    );
+    assert_eq!(xlen(&mut c, "events:set"), 0);
+
+    // The next captured event drains the pending flushed marker onto the
+    // recreated control stream, ahead of the mirrored entry.
+    let _: () = c.set("y", "1").expect("SET after FLUSHALL");
+    wait_until(Duration::from_secs(5), "flushed marker flushed", || {
+        xlen(&mut c, CONTROL) == 1
+    });
+    assert_eq!(
+        marker_actions(&mut c),
+        vec!["flushed"],
+        "the recreated control stream opens with a flushed marker"
+    );
+    // FLUSHALL carries db -1 (all databases).
+    assert_eq!(stream_field_strings(&mut c, CONTROL, "db"), vec!["-1"]);
+
+    let marker_id = first_entry_id(&mut c, CONTROL);
+    let entry_id = first_entry_id(&mut c, "events:set");
+    assert!(
+        marker_id <= entry_id,
+        "flushed marker {marker_id} must precede entry {entry_id}"
+    );
+}
+
+#[test]
+fn flushdb_nonzero_writes_flushed_marker_with_db_and_streams_survive() {
+    // #74 folded-in scope: FLUSHDB in a non-zero db loses that database's source
+    // keys but leaves the db 0 streams, their groups, and the control stream
+    // intact. The `flushed` marker carries the flushed db so consumers reconcile
+    // over exactly that database rather than everything.
+    let s = TestServer::start(&["events", "set"]);
+    let mut c0 = s.conn();
+    let mut c1 = s.conn_db(1);
+
+    let _: () = c0.set("a", "1").expect("SET db0");
+    wait_until(Duration::from_secs(5), "loaded marker", || {
+        xlen(&mut c0, CONTROL) == 1
+    });
+    // A consumer group on the db 0 destination stream must survive the flush.
+    let _: () = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg("events:set")
+        .arg("g")
+        .arg("$")
+        .query(&mut c0)
+        .expect("XGROUP CREATE");
+
+    // An event in db 1 is captured to the db 0 stream with db field "1".
+    let _: () = c1.set("b", "1").expect("SET db1");
+    wait_until(Duration::from_secs(5), "db1 event mirrored", || {
+        xlen(&mut c0, "events:set") == 2
+    });
+
+    let _: () = redis::cmd("FLUSHDB")
+        .query(&mut c1)
+        .expect("FLUSHDB on db 1");
+    // db 0 streams, the control stream, and the group are untouched.
+    assert_eq!(xlen(&mut c0, "events:set"), 2, "db 0 streams survive");
+    assert_eq!(xlen(&mut c0, CONTROL), 1, "control stream survives");
+    assert_eq!(group_count(&mut c0, "events:set"), 1, "group survives");
+
+    // The next event drains the flushed marker onto the surviving control stream.
+    let _: () = c0.set("c", "1").expect("SET db0 after FLUSHDB");
+    wait_until(Duration::from_secs(5), "flushed marker flushed", || {
+        xlen(&mut c0, CONTROL) == 2
+    });
+    assert_eq!(marker_actions(&mut c0), vec!["loaded", "flushed"]);
+    // Only the flushed marker carries a db field; it names the flushed db.
+    assert_eq!(stream_field_strings(&mut c0, CONTROL, "db"), vec!["1"]);
+}
+
+#[test]
+fn swapdb_db0_writes_swapdb_marker_and_moves_streams() {
+    // #73: SWAPDB involving db 0 moves the existing streams (and their groups)
+    // into the other database while the module keeps writing fresh streams in
+    // db 0. A `swapdb` marker lands on the fresh db 0 control stream ahead of
+    // the first post-swap entry; the moved streams remain readable in the
+    // swapped database, and the per-entry `db` field stays historical truth.
+    let s = TestServer::start(&["events", "set"]);
+    let mut c0 = s.conn();
+
+    let _: () = c0.set("a", "1").expect("SET db0");
+    wait_until(Duration::from_secs(5), "loaded marker", || {
+        xlen(&mut c0, CONTROL) == 1
+    });
+    assert_eq!(xlen(&mut c0, "events:set"), 1);
+    let _: () = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg("events:set")
+        .arg("g")
+        .arg("$")
+        .query(&mut c0)
+        .expect("XGROUP CREATE");
+
+    let _: () = redis::cmd("SWAPDB")
+        .arg(0)
+        .arg(1)
+        .query(&mut c0)
+        .expect("SWAPDB 0 1");
+
+    // The streams, their groups, and the control stream moved to db 1.
+    let mut c1 = s.conn_db(1);
+    assert_eq!(
+        xlen(&mut c1, "events:set"),
+        1,
+        "moved stream readable in db 1"
+    );
+    assert_eq!(group_count(&mut c1, "events:set"), 1, "group moved with it");
+    // The per-entry db field is unchanged historical truth: the event fired in
+    // db 0, and the moved entry still says so.
+    assert_eq!(stream_field_strings(&mut c1, "events:set", "db"), vec!["0"]);
+
+    // db 0 is now empty (it was the untouched db 1). The next db 0 event drains
+    // the swapdb marker onto the fresh db 0 control stream and creates a fresh
+    // destination stream there.
+    assert_eq!(
+        xlen(&mut c0, CONTROL),
+        0,
+        "db 0 control stream swapped away"
+    );
+    let _: () = c0.set("b", "1").expect("SET db0 after SWAPDB");
+    wait_until(Duration::from_secs(5), "swapdb marker flushed", || {
+        xlen(&mut c0, CONTROL) == 1
+    });
+    assert_eq!(marker_actions(&mut c0), vec!["swapdb"]);
+    assert_eq!(xlen(&mut c0, "events:set"), 1, "fresh db 0 stream created");
+
+    let marker_id = first_entry_id(&mut c0, CONTROL);
+    let entry_id = first_entry_id(&mut c0, "events:set");
+    assert!(
+        marker_id <= entry_id,
+        "swapdb marker {marker_id} must precede entry {entry_id}"
+    );
+}
+
+#[test]
+fn swapdb_without_db0_writes_no_marker() {
+    // #73: a swap that does not touch db 0 leaves the streams' database intact,
+    // so it is ignored — no swapdb marker, no discontinuity.
+    let s = TestServer::start(&["events", "set"]);
+    let mut c0 = s.conn();
+
+    let _: () = c0.set("a", "1").expect("SET db0");
+    wait_until(Duration::from_secs(5), "loaded marker", || {
+        xlen(&mut c0, CONTROL) == 1
+    });
+
+    let _: () = redis::cmd("SWAPDB")
+        .arg(1)
+        .arg(2)
+        .query(&mut c0)
+        .expect("SWAPDB 1 2");
+
+    // A later db 0 event must not produce a swapdb marker.
+    let _: () = c0.set("b", "1").expect("SET db0");
+    wait_until(Duration::from_secs(5), "db0 event mirrored", || {
+        xlen(&mut c0, "events:set") == 2
+    });
+    assert_eq!(
+        marker_actions(&mut c0),
+        vec!["loaded"],
+        "a swap not involving db 0 writes no marker"
+    );
+}

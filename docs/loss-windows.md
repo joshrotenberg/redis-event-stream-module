@@ -30,8 +30,9 @@ captured at least once, within the retention window.
 | Stream trimming | `MAXLEN` evicts entries before a slow consumer reads them | (see below) | Size `maxlen` for the slowest consumer; detectable via resume ID vs first entry ID |
 | Crash before fsync | Server persistence config | (none) | Bounded by `appendfsync` (see Persistence); reconcile since last durable point |
 | Failover | Entries not yet replicated to the promoted replica | (none) | Standard async-replication caveat; reconcile over the failover window |
-| `FLUSHALL`, or `FLUSHDB` in db 0 | No per-key notifications fire, and the destination streams (with their consumer groups) are deleted | (none) | Recreate groups; full reconcile, the streams themselves are gone |
-| `FLUSHDB` in a non-zero db | No per-key notifications fire for the flushed keys; db 0 streams are unaffected | (none) | Reconcile over the flushed database |
+| `FLUSHALL`, or `FLUSHDB` in db 0 | No per-key notifications fire, and the destination streams (with their consumer groups) are deleted | `control_markers` | Delimited by a `flushed` marker (`db -1`) on the recreated control stream (below); recreate groups; full reconcile, the streams themselves are gone |
+| `FLUSHDB` in a non-zero db | No per-key notifications fire for the flushed keys; db 0 streams are unaffected | `control_markers` | Read `flushed` markers filtered on `db`; reconcile over the flushed database |
+| `SWAPDB` involving db 0 | The destination streams (with their groups) move to the swapped database; the module writes fresh streams in db 0 | `control_markers` | Delimited by a `swapdb` marker on the fresh db 0 control stream (below); read the swapped database to recover db 0 history |
 
 Timing caveat: `expired` fires when Redis actually removes the key (lazy access
 or the active expire cycle), not at the nominal TTL instant. The entry ID
@@ -94,11 +95,23 @@ at each capture-boundary lifecycle point:
 | Module load | `loaded` |
 | `eventstream.enabled` set `yes` to `no` | `disabled` |
 | `eventstream.enabled` set `no` to `yes` | `enabled` |
+| `FLUSHALL`, or `FLUSHDB` in any db | `flushed` |
+| `SWAPDB` involving db 0 | `swapdb` |
 | `MODULE UNLOAD` | `unloading` |
 
-Each marker carries `action` and `module-version`. Markers replicate, respect
-`maxmemory`, and persist like any other entry, and only a master writes them
-(replicas receive them via replication).
+Each marker carries `action` and `module-version`; the `flushed` marker also
+carries a `db` field, the decimal flushed database number (`-1` for
+`FLUSHALL`), so you can bound the reconcile to that database. Markers replicate,
+respect `maxmemory`, and persist like any other entry, and only a master writes
+them (replicas receive them via replication).
+
+The `flushed` marker lands on the recreated control stream after a
+`FLUSHALL`/`FLUSHDB` in db 0 deletes it, or on the surviving db 0 control stream
+after a `FLUSHDB` in another database; either way it precedes the first
+post-flush mirrored entry. The `swapdb` marker lands on the fresh db 0 control
+stream after a `SWAPDB` moved the old one to another database, and tells you
+that entries before it may now live in that database. A `SWAPDB` not involving
+db 0 leaves the streams' database untouched and writes no marker.
 
 A marker's `module-version` reflects marker-write time, not necessarily the
 module currently loaded. To audit which release a running server has loaded,
@@ -136,10 +149,11 @@ streams before it.
 
 ### Zero-traffic caveat
 
-The `loaded`, `disabled`, and `enabled` markers are written lazily by the next
-captured notification, not at the instant of the lifecycle event. If no event
-ever fires in a window, no marker appears, but nothing was lost in that window
-either, so the absence is correct.
+The `loaded`, `disabled`, `enabled`, `flushed`, and `swapdb` markers are written
+lazily by the next captured notification, not at the instant of the lifecycle
+event. If no event ever fires in a window, no marker appears, but nothing was
+mirrored in that window either, so the absence is correct (for a flush that
+deleted the streams, the pre-flush contents are still gone regardless).
 
 ## Reconciling a gap without a full scan
 
@@ -173,6 +187,6 @@ to deliver.
 ## Executable reference
 
 The behaviors above are pinned by the integration suite: `tests/markers.rs`
-(marker lifecycle, crash-gap detection, restart safety) and
-`tests/replication.rs` (replication and AOF durability). If a claim here ever
+(marker lifecycle, crash-gap detection, restart safety, flush and SWAPDB gap
+markers) and `tests/replication.rs` (replication and AOF durability). If a claim here ever
 drifts from those tests, the tests are correct.
