@@ -26,6 +26,16 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  # shellcheck is preinstalled on ubuntu runners, so no action dependency.
+  # `git ls-files` picks up new scripts automatically; -S style is the
+  # strictest severity, held deliberately (see issue #100).
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shellcheck
+        run: git ls-files '*.sh' | xargs shellcheck -S style
+
   integration:
     runs-on: ubuntu-latest
     strategy:
@@ -44,6 +54,9 @@ jobs:
           - name: valkey-8
             kind: valkey
             version: 8.1.6
+          - name: valkey-9
+            kind: valkey
+            version: 9.1.0
     name: integration (${{ matrix.name }})
     env:
       SERVER_DIR: ${{ github.workspace }}/.server/${{ matrix.name }}

@@ -3,13 +3,13 @@
 [![CI](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/joshrotenberg/redis-event-stream-module)](https://github.com/joshrotenberg/redis-event-stream-module/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
-![Redis 7.2+ | Valkey 8.x](https://img.shields.io/badge/Redis_7.2%2B_%7C_Valkey_8.x-informational)
+![Redis 7.2+ | Valkey 8.x/9.x](https://img.shields.io/badge/Redis_7.2%2B_%7C_Valkey_8.x%2F9.x-informational)
 
 A Redis module that mirrors keyspace notifications into per-event Redis
 Streams. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
 stream entry, written atomically with the keyspace change, so events are
 durable, replayable, and consumable with `XREAD` or consumer groups. Runs on
-Redis 7.2+ and Valkey 8.x, standalone or with replicas.
+Redis 7.2+ and Valkey 8.x/9.x, standalone or with replicas.
 
 Status: early release. The code implements the [SPEC.md](SPEC.md) design, the
 authoritative reference: the v0.1 capture and introspection surface, plus v0.2
@@ -154,8 +154,8 @@ reconcile over them.
 
 ## Supported servers
 
-Requires `RM_AddPostNotificationJob` (Redis 7.2, Valkey 8.x lineage). CI runs
-the full integration suite against each pinned version:
+Requires `RM_AddPostNotificationJob` (Redis 7.2, Valkey 8.x/9.x lineages). CI
+runs the full integration suite against each pinned version:
 
 | Server | Version in CI |
 |--------|---------------|
@@ -163,6 +163,7 @@ the full integration suite against each pinned version:
 | Redis 7.4 | 7.4.5 |
 | Redis 8.x | 8.8.0 |
 | Valkey 8.x | 8.1.6 |
+| Valkey 9.x | 9.1.0 |
 
 Servers below 7.2 fail to load the module (SPEC.md section 14 describes the
 failure mode).

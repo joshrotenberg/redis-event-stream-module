@@ -23,6 +23,12 @@
 # `set -e` is deliberately omitted: scenarios kill nodes on purpose, so many
 # commands return nonzero by design. Failures are detected by explicit checks.
 
+# Scenarios are dispatched indirectly via "scenario_$s" at the bottom, so the
+# linter sees the whole call graph as unreachable/never-invoked. The reported
+# code differs by version (SC2317 unreachable, SC2329 never invoked), so both
+# are disabled file-wide below.
+# shellcheck disable=SC2317,SC2329
+
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 

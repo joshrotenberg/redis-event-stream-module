@@ -85,7 +85,10 @@ cargo build --release >/dev/null
 
 WORKDIR="$(mktemp -d)"
 SERVER_PID=""
-cleanup() { [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$WORKDIR"; }
+cleanup() {
+  if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" 2>/dev/null || true; fi
+  rm -rf "$WORKDIR"
+}
 trap cleanup EXIT
 
 want() { [[ " $SCENARIOS " == *" $1 "* ]]; }
