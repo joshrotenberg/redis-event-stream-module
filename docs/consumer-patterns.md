@@ -323,10 +323,40 @@ registry, exposed through a command:
 EVENTSTREAM.STREAMS
 ```
 
-This returns the registered stream names, survives restart (RDB or AOF), and
-works on replicas. It is an append-only log of names ever written, so a listed
-stream may since have been trimmed to empty or deleted; check `XLEN` if you need
-liveness.
+This returns the registered stream names and survives restart (RDB or AOF). It
+is an append-only log of names ever written, so a listed stream may since have
+been trimmed to empty or deleted. It is `readonly`, so it works on replicas. For
+a liveness-aware answer in one round-trip, use `VERBOSE`:
+
+```
+EVENTSTREAM.STREAMS VERBOSE
+```
+
+Each row is `[name, exists, length]` — `exists` is `0`/`1` (`EXISTS`) and
+`length` is the current `XLEN`. The two are independent: an absent (deleted) key
+reads `0, 0`, while a present-but-empty or foreign non-stream key reads `1, 0`.
+This replaces the older client-side join (one `EVENTSTREAM.STREAMS` plus an
+`EXISTS`/`XLEN` per name, in db 0) with a single command; it mutates nothing and,
+like the bare and `WITHSTATS` forms, runs on replicas.
+
+To reconcile the registry itself — dropping dead names so its size does not grow
+without bound on a long-lived deployment — opt in explicitly with the separate
+command `EVENTSTREAM.PRUNE`:
+
+```
+EVENTSTREAM.PRUNE
+```
+
+`EVENTSTREAM.PRUNE` removes the registered names whose key is **absent**
+(deleted, `EXISTS 0`) and returns the count removed. Absence is the only trigger:
+a present key that is empty, or a foreign non-stream key parked at the name, is
+not pruned. It is the only command that mutates the registry, is never automatic,
+and its `SREM` replicates like the original registration (minus the verify-oom
+flag, since pruning frees memory), so replicas and the AOF/RDB converge. A pruned
+name re-registers on its next captured write, so pruning is safe to run
+periodically. `EVENTSTREAM.PRUNE` is a `write` command and runs on a primary, not
+a replica; keeping it separate is what lets the bare, `VERBOSE`, and `WITHSTATS`
+forms of `EVENTSTREAM.STREAMS` stay `readonly` and serve discovery on replicas.
 
 With a known filter the stream names are also deterministic
 (`<prefix><event-name>`), and a `SCAN` fallback works:
