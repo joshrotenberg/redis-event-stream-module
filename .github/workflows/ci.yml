@@ -81,6 +81,10 @@ jobs:
           if [ "${{ matrix.kind }}" = "redis" ]; then
             URL="https://download.redis.io/releases/redis-${{ matrix.version }}.tar.gz"
           else
+            # Valkey 9.x's Makefile requires googletest at build time (C++ unit
+            # tests, Makefile "googletest not found" hard stop); 8.x does not,
+            # but installing it there is harmless.
+            sudo apt-get install -y libgtest-dev libgmock-dev
             URL="https://github.com/valkey-io/valkey/archive/refs/tags/${{ matrix.version }}.tar.gz"
           fi
           mkdir -p "$SERVER_DIR"
