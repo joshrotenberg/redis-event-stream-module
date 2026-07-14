@@ -1,0 +1,88 @@
+name: Bench
+
+# Benchmark regression gate for the SPEC.md section 11 matrix (issue #70):
+# S0-S2 SET throughput, S3 mass-expiry drain, S4 maxlen sensitivity, at
+# reduced sizes. Gating is on RELATIVE thresholds only (ratios within one run
+# plus exact drop counters) because hosted-runner absolute ops/sec is too
+# noisy to gate; see bench/gate.sh for each threshold and its rationale.
+#
+# Trigger choice: nightly schedule + manual dispatch, NOT pull requests. The
+# job takes several minutes and a noisy runner could flake a PR; a nightly
+# run still catches a capture-path regression within a day of it landing on
+# main, which matches how this module ships (manual releases). Revisit once
+# scheduled runs establish real variance.
+on:
+  schedule:
+    - cron: "17 4 * * *" # off the top of the hour to dodge runner congestion
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  REDIS_VERSION: 8.8.0
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SERVER_DIR: ${{ github.workspace }}/.server/redis-8
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Same path and key as ci.yml's integration job, so this job reuses the
+      # server build CI has already cached.
+      - name: Cache server build
+        id: server-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SERVER_DIR }}
+          key: server-redis-8-${{ env.REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build redis from source
+        if: steps.server-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+          mkdir -p "$SERVER_DIR"
+          curl -fsSL "https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz" \
+            | tar xz -C "$SERVER_DIR" --strip-components=1
+          make -C "$SERVER_DIR" -j"$(nproc)" BUILD_TLS=no
+
+      - name: Run bench matrix
+        env:
+          TEST_REDIS_SERVER_BIN: ${{ env.SERVER_DIR }}/src/redis-server
+          TEST_REDIS_CLI_BIN: ${{ env.SERVER_DIR }}/src/redis-cli
+          BENCH_TOOL: ${{ env.SERVER_DIR }}/src/redis-benchmark
+          # Full-length passes: the S1/S0 ratio needs them. Empirically
+          # (2026-07-13, M4 Pro), 200k-request passes show ±15% run-to-run
+          # variance on that ratio even quiesced — identical configs measured
+          # minutes apart disagreed by 22 points — while 1M-request passes
+          # reproduce the published +0.0% exactly. At ~100k ops/s a 1M rep is
+          # ~10 s, so the whole matrix still fits the 20-minute timeout with
+          # room to spare; 100k expiring keys keep each S3 drain under a
+          # minute per rep.
+          BENCH_REQUESTS: "1000000"
+          BENCH_REPS: "3"
+          BENCH_EXPIRE_KEYS: "100000"
+          BENCH_FG_REQUESTS: "300000"
+          BENCH_JSON: bench-results.json
+        run: bench/run.sh
+
+      # `shell: bash` gives pipefail, so a gate failure is not masked by tee.
+      # The gate streams its markdown report before exiting nonzero, so the
+      # numbers land in the job summary on pass and fail alike.
+      - name: Gate on relative thresholds
+        shell: bash
+        run: bench/gate.sh bench-results.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-results
+          path: bench-results.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -205,9 +205,15 @@ every Redis and Valkey.
 
 Mass expiry is the heaviest case: each expiration becomes an `XADD` on the
 main thread, paced by the server's expire-cycle throttling. The integration
-suite includes a 2000-key staggered-expiry scenario captured with zero drops;
-drain-latency profiling and CI-gated regression thresholds are future work
-(SPEC.md section 16).
+suite includes a 2000-key staggered-expiry scenario captured with zero drops,
+and `bench/run.sh` measures the drain itself (S3: foreground GET p50/p99 and
+drain duration while an expiring backlog drains, with and without the module)
+plus maxlen sensitivity (S4: the full-capture workload across
+`eventstream.maxlen` values). A scheduled CI job
+([bench.yml](.github/workflows/bench.yml)) runs the reduced matrix nightly
+and gates on relative thresholds only — ratios within one run survive runner
+noise where absolute ops/sec cannot; the thresholds and their rationale live
+in [bench/gate.sh](bench/gate.sh), so changing one is a reviewed change.
 
 ## Documentation
 
