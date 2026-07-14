@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="redis-event-stream-module"))')"
           NAME="redis-event-stream-module-${VERSION}-${{ matrix.name }}.${{ matrix.ext }}"
           if [ -n "${{ matrix.target }}" ]; then
             SRC="target/${{ matrix.target }}/release/libredis_event_stream_module.${{ matrix.ext }}"
@@ -102,15 +102,42 @@ jobs:
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           shasum -a 256 -c "${NAME}.sha256"
 
-      # Attest each uploaded artifact so consumers can trace the .so/.dylib back
-      # to this repo, commit, and workflow run (#104). Skipped on the PR
-      # self-validation path, which builds but never uploads: attesting a
-      # throwaway artifact is noise and the OIDC claims would name the PR ref.
+      # The consumer client binary (issue #82), so operators get the
+      # discovery/merge/verification tooling without a Rust toolchain. Built by
+      # the same `cargo build --release[ --target]` above (it is a workspace
+      # member); this step just packages it with a checksum. No extension:
+      # eventstream-client is a native executable on both Linux and macOS.
+      - name: Package the consumer client binary with checksum
+        id: client
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="eventstream-client"))')"
+          NAME="eventstream-client-${VERSION}-${{ matrix.name }}"
+          if [ -n "${{ matrix.target }}" ]; then
+            SRC="target/${{ matrix.target }}/release/eventstream-client"
+          else
+            SRC="target/release/eventstream-client"
+          fi
+          mkdir -p dist
+          cp "${SRC}" "dist/${NAME}"
+          cd dist
+          shasum -a 256 "${NAME}" > "${NAME}.sha256"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          shasum -a 256 -c "${NAME}.sha256"
+
+      # Attest each uploaded artifact so consumers can trace the .so/.dylib and
+      # the client binary back to this repo, commit, and workflow run (#104).
+      # Skipped on the PR self-validation path, which builds but never uploads:
+      # attesting a throwaway artifact is noise and the OIDC claims would name
+      # the PR ref.
       - name: Attest build provenance
         if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/${{ steps.pkg.outputs.name }}
+          subject-path: |
+            dist/${{ steps.pkg.outputs.name }}
+            dist/${{ steps.client.outputs.name }}
 
       - name: Smoke test the artifact loads
         # Cross-compiled legs (matrix.target set) cannot run natively here, and
@@ -151,6 +178,8 @@ jobs:
           gh release upload "$TAG" \
             "dist/${{ steps.pkg.outputs.name }}" \
             "dist/${{ steps.pkg.outputs.name }}.sha256" \
+            "dist/${{ steps.client.outputs.name }}" \
+            "dist/${{ steps.client.outputs.name }}.sha256" \
             --clobber
 
       - name: Upload as workflow artifact (PR validation runs)
@@ -192,7 +221,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="redis-event-stream-module"))')"
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           SUFFIX="${{ matrix.suffix }}"
           TAGS="${IMAGE}:${VERSION}${SUFFIX}"
@@ -298,14 +327,17 @@ jobs:
           redis-server --version
 
       - name: Build release cdylib
-        run: cargo build --release --lib
+        # -p scopes the build to the module package: the RAMP bundle wraps only
+        # the module .so, so the consumer client crate (issue #82) need not be
+        # compiled here.
+        run: cargo build --release --lib -p redis-event-stream-module
 
       - name: Pack the RAMP bundle with checksum
         id: pkg
         run: |
           set -euo pipefail
           VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="redis-event-stream-module"))')"
           SO="redis-event-stream-module-${VERSION}-linux-x86_64.so"
           ZIP="redis-event-stream-module-${VERSION}-linux-x86_64.zip"
           mkdir -p dist

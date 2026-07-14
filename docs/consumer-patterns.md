@@ -365,6 +365,15 @@ redis-cli -h <master> -p <port> EVENTSTREAM.STREAMS
 # union the results; each name already carries the owning node's {tag}
 ```
 
+Or use the shipped client/library instead of hand-rolling this. The
+`eventstream-client` crate (`crates/eventstream-client`) packages the fan-out,
+the merged-by-entry-ID reader, and `#control` gap-marker reads (including
+`repinned`-driven re-discovery) as a library, and ships a binary over it:
+`eventstream-client consume --url redis://<any-node>:<port>` discovers the
+streams cluster-wide and tails them merged, so operators get the fan-out
+without a `redis-cli` loop and callers get the logic without reimplementing
+SPEC.md sections 9-10.
+
 Once you have the names, read them from any node: a cluster-aware client routes
 each `events:{tag}event` to its slot owner by the tag. To follow one logical
 event type, `XREAD` across that type's per-node streams and merge by entry ID:

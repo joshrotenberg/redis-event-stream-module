@@ -1,3 +1,22 @@
+# Workspace: the cdylib module crate (this root package) plus the shipped
+# consumer client (crates/eventstream-client, issue #82). The module crate stays
+# publish = false with its git-pinned redis-module dependency; the client crate
+# has no such constraint and is independently publishable. CI runs at the repo
+# root (cargo fmt --all / clippy --all-targets / test --lib / build --release),
+# which now spans both members — intentional, so the client is linted and tested
+# on the same legs. The release-artifacts workflow selects the module package by
+# name for the .so/.dylib and builds the client binary alongside it.
+[workspace]
+members = ["crates/eventstream-client"]
+# Both members are default, so a bare root command (cargo build/clippy/test)
+# spans the module (".") and the client. Without this, a root package that is
+# also the workspace root makes cargo default to the root package alone, which
+# would leave the client binary unbuilt for chaos/run.sh and unlinted/untested
+# in CI. release-artifacts and the Dockerfile scope their module-only builds
+# with `-p redis-event-stream-module` where they must not pull in the client.
+default-members = [".", "crates/eventstream-client"]
+resolver = "2"
+
 [package]
 name = "redis-event-stream-module"
 version = "0.2.0"

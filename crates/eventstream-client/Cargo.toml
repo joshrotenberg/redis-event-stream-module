@@ -1,0 +1,28 @@
+[package]
+name = "eventstream-client"
+version = "0.2.0"
+# Edition 2021 and MSRV 1.88 match the module crate (SPEC.md section 14, #97):
+# one toolchain floor across the workspace so the msrv CI leg's
+# `cargo check --all-targets` covers both members on the same version.
+edition = "2021"
+rust-version = "1.88"
+description = "Consumer client and library for redis-event-stream-module: cluster-wide stream discovery, merged-by-entry-ID reads, and gap-marker windows."
+repository = "https://github.com/joshrotenberg/redis-event-stream-module"
+license = "MIT OR Apache-2.0"
+keywords = ["redis", "valkey", "streams", "keyspace-notifications", "consumer"]
+categories = ["database", "command-line-utilities"]
+# Publishable, unlike the module crate: this member depends only on the `redis`
+# client, with no git-pinned dependency, so crates.io accepts it (issue #82).
+
+[lib]
+name = "eventstream_client"
+
+[[bin]]
+name = "eventstream-client"
+path = "src/main.rs"
+
+[dependencies]
+# The same `redis` client (with the `cluster` feature) the module crate already
+# pulls in as a dev-dependency, so the workspace resolves one version.
+redis = { version = "1.3", features = ["cluster"] }
+clap = { version = "4", features = ["derive"] }
