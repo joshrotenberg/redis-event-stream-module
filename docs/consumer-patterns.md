@@ -137,6 +137,24 @@ Each type lands in its own stream (`events:expired`, `events:del`,
 at. To consume across types, either open one reader per stream, or enable the
 firehose (next section) and read a single combined stream.
 
+### Hash-field expirations (Redis 7.4+)
+
+Hash-field TTLs (`HEXPIRE` and friends) fire their own event, `hexpired`,
+under the hash class — the default `expired` filter does not match it, so a
+consumer relying on `events:expired` sees nothing when fields expire. Widen
+the filter to cover both:
+
+```
+CONFIG SET eventstream.events "expired,hexpired"
+```
+
+Entries land in `events:hexpired` with `key` set to the hash key; the expired
+field name is not part of the keyspace notification, so consumers that need it
+must track field membership themselves (SPEC.md section 6). When the last
+field expires the emptied hash is deleted and a separate `del` event fires.
+Servers without hash-field TTLs (Redis 7.2, Valkey 8.x) never fire
+`hexpired`.
+
 ## One stream for everything (firehose)
 
 To cover every captured event with a single key — one consumer group, no

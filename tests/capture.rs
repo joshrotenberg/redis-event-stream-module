@@ -160,6 +160,37 @@ fn maxlen_bounds_stream_growth() {
 }
 
 #[test]
+fn maxlen_zero_disables_trimming() {
+    // `maxlen 0` disables trimming (SPEC.md section 7): the XADD carries no
+    // MAXLEN clause at all. Exact length at 500 is the property that
+    // distinguishes 0 from every positive cap — the sibling test shows
+    // approximate `MAXLEN ~ 100` demonstrably trims below 500.
+    let s = TestServer::start(&["events", "set", "maxlen", "0"]);
+    let mut c = s.conn();
+
+    // The key is live-settable; 0 must also be accepted on the runtime path
+    // (same validation as the module-arg path just exercised).
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.maxlen")
+        .arg(0)
+        .query(&mut c)
+        .expect("CONFIG SET maxlen 0 must be accepted");
+
+    for i in 0..500 {
+        let _: () = c.set(format!("k{i}"), "v").expect("SET");
+    }
+    wait_until(Duration::from_secs(10), "500 sets mirrored", || {
+        info_field(&mut c, "forwarded") >= 500
+    });
+    assert_eq!(
+        xlen(&mut c, "events:set"),
+        500,
+        "maxlen 0 must never trim: 500 writes yield exactly 500 entries"
+    );
+}
+
+#[test]
 fn feedback_guard_never_mirrors_own_prefix() {
     let s = TestServer::start(&["events", "*"]);
     let mut c = s.conn();
