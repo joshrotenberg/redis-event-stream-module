@@ -7,9 +7,12 @@ pull request. If a change needs a design decision first, open a decision issue
 
 ## Building and testing
 
-Requirements: stable Rust, and `redis-server`/`redis-cli` 7.2 or newer on PATH
-(Valkey 8.x works too). The integration tests spawn real servers; nothing is
-mocked.
+Requirements: Rust 1.88 or newer (the MSRV, declared as `rust-version` in
+`Cargo.toml` and gated by the `msrv` leg in CI), and `redis-server`/`redis-cli`
+7.2 or newer on PATH (Valkey 8.x works too). The integration tests spawn real
+servers; nothing is mocked. MSRV raises are deliberate, reviewed commits
+triggered by a CI failure on the `msrv` leg, and are treated as minor-version
+events.
 
 ```sh
 cargo build --release          # builds the module cdylib
