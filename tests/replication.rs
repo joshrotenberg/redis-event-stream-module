@@ -104,6 +104,54 @@ fn promoted_replica_takes_over_capture() {
 }
 
 #[test]
+fn flush_marker_replicates_and_is_not_duplicated_on_promotion() {
+    // #74 with replication: a FLUSHALL on the master writes one `flushed`
+    // marker, which replicates to the replica like any other entry. The
+    // replica replays the replicated FLUSHALL (firing its own flush event) but
+    // must NOT record a second marker — markers are recorded only on the
+    // capturing master — so after promotion the promoted node's control stream
+    // carries exactly one `flushed`, not two.
+    let master = TestServer::start(&["events", "set"]);
+    let replica = TestServer::start_replica_of(&master, &["events", "set"]);
+    let mut mc = master.conn();
+    let mut rc = replica.conn();
+
+    let _: () = mc.set("a", "1").expect("SET before flush");
+    wait_until(Duration::from_secs(10), "loaded marker replicates", || {
+        xlen(&mut rc, CONTROL) == 1
+    });
+
+    let _: () = redis::cmd("FLUSHALL")
+        .query(&mut mc)
+        .expect("FLUSHALL on master");
+    let _: () = mc.set("b", "1").expect("SET after flush");
+    // The recreated control stream carries only the flushed marker, and it
+    // replicates to the replica.
+    wait_until(Duration::from_secs(10), "flushed marker replicates", || {
+        stream_field_strings(&mut rc, CONTROL, "action") == vec!["flushed"]
+    });
+
+    let _: () = redis::cmd("REPLICAOF")
+        .arg("NO")
+        .arg("ONE")
+        .query(&mut rc)
+        .expect("promote replica");
+    let _: () = rc.set("c", "1").expect("SET on promoted node");
+    wait_until(
+        Duration::from_secs(10),
+        "promoted node drains own marker",
+        || stream_field_strings(&mut rc, CONTROL, "action").len() == 2,
+    );
+    // Replicated `flushed`, then the promoted node's own pending `loaded`; the
+    // replica-side flush replay recorded nothing, so `flushed` appears once.
+    assert_eq!(
+        stream_field_strings(&mut rc, CONTROL, "action"),
+        vec!["flushed", "loaded"],
+        "the replayed flush must not duplicate the replicated flushed marker"
+    );
+}
+
+#[test]
 fn aof_preserves_streams_across_restart() {
     let s = TestServer::start_aof(&["events", "set"]);
     {

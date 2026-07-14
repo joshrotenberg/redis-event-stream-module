@@ -131,8 +131,8 @@ at-least-once within the retention window, so consumers must be idempotent on
 stream name plus entry ID. Mirrored entries replicate to replicas and the AOF.
 
 The module writes capture-gap markers (`loaded`, `disabled`, `enabled`,
-`unloading`) to a control stream at `<prefix>#control`, so consumers can bound
-reconciliation to known gap windows (SPEC.md section 9).
+`flushed`, `swapdb`, `unloading`) to a control stream at `<prefix>#control`, so
+consumers can bound reconciliation to known gap windows (SPEC.md section 9).
 
 ## Comparison with other approaches
 

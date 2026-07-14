@@ -28,20 +28,19 @@ use lazy_static::lazy_static;
 use redis_module::configuration::ConfigurationContext;
 #[cfg(not(test))]
 use redis_module::{
-    configuration::ConfigurationFlags, redis_module, server_events::FlushSubevent, InfoContext,
-    RedisResult, RedisValue,
+    configuration::ConfigurationFlags, redis_module, InfoContext, RedisResult, RedisValue,
 };
 use redis_module::{
     raw, CallOptions, CallOptionsBuilder, CallResult, ConfigurationValue, Context, ContextFlags,
     NotifyEvent, RedisError, RedisGILGuard, RedisString, Status,
 };
 #[cfg(not(test))]
-use redis_module_macros::{flush_event_handler, info_command_handler};
+use redis_module_macros::info_command_handler;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::ffi::CStr;
 #[cfg(not(test))]
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -869,7 +868,11 @@ lazy_static! {
     };
     /// Gap markers recorded at lifecycle points and written by the next
     /// notification callback's post-notification job (SPEC.md section 9).
-    static ref PENDING_MARKERS: RedisGILGuard<Vec<&'static str>> =
+    /// A `Vec`, not a single slot, so overlapping lifecycle points (e.g. a
+    /// `FLUSHALL` and a `SWAPDB` before any event drains them, or a `disabled`
+    /// still queued when a flush arrives) accumulate rather than clobber each
+    /// other (issue #73 pending-collision note).
+    static ref PENDING_MARKERS: RedisGILGuard<Vec<PendingMarker>> =
         RedisGILGuard::new(Vec::new());
     /// Per-stream records behind `ACTIVE_STREAMS` and the WITHSTATS join
     /// (issues #68, #71): registry membership, counters, failure-log state.
@@ -1154,10 +1157,42 @@ fn count_stream_drop(ctx: &Context, stream: &str, counter: &AtomicU64, detail: &
     }
 }
 
+/// A gap marker awaiting delivery through the pending-marker mechanism. Most
+/// carry only an `action`; `Flushed` additionally carries the flushed database
+/// number (`-1` for `FLUSHALL`), the one marker whose reconcile scope is
+/// per-database (issues #74, #73). The extra `db` field appears only on the
+/// `flushed` action, so consumers reading markers by `action` are unaffected
+/// (SPEC.md section 9 marker schema).
+#[derive(Clone, Copy)]
+enum PendingMarker {
+    /// A lifecycle marker carrying only `action` (+ `module-version`):
+    /// `loaded`, `enabled`, `disabled`, `swapdb`.
+    Simple(&'static str),
+    /// A `flushed` marker carrying the flushed db (`-1` == `FLUSHALL`).
+    Flushed(i32),
+}
+
+impl PendingMarker {
+    /// The `action` field value.
+    fn action(&self) -> &'static str {
+        match self {
+            PendingMarker::Simple(a) => a,
+            PendingMarker::Flushed(_) => "flushed",
+        }
+    }
+    /// The optional `db` field value; `Some` only for `flushed`.
+    fn db(&self) -> Option<i32> {
+        match self {
+            PendingMarker::Flushed(db) => Some(*db),
+            PendingMarker::Simple(_) => None,
+        }
+    }
+}
+
 /// Record a pending gap marker; the next notification callback writes it
 /// (SPEC.md section 9 delivery mechanics).
-fn record_pending_marker<G: redis_module::RedisLockIndicator>(lock: &G, action: &'static str) {
-    PENDING_MARKERS.lock(lock).push(action);
+fn record_pending_marker<G: redis_module::RedisLockIndicator>(lock: &G, marker: PendingMarker) {
+    PENDING_MARKERS.lock(lock).push(marker);
     MARKERS_DIRTY.store(true, Ordering::Relaxed);
 }
 
@@ -1177,14 +1212,20 @@ fn enabled_changed(config_ctx: &ConfigurationContext, _name: &str, _val: &'stati
             "eventstream: enabled set to {}",
             if now { "yes" } else { "no" }
         ));
-        record_pending_marker(config_ctx, if now { "enabled" } else { "disabled" });
+        record_pending_marker(
+            config_ctx,
+            PendingMarker::Simple(if now { "enabled" } else { "disabled" }),
+        );
     }
 }
 
 /// Write one gap marker to the control stream. Runs where keyspace writes are
 /// safe (a post-notification job or the deinit hook). Same call options,
-/// trimming, and drop accounting as mirrored entries (SPEC.md section 9).
-fn write_marker(ctx: &Context, control_stream: &str, action: &str, maxlen: i64) {
+/// trimming, and drop accounting as mirrored entries (SPEC.md section 9). `db`
+/// is `Some` only for the `flushed` action, which carries the flushed database
+/// (`-1` for `FLUSHALL`) as an additive third field so consumers can bound the
+/// reconcile to that database (issues #74, #73).
+fn write_marker(ctx: &Context, control_stream: &str, action: &str, db: Option<i32>, maxlen: i64) {
     let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
     if rc != raw::REDISMODULE_OK as i32 {
         count_drop(
@@ -1196,7 +1237,9 @@ fn write_marker(ctx: &Context, control_stream: &str, action: &str, maxlen: i64) 
         return;
     }
     let maxlen_s = maxlen.to_string();
-    let mut args: Vec<&[u8]> = Vec::with_capacity(10);
+    // Held outside the args vec so its bytes outlive the `&[u8]` borrow below.
+    let db_s = db.map(|d| d.to_string());
+    let mut args: Vec<&[u8]> = Vec::with_capacity(12);
     args.push(control_stream.as_bytes());
     if maxlen > 0 {
         args.push(&b"MAXLEN"[..]);
@@ -1208,6 +1251,10 @@ fn write_marker(ctx: &Context, control_stream: &str, action: &str, maxlen: i64) 
     args.push(action.as_bytes());
     args.push(&b"module-version"[..]);
     args.push(env!("CARGO_PKG_VERSION").as_bytes());
+    if let Some(ref s) = db_s {
+        args.push(&b"db"[..]);
+        args.push(s.as_bytes());
+    }
 
     let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
     match res {
@@ -1279,7 +1326,7 @@ fn drain_pending_markers(ctx: &Context) {
     if !flags.contains(ContextFlags::MASTER) || flags.contains(ContextFlags::LOADING) {
         return;
     }
-    let drained: Vec<&'static str> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
+    let drained: Vec<PendingMarker> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
     MARKERS_DIRTY.store(false, Ordering::Relaxed);
     if drained.is_empty() {
         return;
@@ -1302,8 +1349,8 @@ fn drain_pending_markers(ctx: &Context) {
                 }
             };
             let control_stream = format!("{prefix_owned}{seg}#control");
-            for action in &drained {
-                write_marker(ctx, &control_stream, action, maxlen);
+            for marker in &drained {
+                write_marker(ctx, &control_stream, marker.action(), marker.db(), maxlen);
             }
         });
     });
@@ -1541,7 +1588,13 @@ fn repin_and_retry(
     };
     // A `repinned` gap marker on the new control stream delimits the window
     // where this node's stream name changed (SPEC.md section 9).
-    write_marker(ctx, &format!("{prefix}{seg}#control"), "repinned", maxlen);
+    write_marker(
+        ctx,
+        &format!("{prefix}{seg}#control"),
+        "repinned",
+        None,
+        maxlen,
+    );
     match mirror_entry(
         ctx, prefix, &seg, suffix, event, key, db, maxlen, max_streams, &FORWARDED,
     ) {
@@ -1934,6 +1987,35 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     }
     SUBSCRIBED_EXTRA.store(extra.bits() as i64, Ordering::Relaxed);
 
+    // Subscribe to the flush and SWAPDB server events through the raw
+    // `RedisModule_SubscribeToServerEvent` binding rather than the wrapper's
+    // `#[flush_event_handler]` macro. The safe wrapper delivers only
+    // `FlushSubevent::Started/Ended` and discards the `RedisModuleFlushInfo`
+    // payload, and has no SwapDB wrapper at all; the flushed and swapped db
+    // numbers are exactly what the `flushed`/`swapdb` markers carry (issues
+    // #74, #73). Same raw-binding rationale as the keyspace subscription above,
+    // and the same panic-safety boundary (both callbacks catch panics). A
+    // failure here is not fatal: capture still works, only the flush/swap gap
+    // markers are lost, so log and continue rather than refusing to load.
+    let subscribe_server_event = |event_id: u64, cb: raw::RedisModuleEventCallback| unsafe {
+        raw::RedisModule_SubscribeToServerEvent.unwrap()(
+            ctx.ctx,
+            raw::RedisModuleEvent {
+                id: event_id,
+                dataver: 1,
+            },
+            cb,
+        )
+    };
+    let flush_rc = subscribe_server_event(raw::REDISMODULE_EVENT_FLUSHDB, Some(raw_flush_event));
+    let swapdb_rc = subscribe_server_event(raw::REDISMODULE_EVENT_SWAPDB, Some(raw_swapdb_event));
+    if flush_rc != raw::REDISMODULE_OK as i32 || swapdb_rc != raw::REDISMODULE_OK as i32 {
+        ctx.log_warning(
+            "eventstream: failed to subscribe to a flush/swapdb server event; the \
+             corresponding gap markers will not be written",
+        );
+    }
+
     let prefix = PREFIX.value.lock(ctx).clone();
     let filter = FILTER.raw.lock(ctx).clone();
     let key_filter = KEY_FILTER.raw.lock(ctx).clone();
@@ -1957,9 +2039,9 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     {
         let mut pending = PENDING_MARKERS.lock(ctx);
         pending.clear();
-        pending.push("loaded");
+        pending.push(PendingMarker::Simple("loaded"));
         if !ENABLED.load(Ordering::Relaxed) {
-            pending.push("disabled");
+            pending.push(PendingMarker::Simple("disabled"));
         }
     }
     MARKERS_DIRTY.store(true, Ordering::Relaxed);
@@ -1981,7 +2063,7 @@ fn deinit(ctx: &Context) -> Status {
         // flag cleared, the re-entrant callback falls through to the prefix
         // guard. Writing the drained markers directly here also preserves
         // them instead of orphaning them at unload.
-        let drained: Vec<&'static str> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
+        let drained: Vec<PendingMarker> = std::mem::take(&mut *PENDING_MARKERS.lock(ctx));
         MARKERS_DIRTY.store(false, Ordering::Relaxed);
         // deinit runs inside MODULE UNLOAD, a write-safe context, so the tag
         // can be resolved here. If the node owns no slot, skip the markers
@@ -1989,10 +2071,10 @@ fn deinit(ctx: &Context) -> Status {
         if let Some(seg) = tag_segment(ctx) {
             let control_stream = format!("{}{seg}#control", PREFIX.value.lock(ctx).as_str());
             let maxlen = MAXLEN.value.load(Ordering::Relaxed);
-            for action in drained {
-                write_marker(ctx, &control_stream, action, maxlen);
+            for marker in drained {
+                write_marker(ctx, &control_stream, marker.action(), marker.db(), maxlen);
             }
-            write_marker(ctx, &control_stream, "unloading", maxlen);
+            write_marker(ctx, &control_stream, "unloading", None, maxlen);
         }
     }
     ctx.log_notice(&format!(
@@ -2086,27 +2168,156 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
     Ok(())
 }
 
-/// Invalidate the in-process per-stream state on flush. FLUSHALL (or FLUSHDB
-/// in db 0) deletes the `<prefix>#streams` set, so the registry-membership
-/// bits must be cleared for the next capture to re-register its stream. The
-/// whole record goes with them (issue #71): the per-stream counters count
-/// "since load or last flush", the simplest semantics consistent with the
-/// registry itself being deleted; the process-wide counters in INFO/STATS
-/// remain strictly since-load. A FLUSHDB in another database does not delete
-/// the registry, so clearing here is conservative: the following re-SADD is
-/// idempotent, at the cost of re-counting `active_streams`, which is
-/// therefore "distinct streams written since load or last flush" (SPEC.md
-/// section 5).
+/// Handle the start of a flush. Invalidates the in-process per-stream state and
+/// records a `flushed` gap marker carrying the flushed db (`-1` == `FLUSHALL`).
+///
+/// Registry invalidation: FLUSHALL (or FLUSHDB in db 0) deletes the
+/// `<prefix>#streams` set, so the registry-membership bits must be cleared for
+/// the next capture to re-register its stream. The whole record goes with them
+/// (issue #71): the per-stream counters count "since load or last flush", the
+/// simplest semantics consistent with the registry itself being deleted; the
+/// process-wide counters in INFO/STATS remain strictly since-load. A FLUSHDB in
+/// another database does not delete the registry, so clearing here is
+/// conservative: the following re-SADD is idempotent, at the cost of
+/// re-counting `active_streams`, which is therefore "distinct streams written
+/// since load or last flush" (SPEC.md section 5).
+///
+/// Marker delivery (issues #74, #73): the marker is deferred through the
+/// pending-marker mechanism, never written directly here. A direct write at
+/// flush time would itself be flushed (for FLUSHALL/db-0) or would fire before
+/// the control stream is safe to touch; the pending path lands the marker on
+/// the recreated control stream ahead of the first post-flush mirrored entry,
+/// which is exactly the boundary consumers reconcile against. Both cases warrant
+/// a marker: FLUSHALL/db-0 deletes the streams (full reconcile), a non-zero-db
+/// flush loses only that database's source keys (reconcile over `db`). If no
+/// event ever follows the flush, no marker is written, and nothing was mirrored
+/// into the void either (SPEC.md section 9 delivery mechanics).
+///
+/// The marker is recorded only when this node is the capturing master
+/// (MASTER-and-not-LOADING, the gate that governs every marker write). The flush
+/// event also fires when a replica empties its dataset for a full resync and
+/// when a replica replays a replicated `FLUSHALL`/`FLUSHDB`; in the resync case
+/// no capture gap exists on this node, and in the replayed case the master's own
+/// marker already reaches the replica through replication, so recording one here
+/// would duplicate it on failover. Registry invalidation, by contrast, applies
+/// on any role (a replayed flush really does clear the replica's registry), so
+/// the `STREAM_STATS` clear stays unconditional.
 #[cfg(not(test))]
-#[flush_event_handler]
-fn on_flush(ctx: &Context, event: FlushSubevent) {
-    if let FlushSubevent::Started = event {
-        STREAM_STATS.lock(ctx).clear();
-        // The registry cache is empty again, so the max-streams cap (issue #64)
-        // counts distinct streams from zero: the first `max-streams` names seen
-        // after the flush re-register and win.
-        CURRENT_STREAMS.store(0, Ordering::Relaxed);
+fn on_flush_started(ctx: &Context, dbnum: i32) {
+    STREAM_STATS.lock(ctx).clear();
+    // The registry cache is empty again, so the max-streams cap (issue #64)
+    // counts distinct streams from zero: the first `max-streams` names seen
+    // after the flush re-register and win.
+    CURRENT_STREAMS.store(0, Ordering::Relaxed);
+    let flags = ctx.get_flags();
+    if flags.contains(ContextFlags::MASTER) && !flags.contains(ContextFlags::LOADING) {
+        record_pending_marker(ctx, PendingMarker::Flushed(dbnum));
     }
+}
+
+/// Handle a `SWAPDB` that moves database 0 (issue #73). SWAPDB involving db 0
+/// atomically moves the destination streams and their consumer groups into the
+/// other database while the module keeps writing fresh streams in db 0
+/// (SPEC.md section 6 SWAPDB caveat). A swap that does not touch db 0 leaves
+/// the streams' database untouched and is ignored. When db 0 is involved, log a
+/// warning and record a pending `swapdb` marker: `action=swapdb` alone tells
+/// consumers that entries before this marker may now live in another database
+/// (SPEC.md section 9 two-field schema). Deferred for the same reason as the
+/// flush marker: the marker lands on the fresh db 0 control stream ahead of the
+/// first post-swap entry, timestamping the boundary where db 0 history diverged.
+///
+/// Gated to the capturing master for the same reason as the flush marker: a
+/// replica replays the replicated `SWAPDB` and would otherwise record a second
+/// marker that duplicates the replicated one on failover.
+#[cfg(not(test))]
+fn on_swapdb(ctx: &Context, first: i32, second: i32) {
+    if first != 0 && second != 0 {
+        return;
+    }
+    let flags = ctx.get_flags();
+    if !flags.contains(ContextFlags::MASTER) || flags.contains(ContextFlags::LOADING) {
+        return;
+    }
+    ctx.log_warning(&format!(
+        "eventstream: SWAPDB {first} {second} moved database 0; the destination \
+         streams and their consumer groups now live in the swapped database, and \
+         fresh streams will be created in db 0 (SPEC.md section 6). A 'swapdb' gap \
+         marker delimits the boundary."
+    ));
+    // The db-0 registry set (`<prefix>#streams`) moved out with the swap, so the
+    // dedupe cache is stale: without clearing it, fresh db-0 streams keep their
+    // `registered` bit and never re-SADD into the rebuilt registry, so
+    // EVENTSTREAM.STREAMS would not list them. Same rationale as the flush clear,
+    // including the max-streams cap counter (issue #64) which counts from zero
+    // against the rebuilt db-0 registry.
+    STREAM_STATS.lock(ctx).clear();
+    CURRENT_STREAMS.store(0, Ordering::Relaxed);
+    record_pending_marker(ctx, PendingMarker::Simple("swapdb"));
+}
+
+/// Wrap a raw server-event callback body so a panic cannot unwind across the
+/// FFI boundary (undefined behavior that would abort the server); a caught
+/// panic is counted and logged once, sharing the handler-panic accounting
+/// (SPEC.md section 5), exactly as the keyspace callback does.
+#[cfg(not(test))]
+fn guard_server_event(body: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        HANDLER_PANICS.fetch_add(1, Ordering::Relaxed);
+        if LOGGED_PANIC
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            redis_module::logging::log_warning(
+                "eventstream: server-event handler panicked (caught)",
+            );
+        }
+    }
+}
+
+/// Raw flush server-event callback (`REDISMODULE_EVENT_FLUSHDB`). Reads the
+/// flushed db from `RedisModuleFlushInfoV1` (`dbnum`, `-1` for `FLUSHALL`),
+/// which the wrapper's `#[flush_event_handler]` discards; acts only on the
+/// start subevent, matching the former handler.
+#[cfg(not(test))]
+extern "C" fn raw_flush_event(
+    ctx: *mut raw::RedisModuleCtx,
+    _eid: raw::RedisModuleEvent,
+    subevent: u64,
+    data: *mut c_void,
+) {
+    guard_server_event(|| {
+        if subevent != raw::REDISMODULE_SUBEVENT_FLUSHDB_START {
+            return;
+        }
+        // `data` is a `RedisModuleFlushInfoV1*`; a null pointer would be a
+        // server contract violation, so treat it as `FLUSHALL` (-1) rather
+        // than dereference it.
+        let dbnum = if data.is_null() {
+            -1
+        } else {
+            unsafe { (*(data as *const raw::RedisModuleFlushInfoV1)).dbnum }
+        };
+        on_flush_started(&Context::new(ctx), dbnum);
+    });
+}
+
+/// Raw SWAPDB server-event callback (`REDISMODULE_EVENT_SWAPDB`). Reads
+/// `dbnum_first`/`dbnum_second` from `RedisModuleSwapDbInfoV1`; there is no safe
+/// wrapper for this event in the pinned tag (issue #73).
+#[cfg(not(test))]
+extern "C" fn raw_swapdb_event(
+    ctx: *mut raw::RedisModuleCtx,
+    _eid: raw::RedisModuleEvent,
+    _subevent: u64,
+    data: *mut c_void,
+) {
+    guard_server_event(|| {
+        if data.is_null() {
+            return;
+        }
+        let info = unsafe { &*(data as *const raw::RedisModuleSwapDbInfoV1) };
+        on_swapdb(&Context::new(ctx), info.dbnum_first, info.dbnum_second);
+    });
 }
 
 /// `EVENTSTREAM.STATS`: the section 13 counters as a flat array of
