@@ -437,7 +437,7 @@ Memory bound: `total ≈ distinct_event_names × maxlen × bytes_per_entry`. A t
 | 10000 | 20 (typical wide filter) | ~30 MB |
 | 10000 | 200 (worst case, all classes plus module names) | ~300 MB |
 
-Measurement plan (one-time, documented in the README, not CI-gated in v0.1): memtier_benchmark, 60 second runs, 3 repetitions, ops/sec and p50/p99: S0 baseline without the module; S1 module loaded with the default filter against a non-expiring SET workload (the tax every non-capturing deployment pays, expected within a few percent of S0); S2 filter `set` for 100 percent capture (expected within the 50 percent budget above). The full matrix (mass-expiry drain p99, maxlen sensitivity, CI thresholds) is Future work.
+Measurement plan (documented in the README): memtier_benchmark, 60 second runs, 3 repetitions, ops/sec and p50/p99: S0 baseline without the module; S1 module loaded with the default filter against a non-expiring SET workload (the tax every non-capturing deployment pays, expected within a few percent of S0); S2 filter `set` for 100 percent capture (expected within the 50 percent budget above). The full matrix adds S3, foreground p50/p99 and drain duration while a staggered mass-expiry backlog drains, with and without the module; and S4, the S2 workload across `maxlen` values, where amortized trim cost should stay near zero. A scheduled CI job runs a reduced matrix and gates only on relative properties (S1/S0 within the few-percent budget plus noise headroom, S2/S0 and S4/S0 within the 50 percent budget, zero S3 drops), because ratios within one run survive shared-runner noise where absolute numbers do not.
 
 ## 12. Failure modes and mitigations
 
