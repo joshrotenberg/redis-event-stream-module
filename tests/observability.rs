@@ -21,6 +21,7 @@ fn info_section_has_all_fields() {
         "dropped_oom",
         "dropped_defer_error",
         "dropped_max_streams",
+        "dropped_encode_error",
         "dropped_migrating",
         "repins_probe_detected",
         "skipped_self",

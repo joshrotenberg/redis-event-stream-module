@@ -31,8 +31,8 @@ use redis_module::{
     configuration::ConfigurationFlags, redis_module, InfoContext, RedisResult, RedisValue,
 };
 use redis_module::{
-    raw, CallOptions, CallOptionsBuilder, CallResult, ConfigurationValue, Context, ContextFlags,
-    NotifyEvent, RedisError, RedisGILGuard, RedisString, Status,
+    enum_configuration, raw, CallOptions, CallOptionsBuilder, CallResult, ConfigurationValue,
+    Context, ContextFlags, NotifyEvent, RedisError, RedisGILGuard, RedisString, Status,
 };
 #[cfg(not(test))]
 use redis_module_macros::info_command_handler;
@@ -102,6 +102,14 @@ static FIREHOSE_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_XADD_ERROR: AtomicU64 = AtomicU64::new(0);
 static DROPPED_OOM: AtomicU64 = AtomicU64::new(0);
 static DROPPED_DEFER_ERROR: AtomicU64 = AtomicU64::new(0);
+/// Entries dropped because the configured `entry-format` could not encode the
+/// event (issue #60): with the shipped formats only `json` can fail, on a
+/// non-UTF-8 event name. Part of the `dropped` sum; a format+event pair that
+/// fails to encode fails identically on the per-event write and the firehose
+/// copy, so with the firehose on one such event counts two drops (SPEC.md
+/// section 5 drop-per-write accounting). First-failure logging latches on
+/// `LOGGED_ENCODE_ERROR`.
+static DROPPED_ENCODE_ERROR: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_SELF: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_FILTERED: AtomicU64 = AtomicU64::new(0);
 /// Events dropped by the key-name glob filter (`eventstream.key-filter`, issue
@@ -150,6 +158,11 @@ static MARKERS_DIRTY: AtomicBool = AtomicBool::new(false);
 static LOGGED_XADD_ERROR: AtomicBool = AtomicBool::new(false);
 static LOGGED_DEFER_ERROR: AtomicBool = AtomicBool::new(false);
 static LOGGED_PANIC: AtomicBool = AtomicBool::new(false);
+/// First-failure latch for `dropped_encode_error` (issue #60): an encode
+/// failure is a property of the format and the event, not of a destination
+/// stream, so it uses a process-level latch like the other no-destination
+/// drop reasons rather than the per-stream window (SPEC.md section 13).
+static LOGGED_ENCODE_ERROR: AtomicBool = AtomicBool::new(false);
 
 /// Repeat-failure warning window per destination stream, in seconds (issue
 /// #68, SPEC.md section 13): after a stream's first-failure warning, further
@@ -228,6 +241,25 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 /// (it doubles write amplification per captured event, SPEC.md section 11);
 /// runtime-mutable, read in the post-notification job.
 static FIREHOSE: AtomicBool = AtomicBool::new(false);
+/// `eventstream.entry-seq` (issue #66): when on, every mirrored entry carries a
+/// `seq` field with the value of `SEQ` below. Registered IMMUTABLE (load-time
+/// only, like `stream-prefix`/`cluster-streams`) so that within one process the
+/// entry field set is uniform — every stream either always has `seq` or never
+/// does, preserving the `SAMEFIELDS` listpack compaction (SPEC.md section 6).
+/// Default off, so existing deployments see no schema change.
+static ENTRY_SEQ: AtomicBool = AtomicBool::new(false);
+/// Process-global monotonic sequence (issue #66): a per-node, per-process total
+/// order across all destination streams for entries that share a millisecond
+/// (the stream entry ID only orders within one stream). `fetch_add`-ed once per
+/// captured event when `entry-seq` is on, and the same value is written to both
+/// the per-event entry and its firehose copy (one event, one number). Starts at
+/// 0 and resets on load like the section 13 counters: it is never persisted or
+/// replicated as state (the assigned value replicates verbatim inside the
+/// `XADD`, so replicas and AOF replay preserve it). A consumer uses `seq` only
+/// for intra-process same-ms tiebreaking; cross-restart and cross-node ties
+/// still fall back to the entry ID / an application timestamp (SPEC.md section
+/// 9).
+static SEQ: AtomicU64 = AtomicU64::new(0);
 static MAXLEN: MaxlenConfig = MaxlenConfig {
     value: AtomicI64::new(10_000),
 };
@@ -866,6 +898,15 @@ lazy_static! {
     static ref CLUSTER_STREAMS: ClusterStreamsConfig = ClusterStreamsConfig {
         value: RedisGILGuard::new("refuse".to_owned()),
     };
+    /// `eventstream.entry-format` (issue #60), the module's first enum config.
+    /// Default `fixed` reproduces the historical three-field schema exactly, so
+    /// existing consumers are unaffected until an operator opts into another
+    /// format. Runtime-mutable (DEFAULT): a live `CONFIG SET` takes effect on
+    /// the next captured event, and the `format` discriminator on every
+    /// non-`fixed` entry keeps the resulting mixed-format stream self-describing
+    /// (SPEC.md section 6).
+    static ref ENTRY_FORMAT: RedisGILGuard<EntryFormat> =
+        RedisGILGuard::new(EntryFormat::fixed);
     /// Gap markers recorded at lifecycle points and written by the next
     /// notification callback's post-notification job (SPEC.md section 9).
     /// A `Vec`, not a single slot, so overlapping lifecycle points (e.g. a
@@ -1387,6 +1428,205 @@ fn is_migration_refusal(msg: &str) -> bool {
     msg.starts_with("TRYAGAIN ") || msg == "TRYAGAIN" || msg.starts_with("ASK ")
 }
 
+enum_configuration! {
+    /// `eventstream.entry-format` values (issue #60), the module's first enum
+    /// config. Variant names are the byte-exact config strings (`stringify!`
+    /// in the wrapper's `enum_configuration!` grammar), so they are lowercase
+    /// rather than `UpperCamelCase`. The discriminants are the wire values the
+    /// wrapper stores; they are never emitted, so their order is free.
+    ///
+    /// `fixed` is the historical three-field schema, emitted byte-for-byte
+    /// unchanged and without a `format` discriminator so existing consumers are
+    /// unaffected by default. The other three each carry a leading `format`
+    /// field so a stream that mixes formats — after a live `CONFIG SET`, which
+    /// this config allows (DEFAULT, not IMMUTABLE) — is self-describing per
+    /// entry (SPEC.md section 6).
+    #[allow(non_camel_case_types)]
+    #[derive(Copy, PartialEq, Eq, Debug)]
+    enum EntryFormat {
+        fixed = 0,
+        minimal = 1,
+        verbose = 2,
+        json = 3,
+    }
+}
+
+/// The field-shaping inputs for one mirrored entry (issues #60, #66): captured
+/// once per captured event so the per-event entry and its firehose copy get an
+/// identical field set and the same `seq`. `event`/`key`/`db` are the section 6
+/// values; `class` carries the notification-class bits for the `verbose`
+/// format's `class` field; `seq` is `Some` only when `entry-seq` is on.
+#[derive(Clone, Copy)]
+struct EntrySpec<'a> {
+    format: EntryFormat,
+    event: &'a [u8],
+    key: &'a [u8],
+    db: &'a str,
+    class: NotifyEvent,
+    seq: Option<u64>,
+}
+
+/// Human-readable class name(s) for the `verbose` format's `class` field (issue
+/// #60): the notification-class bit(s) Redis delivered the event under, joined
+/// by `,` if more than one is set, empty if none is recognized. Names match the
+/// `class_bit` grammar (SPEC.md section 7); a single keyspace event normally
+/// carries exactly one class bit.
+fn class_names(class: NotifyEvent) -> String {
+    let named = [
+        (NotifyEvent::GENERIC, "generic"),
+        (NotifyEvent::STRING, "string"),
+        (NotifyEvent::LIST, "list"),
+        (NotifyEvent::SET, "set"),
+        (NotifyEvent::HASH, "hash"),
+        (NotifyEvent::ZSET, "zset"),
+        (NotifyEvent::STREAM, "stream"),
+        (NotifyEvent::EXPIRED, "expired"),
+        (NotifyEvent::EVICTED, "evicted"),
+        (NotifyEvent::MODULE, "module"),
+        (NotifyEvent::MISSED, "missed"),
+        (NotifyEvent::NEW, "new"),
+    ];
+    named
+        .iter()
+        .filter(|(bit, _)| class.intersects(*bit))
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Append `s` to `out` as a JSON string literal, quotes included, escaping the
+/// characters JSON requires (`"`, `\`, and the C0 controls). Used only by the
+/// `json` entry format.
+fn json_escape_into(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Append `bytes` to `out` as standard (RFC 4648) base64 with padding. Key
+/// bytes are arbitrary binary, so the `json` format base64-encodes them (the
+/// reason JSON was rejected as the only format, SPEC.md section 6); hand-rolled
+/// rather than adding a dependency (no `cargo fetch` on this crate's cadence).
+fn base64_into(bytes: &[u8], out: &mut String) {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+}
+
+/// Encode one entry as a compact JSON object for the `json` format (issue #60):
+/// `event` JSON-string-escaped, `key` base64-encoded (arbitrary binary), `db`
+/// as a JSON number (always a valid non-negative integer here), and `seq`
+/// (issue #66) as a number only when `entry-seq` is on. Kept as one document
+/// field so the format stays "a single field holding a JSON document".
+fn json_document(event: &str, key: &[u8], db: &str, seq: Option<u64>) -> String {
+    let mut s = String::from("{\"event\":");
+    json_escape_into(event, &mut s);
+    s.push_str(",\"key\":\"");
+    base64_into(key, &mut s);
+    s.push_str("\",\"db\":");
+    s.push_str(db);
+    if let Some(seq) = seq {
+        s.push_str(",\"seq\":");
+        s.push_str(&seq.to_string());
+    }
+    s.push('}');
+    s
+}
+
+/// Build the field name/value pairs for one mirrored entry, in the stable order
+/// the chosen format defines (issue #60). Returns owned buffers the caller
+/// borrows into the `XADD` argument vector; a stable per-format order keeps the
+/// `SAMEFIELDS` listpack compaction within a run of same-format entries (SPEC.md
+/// section 6). `Err` means the entry could not be encoded and must be dropped
+/// and counted in `dropped_encode_error`: with the shipped formats only `json`
+/// can fail, on a non-UTF-8 event name (nothing type-guarantees UTF-8 at this
+/// layer, so the check is real, though the raw callback's lossy decode makes it
+/// unreachable through the normal notification path).
+fn encode_entry_fields(spec: &EntrySpec) -> Result<Vec<Vec<u8>>, &'static str> {
+    // `json` carries `seq` inside its document, so it returns before the
+    // trailing top-level `seq` field the other formats append.
+    if spec.format == EntryFormat::json {
+        let event = std::str::from_utf8(spec.event).map_err(|_| "event name is not valid UTF-8")?;
+        let doc = json_document(event, spec.key, spec.db, spec.seq);
+        return Ok(vec![
+            b"format".to_vec(),
+            b"json".to_vec(),
+            b"data".to_vec(),
+            doc.into_bytes(),
+        ]);
+    }
+    let mut f: Vec<Vec<u8>> = Vec::with_capacity(10);
+    match spec.format {
+        EntryFormat::fixed => {
+            // Historical schema, no discriminator (byte-identical to pre-#60).
+            f.push(b"event".to_vec());
+            f.push(spec.event.to_vec());
+            f.push(b"key".to_vec());
+            f.push(spec.key.to_vec());
+            f.push(b"db".to_vec());
+            f.push(spec.db.as_bytes().to_vec());
+        }
+        EntryFormat::minimal => {
+            // Drops the `event` field (redundant on a per-event stream); the
+            // `format` discriminator disambiguates it from a `fixed` entry that
+            // happens to omit fields (SPEC.md section 6).
+            f.push(b"format".to_vec());
+            f.push(b"minimal".to_vec());
+            f.push(b"key".to_vec());
+            f.push(spec.key.to_vec());
+            f.push(b"db".to_vec());
+            f.push(spec.db.as_bytes().to_vec());
+        }
+        EntryFormat::verbose => {
+            // Adds the notification `class` after the fixed fields.
+            f.push(b"format".to_vec());
+            f.push(b"verbose".to_vec());
+            f.push(b"event".to_vec());
+            f.push(spec.event.to_vec());
+            f.push(b"key".to_vec());
+            f.push(spec.key.to_vec());
+            f.push(b"db".to_vec());
+            f.push(spec.db.as_bytes().to_vec());
+            f.push(b"class".to_vec());
+            f.push(class_names(spec.class).into_bytes());
+        }
+        EntryFormat::json => unreachable!("json handled above"),
+    }
+    // Global `seq` field (issue #66), appended last so the per-format field
+    // order stays stable; emitted for every non-json format when enabled.
+    if let Some(seq) = spec.seq {
+        f.push(b"seq".to_vec());
+        f.push(seq.to_string().into_bytes());
+    }
+    Ok(f)
+}
+
 /// Classification of one mirrored-write attempt, so the caller can decide
 /// whether to re-pin and retry.
 enum MirrorOutcome {
@@ -1410,6 +1650,14 @@ enum MirrorOutcome {
     /// `eventstream.max-streams` is reached (issue #64): the stream was never
     /// created. Carries the rejected name so the first-failure log names it.
     MaxStreams { stream: String },
+    /// The configured `entry-format` could not encode the event (issue #60):
+    /// with the shipped formats only `json` fails, on a non-UTF-8 event name.
+    /// Refused before the `XADD`; counted in `dropped_encode_error`. Carries
+    /// the destination stream and the static reason for the first-failure log.
+    EncodeError {
+        stream: String,
+        reason: &'static str,
+    },
 }
 
 /// Write one mirrored entry to `<prefix><seg><suffix>`, and on the first write
@@ -1427,9 +1675,7 @@ fn mirror_entry(
     prefix: &str,
     seg: &str,
     suffix: &str,
-    event: &[u8],
-    key: &[u8],
-    db: &str,
+    spec: &EntrySpec,
     maxlen: i64,
     max_streams: i64,
     counter: &AtomicU64,
@@ -1453,8 +1699,16 @@ fn mirror_entry(
         }
     }
 
+    // Build the format's field set (issues #60, #66) before the XADD. An
+    // unencodable entry (only `json`, on a non-UTF-8 event name) is refused
+    // here and counted in `dropped_encode_error`; it never reaches the server.
+    let fields = match encode_entry_fields(spec) {
+        Ok(f) => f,
+        Err(reason) => return MirrorOutcome::EncodeError { stream, reason },
+    };
+
     let maxlen_s = maxlen.to_string();
-    let mut args: Vec<&[u8]> = Vec::with_capacity(12);
+    let mut args: Vec<&[u8]> = Vec::with_capacity(5 + fields.len());
     args.push(stream.as_bytes());
     if maxlen > 0 {
         args.push(&b"MAXLEN"[..]);
@@ -1462,12 +1716,9 @@ fn mirror_entry(
         args.push(maxlen_s.as_bytes());
     }
     args.push(&b"*"[..]);
-    args.push(&b"event"[..]);
-    args.push(event);
-    args.push(&b"key"[..]);
-    args.push(key);
-    args.push(&b"db"[..]);
-    args.push(db.as_bytes());
+    for f in &fields {
+        args.push(f.as_slice());
+    }
 
     // Per-event trace (SPEC.md section 13); the server filters by loglevel. Key
     // bytes are ASCII-escaped: the wrapper's logger builds a CString and panics
@@ -1475,8 +1726,8 @@ fn mirror_entry(
     // contain NUL) must never reach it.
     ctx.log_debug(&format!(
         "eventstream: {} key={} -> {}",
-        String::from_utf8_lossy(event),
-        key.escape_ascii(),
+        String::from_utf8_lossy(spec.event),
+        spec.key.escape_ascii(),
         stream
     ));
 
@@ -1563,14 +1814,11 @@ fn mirror_entry(
 /// retry the entry once so the triggering event is captured rather than
 /// dropped. Bounded: a refusal on the retry is a counted drop, never another
 /// re-pin. Runs only in a write-safe context (a post-notification job).
-#[allow(clippy::too_many_arguments)]
 fn repin_and_retry(
     ctx: &Context,
     prefix: &str,
     suffix: &str,
-    event: &[u8],
-    key: &[u8],
-    db: &str,
+    spec: &EntrySpec,
     maxlen: i64,
     max_streams: i64,
 ) {
@@ -1595,9 +1843,7 @@ fn repin_and_retry(
         None,
         maxlen,
     );
-    match mirror_entry(
-        ctx, prefix, &seg, suffix, event, key, db, maxlen, max_streams, &FORWARDED,
-    ) {
+    match mirror_entry(ctx, prefix, &seg, suffix, spec, maxlen, max_streams, &FORWARDED) {
         MirrorOutcome::Written => {}
         MirrorOutcome::Oom { stream, msg } => count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg),
         // Still refused (slot in flux): a migration-window drop, delimited by
@@ -1628,6 +1874,14 @@ fn repin_and_retry(
             &LOGGED_MAX_STREAMS,
             &format!("max-streams cap reached after re-pin; new stream '{stream}' not created; entry dropped (dropped_max_streams)"),
         ),
+        // Encode failure is deterministic per format+event, so the retry would
+        // fail identically; count it once and stop (issue #60).
+        MirrorOutcome::EncodeError { stream, reason } => count_drop(
+            ctx,
+            &DROPPED_ENCODE_ERROR,
+            &LOGGED_ENCODE_ERROR,
+            &format!("entry-format encode failed after re-pin for '{stream}': {reason}; entry dropped (dropped_encode_error)"),
+        ),
     }
 }
 
@@ -1644,7 +1898,7 @@ fn repin_and_retry(
 /// second re-pin for the same event would double the `repinned` marker and
 /// the one-retry bound. The ownership-probe fallback is likewise left to the
 /// per-event path, which hits the same failure on the same tag first.
-fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &str, maxlen: i64) {
+fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, maxlen: i64) {
     let seg = match tag_segment(ctx) {
         Some(s) => s,
         None => {
@@ -1657,9 +1911,10 @@ fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &s
         prefix,
         &seg,
         "#firehose",
-        event,
-        key,
-        db,
+        // The same `EntrySpec` as the per-event write, so the firehose copy has
+        // an identical field set and the same `seq` (issues #60, #66): they are
+        // one event written twice.
+        spec,
         maxlen,
         // The firehose is exempt from the max-streams cap (issue #64): it is a
         // single `#`-namespaced stream, not event-derived, so it never
@@ -1689,6 +1944,15 @@ fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &s
         // Unreachable: the firehose passes max_streams 0 (exempt), so the cap
         // gate never fires for it.
         MirrorOutcome::MaxStreams { .. } => {}
+        // The per-event write with the same spec already hit and counted this
+        // encode failure, but the two writes count drops independently (SPEC.md
+        // section 5), so count the copy's failure too (issue #60).
+        MirrorOutcome::EncodeError { stream, reason } => count_drop(
+            ctx,
+            &DROPPED_ENCODE_ERROR,
+            &LOGGED_ENCODE_ERROR,
+            &format!("entry-format encode failed for firehose copy '{stream}': {reason}; copy dropped (dropped_encode_error)"),
+        ),
     }
 }
 
@@ -1762,6 +2026,13 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     let max_streams = MAX_STREAMS.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
+    // Entry-shaping config snapshotted here so a mid-stream change lands on
+    // whole events, and so the per-event write and its firehose copy share one
+    // format (issue #60). `entry-seq` (issue #66) is IMMUTABLE, but reading it
+    // once here keeps the hot path uniform. `event_type` is moved into the job
+    // for the `verbose` format's `class` field.
+    let format = *ENTRY_FORMAT.lock(ctx);
+    let entry_seq = ENTRY_SEQ.load(Ordering::Relaxed);
 
     // 8. Deferred write, atomic with the notification.
     let status = ctx.add_post_notification_job(move |ctx| {
@@ -1788,14 +2059,29 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                     return;
                 }
             };
+            // One `seq` per captured event (issue #66), assigned after the slot
+            // check so a no-owned-slot drop does not burn a number, and reused
+            // by the firehose copy so both writes carry the same value. Only
+            // consumed when `entry-seq` is on; otherwise the field is absent.
+            let seq = if entry_seq {
+                Some(SEQ.fetch_add(1, Ordering::Relaxed))
+            } else {
+                None
+            };
+            let spec = EntrySpec {
+                format,
+                event: event_owned.as_bytes(),
+                key: &key_owned,
+                db: &db_s,
+                class: event_type,
+                seq,
+            };
             match mirror_entry(
                 ctx,
                 &prefix_owned,
                 &seg,
                 &suffix,
-                event_owned.as_bytes(),
-                &key_owned,
-                &db_s,
+                &spec,
                 maxlen,
                 max_streams,
                 &FORWARDED,
@@ -1806,16 +2092,9 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 }
                 // The pinned slot migrated away in a reshard (issue #46) or is
                 // mid-migration (issue #75): re-pin and retry once.
-                MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => repin_and_retry(
-                    ctx,
-                    &prefix_owned,
-                    &suffix,
-                    event_owned.as_bytes(),
-                    &key_owned,
-                    &db_s,
-                    maxlen,
-                    max_streams,
-                ),
+                MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => {
+                    repin_and_retry(ctx, &prefix_owned, &suffix, &spec, maxlen, max_streams)
+                }
                 MirrorOutcome::Failed { stream, msg } => {
                     // The re-pin trigger is an empirically observed error
                     // string, so an unclassified failure could be the
@@ -1825,16 +2104,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                     // matched, counted in `repins_probe_detected`.
                     if pinned_tag_lost_by_probe(ctx) {
                         REPINS_PROBE_DETECTED.fetch_add(1, Ordering::Relaxed);
-                        repin_and_retry(
-                            ctx,
-                            &prefix_owned,
-                            &suffix,
-                            event_owned.as_bytes(),
-                            &key_owned,
-                            &db_s,
-                            maxlen,
-                            max_streams,
-                        );
+                        repin_and_retry(ctx, &prefix_owned, &suffix, &spec, maxlen, max_streams);
                     } else {
                         count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
                     }
@@ -1850,19 +2120,25 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                          not created; entry dropped (dropped_max_streams)"
                     ),
                 ),
+                // The configured entry-format could not encode this event
+                // (issue #60): dropped before any XADD, counted, first failure
+                // logged once per process.
+                MirrorOutcome::EncodeError { stream, reason } => count_drop(
+                    ctx,
+                    &DROPPED_ENCODE_ERROR,
+                    &LOGGED_ENCODE_ERROR,
+                    &format!(
+                        "entry-format encode failed for '{stream}': {reason}; \
+                         entry dropped (dropped_encode_error)"
+                    ),
+                ),
             }
             // The firehose copy runs after the per-event outcome is settled,
             // gated on the runtime-mutable config; the two writes succeed or
-            // fail independently (issue #58).
+            // fail independently (issue #58). It reuses `spec`, so its field set
+            // and `seq` match the per-event entry (issues #60, #66).
             if FIREHOSE.load(Ordering::Relaxed) {
-                mirror_firehose(
-                    ctx,
-                    &prefix_owned,
-                    event_owned.as_bytes(),
-                    &key_owned,
-                    &db_s,
-                    maxlen,
-                );
+                mirror_firehose(ctx, &prefix_owned, &spec, maxlen);
             }
         });
     });
@@ -2087,7 +2363,8 @@ fn deinit(ctx: &Context) -> Status {
             + DROPPED_OOM.load(Ordering::Relaxed)
             + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
             + DROPPED_MIGRATING.load(Ordering::Relaxed)
-            + DROPPED_MAX_STREAMS.load(Ordering::Relaxed),
+            + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
+            + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed),
         SKIPPED_SELF.load(Ordering::Relaxed),
         SKIPPED_FILTERED.load(Ordering::Relaxed),
         SKIPPED_KEY_FILTERED.load(Ordering::Relaxed),
@@ -2110,7 +2387,8 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
         + DROPPED_MIGRATING.load(Ordering::Relaxed)
-        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed);
+        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
+        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
     ctx.builder()
         .add_section("stats")
         .field("enabled", ENABLED.load(Ordering::Relaxed) as i64)?
@@ -2132,6 +2410,10 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
         .field(
             "dropped_max_streams",
             DROPPED_MAX_STREAMS.load(Ordering::Relaxed),
+        )?
+        .field(
+            "dropped_encode_error",
+            DROPPED_ENCODE_ERROR.load(Ordering::Relaxed),
         )?
         .field("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed))?
         .field("skipped_filtered", SKIPPED_FILTERED.load(Ordering::Relaxed))?
@@ -2329,8 +2611,9 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
         + DROPPED_MIGRATING.load(Ordering::Relaxed)
-        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 22] = [
+        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
+        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
+    let pairs: [(&str, i64); 23] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         (
@@ -2350,6 +2633,10 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
         (
             "dropped_max_streams",
             DROPPED_MAX_STREAMS.load(Ordering::Relaxed) as i64,
+        ),
+        (
+            "dropped_encode_error",
+            DROPPED_ENCODE_ERROR.load(Ordering::Relaxed) as i64,
         ),
         ("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed) as i64),
         (
@@ -2519,11 +2806,20 @@ redis_module! {
             // opens no capture gap (per-event mirroring continues), so there
             // is no marker to record (issue #58).
             ["firehose", &FIREHOSE, false, ConfigurationFlags::DEFAULT, None],
+            // `entry-seq` (issue #66): IMMUTABLE, so within one process every
+            // stream's field set is uniform (always has `seq` or never), which
+            // preserves the SAMEFIELDS compaction. Default off, so existing
+            // deployments see no schema change.
+            ["entry-seq", &ENTRY_SEQ, false, ConfigurationFlags::IMMUTABLE, None],
         ],
-        // The expansion with module_args_as_configuration requires all four
-        // config-type lists (verified against v2.1.3; SPEC.md section 17 Q4).
-        // The module has no enum configs in v0.1.
-        enum: [],
+        // The module's first enum config (issue #60), filling the block the
+        // empty `enum: []` placeholder reserved (SPEC.md section 17 Q4). The
+        // default `fixed` variant reproduces the historical schema; the enum
+        // is runtime-mutable (DEFAULT), so the `format` discriminator carries
+        // the load-bearing weight for mixed-format streams (SPEC.md section 6).
+        enum: [
+            ["entry-format", &*ENTRY_FORMAT, EntryFormat::fixed, ConfigurationFlags::DEFAULT, None],
+        ],
         module_args_as_configuration: true,
     ]
 }
@@ -2531,6 +2827,179 @@ redis_module! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- entry-format enum and seq field (issues #60, #66) ---
+
+    /// Decode the `Vec<Vec<u8>>` an entry encodes to into a `Vec<(String,
+    /// Vec<u8>)>` of field name/value pairs, preserving order.
+    fn pairs(fields: &[Vec<u8>]) -> Vec<(String, Vec<u8>)> {
+        assert_eq!(fields.len() % 2, 0, "field list must be name/value pairs");
+        fields
+            .chunks(2)
+            .map(|c| (String::from_utf8(c[0].clone()).unwrap(), c[1].clone()))
+            .collect()
+    }
+
+    fn spec<'a>(format: EntryFormat, seq: Option<u64>) -> EntrySpec<'a> {
+        EntrySpec {
+            format,
+            event: b"hset",
+            key: b"user:1",
+            db: "3",
+            class: NotifyEvent::HASH,
+            seq,
+        }
+    }
+
+    #[test]
+    fn entry_format_fixed_is_byte_identical_to_today() {
+        // The default format must reproduce the historical event/key/db schema
+        // exactly: no `format` discriminator, no `seq`, same order (SPEC.md
+        // section 6). This is the backward-compatibility pin.
+        let fields = encode_entry_fields(&spec(EntryFormat::fixed, None)).unwrap();
+        assert_eq!(
+            pairs(&fields),
+            vec![
+                ("event".to_owned(), b"hset".to_vec()),
+                ("key".to_owned(), b"user:1".to_vec()),
+                ("db".to_owned(), b"3".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn entry_format_minimal_drops_event_and_carries_discriminator() {
+        let fields = encode_entry_fields(&spec(EntryFormat::minimal, None)).unwrap();
+        assert_eq!(
+            pairs(&fields),
+            vec![
+                ("format".to_owned(), b"minimal".to_vec()),
+                ("key".to_owned(), b"user:1".to_vec()),
+                ("db".to_owned(), b"3".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn entry_format_verbose_adds_class() {
+        let fields = encode_entry_fields(&spec(EntryFormat::verbose, None)).unwrap();
+        assert_eq!(
+            pairs(&fields),
+            vec![
+                ("format".to_owned(), b"verbose".to_vec()),
+                ("event".to_owned(), b"hset".to_vec()),
+                ("key".to_owned(), b"user:1".to_vec()),
+                ("db".to_owned(), b"3".to_vec()),
+                ("class".to_owned(), b"hash".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn entry_format_json_base64_encodes_the_key() {
+        let fields = encode_entry_fields(&spec(EntryFormat::json, None)).unwrap();
+        let p = pairs(&fields);
+        assert_eq!(p[0], ("format".to_owned(), b"json".to_vec()));
+        assert_eq!(p[1].0, "data");
+        // key "user:1" base64 is "dXNlcjox"; db is a JSON number.
+        assert_eq!(
+            String::from_utf8(p[1].1.clone()).unwrap(),
+            r#"{"event":"hset","key":"dXNlcjox","db":3}"#
+        );
+    }
+
+    #[test]
+    fn seq_field_appended_last_for_non_json_formats() {
+        // `seq` (issue #66) is the trailing field so the per-format field order
+        // stays stable for SAMEFIELDS.
+        for format in [
+            EntryFormat::fixed,
+            EntryFormat::minimal,
+            EntryFormat::verbose,
+        ] {
+            let fields = encode_entry_fields(&spec(format, Some(48212))).unwrap();
+            let p = pairs(&fields);
+            assert_eq!(
+                *p.last().unwrap(),
+                ("seq".to_owned(), b"48212".to_vec()),
+                "format {format:?} must end with seq"
+            );
+        }
+    }
+
+    #[test]
+    fn seq_embedded_in_json_document_not_a_top_level_field() {
+        let fields = encode_entry_fields(&spec(EntryFormat::json, Some(7))).unwrap();
+        let p = pairs(&fields);
+        // Still exactly two fields (format, data): seq lives inside the doc.
+        assert_eq!(p.len(), 2);
+        assert_eq!(
+            String::from_utf8(p[1].1.clone()).unwrap(),
+            r#"{"event":"hset","key":"dXNlcjox","db":3,"seq":7}"#
+        );
+    }
+
+    #[test]
+    fn json_encode_errors_on_non_utf8_event_name() {
+        // The one reachable-in-principle encode failure feeding
+        // `dropped_encode_error` (issue #60); the raw callback's lossy decode
+        // makes it unreachable through the normal path, but nothing at this
+        // layer type-guarantees UTF-8, so the guard is real.
+        let mut s = spec(EntryFormat::json, None);
+        s.event = &[0xff, 0xfe];
+        assert!(encode_entry_fields(&s).is_err());
+        // The other formats treat the event as raw bytes and never fail.
+        s.format = EntryFormat::fixed;
+        assert!(encode_entry_fields(&s).is_ok());
+        s.format = EntryFormat::verbose;
+        assert!(encode_entry_fields(&s).is_ok());
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        let cases = [
+            (&b""[..], ""),
+            (&b"f"[..], "Zg=="),
+            (&b"fo"[..], "Zm8="),
+            (&b"foo"[..], "Zm9v"),
+            (&b"foob"[..], "Zm9vYg=="),
+            (&b"fooba"[..], "Zm9vYmE="),
+            (&b"foobar"[..], "Zm9vYmFy"),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            base64_into(input, &mut out);
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn json_escape_handles_quotes_backslashes_and_controls() {
+        let mut out = String::new();
+        json_escape_into("a\"b\\c\nd\t", &mut out);
+        assert_eq!(out, r#""a\"b\\c\nd\t""#);
+    }
+
+    #[test]
+    fn class_names_single_and_multiple_bits() {
+        assert_eq!(class_names(NotifyEvent::EXPIRED), "expired");
+        assert_eq!(class_names(NotifyEvent::GENERIC), "generic");
+        // Multiple bits join in the grammar's order.
+        assert_eq!(
+            class_names(NotifyEvent::STRING | NotifyEvent::HASH),
+            "string,hash"
+        );
+        assert_eq!(class_names(NotifyEvent::empty()), "");
+    }
+
+    #[test]
+    fn entry_format_config_strings_are_lowercase() {
+        // The config accepts the byte-exact variant names, so they must be the
+        // documented `fixed`/`minimal`/`verbose`/`json` (SPEC.md section 7).
+        use redis_module::configuration::EnumConfigurationValue;
+        let (names, _vals) = EntryFormat::fixed.get_options();
+        assert_eq!(names, vec!["fixed", "minimal", "verbose", "json"]);
+    }
 
     #[test]
     fn filter_star() {

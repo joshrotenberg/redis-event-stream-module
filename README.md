@@ -103,6 +103,8 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
 | `eventstream.max-streams` | i64 | `0` | cap on distinct destination streams; `0` is unlimited, new streams beyond the cap are dropped and counted |
 | `eventstream.cluster-streams` | string | `refuse` | cluster behavior: `refuse` (default) or `per-node` (see Limitations); immutable, load-time only |
+| `eventstream.entry-format` | enum | `fixed` | mirrored entry shape: `fixed` (default, `event`/`key`/`db`), `minimal` (no `event`), `verbose` (adds `class`), or `json` (one document field, base64 key); non-`fixed` entries carry a `format` discriminator (SPEC.md section 6) |
+| `eventstream.entry-seq` | bool | `no` | append a process-global monotonic `seq` field for per-node cross-stream same-millisecond ordering; immutable, load-time only (SPEC.md sections 6, 9) |
 
 The full filter grammar is in SPEC.md section 7. The high-volume `@missed`
 (read misses) and `@new` (new-key) classes are opt-in and must be named at load
@@ -133,10 +135,13 @@ Events route by event name into `<prefix><event>`:
 | `DEL` | `events:del` |
 | eviction | `events:evicted` |
 
-Each entry has three fields: `event` (the event name), `key` (the affected
-key, binary-safe), and `db` (the database the event fired in). All destination
-streams live in database 0; the `db` field records the origin. The stream
-entry ID carries the event's millisecond timestamp.
+Each entry has three fields by default: `event` (the event name), `key` (the
+affected key, binary-safe), and `db` (the database the event fired in). All
+destination streams live in database 0; the `db` field records the origin. The
+stream entry ID carries the event's millisecond timestamp. `eventstream.entry-format`
+selects an alternative shape (drop `event`, add the notification `class`, or a
+single JSON document), and `eventstream.entry-seq` appends a global monotonic
+`seq` field for cross-stream ordering (SPEC.md section 6).
 
 Delivery semantics (SPEC.md section 9): on a healthy capturing master, each
 selected event produces exactly one entry, atomic with the keyspace change.
