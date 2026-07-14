@@ -1,0 +1,16 @@
+# Keep the build context minimal: the Dockerfile copies only the crate sources
+# it needs (Cargo.toml, Cargo.lock, src/, examples/). Everything else is noise.
+/target
+/book
+.git
+.github
+docs
+bench
+chaos
+tests
+*.md
+*.sh
+Dockerfile
+.dockerignore
+ramp.yml
+Makefile

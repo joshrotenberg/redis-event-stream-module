@@ -50,6 +50,34 @@ cargo build --release
 
 ## Run
 
+The fastest path is the preloaded image on GHCR, which starts a Redis server
+with the module already loaded (default configuration: expirations only):
+
+```sh
+docker run --rm -p 6379:6379 ghcr.io/joshrotenberg/redis-event-stream-module:latest
+```
+
+Module arguments pass through by overriding the command; read events back with
+`docker exec`:
+
+```sh
+docker run --rm -p 6379:6379 ghcr.io/joshrotenberg/redis-event-stream-module:latest \
+  redis-server \
+  --loadmodule /usr/local/lib/redis/modules/libredis_event_stream_module.so \
+  events 'expired,set' maxlen 1000000
+# in another terminal, against the same container:
+docker exec <container> redis-cli XREAD COUNT 10 STREAMS events:expired 0
+```
+
+Tags: `<version>` and `latest` for the Redis server, plus a `-valkey8` suffix
+for the Valkey variant (e.g. `0.2.0-valkey8`); images are multi-arch
+(`linux/amd64`, `linux/arm64`). The server is built from source in the image
+(the CI-pinned Redis/Valkey versions) rather than layered onto an upstream
+image; see [docs/docker.md](docs/docker.md) for why and for build details. Only
+Redis 7.2+/Valkey 8.x are published (SPEC.md section 14).
+
+Or load a prebuilt/locally built `.so` into an existing server:
+
 ```sh
 redis-server --loadmodule ./redis-event-stream-module-<version>-linux-x86_64.so
 ```
@@ -192,6 +220,24 @@ runs the full integration suite against each pinned version:
 
 Servers below 7.2 fail to load the module (SPEC.md section 14 describes the
 failure mode).
+
+### Redis Enterprise
+
+Redis Enterprise Software does not load a bare `.so`; it takes a RAMP bundle (a
+zip of the `.so` plus a generated `module.json`) uploaded through the cluster
+UI or `POST /v1/modules`. A `redis-event-stream-module-<version>-linux-x86_64.zip`
+RAMP bundle is attached to each release, built from [`ramp.yml`](ramp.yml). See
+[docs/enterprise.md](docs/enterprise.md) for upload steps and the scope caveats
+below:
+
+- **Self-managed Enterprise Software only.** Redis Cloud does not accept
+  uncertified custom modules; this bundle does not make the module deployable
+  there.
+- **Enterprise sharding is not OSS cluster mode.** Each shard is an ordinary
+  non-clustered Redis process behind the proxy, so `eventstream.cluster-streams`
+  does not trip and each shard mirrors its own events into shard-local streams.
+  A multi-shard database therefore exposes per-shard streams behind one
+  endpoint (SPEC.md section 10 does not cover Enterprise clustering).
 
 ## Limitations
 

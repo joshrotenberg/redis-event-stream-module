@@ -13,6 +13,11 @@ and a runnable demo, start with the
 
 ## What is here
 
+- **[Docker image](./docker.md)** - the preloaded GHCR image: `docker run`
+  one-liner, passing module arguments, tags and variants.
+- **[Redis Enterprise](./enterprise.md)** - the RAMP bundle: uploading to a
+  self-managed Enterprise cluster, the Cloud exclusion, and multi-shard
+  (per-shard-stream) semantics.
 - **[Consumer patterns](./consumer-patterns.md)** - reading the mirrored
   streams: live tail, durable work queues with consumer groups, replay,
   discovery, and cluster fan-out-and-merge.
