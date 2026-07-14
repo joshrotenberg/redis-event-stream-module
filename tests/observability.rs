@@ -16,6 +16,8 @@ fn info_section_has_all_fields() {
         "enabled",
         "forwarded",
         "firehose_forwarded",
+        "autogroup_created",
+        "autogroup_failed",
         "dropped",
         "dropped_xadd_error",
         "dropped_oom",

@@ -87,6 +87,54 @@ Ack only after the work is durably done. An entry stays pending until acked, so
 a crash between processing and `XACK` results in redelivery, which is why
 consumers must be idempotent (natural key: stream name plus entry ID).
 
+### Letting the module create the group (`eventstream.auto-group`)
+
+The `XGROUP CREATE ... $ MKSTREAM` recipe above is race-free only when the
+consumers deploy *before* the module: `MKSTREAM` makes an empty stream and the
+group at `$` sees every later entry. In the common order — enable capture, then
+roll out workers — the stream already holds entries when the recipe runs, and a
+group at `$` silently skips everything captured before it. The fix is to create
+the group at `0` (see Replay), but that requires knowing which ordering you are
+in.
+
+`eventstream.auto-group` removes the decision. Name a group and the module
+creates it at `0` on each destination stream the first time it writes to that
+stream, so the group exists from the stream's first entry no matter which side
+deployed first:
+
+```
+CONFIG SET eventstream.auto-group workers
+# or as a load-time arg: --loadmodule ... auto-group workers
+```
+
+Workers then skip `XGROUP CREATE` entirely — drain their pending list, then
+tail:
+
+```
+XREADGROUP GROUP workers worker-1 COUNT 100 STREAMS events:expired 0   # backlog
+XREADGROUP GROUP workers worker-1 COUNT 100 BLOCK 5000 STREAMS events:expired >
+```
+
+Notes:
+
+- Off by default; empty means group creation stays operator-side (this page's
+  manual recipe still works unchanged).
+- The group is created with the same replicated, memory-checked write options as
+  a mirrored entry, so it appears on replicas and survives an AOF replay.
+- Idempotent: re-creating an existing group is a no-op (`BUSYGROUP` is treated as
+  success), and a `FLUSHALL` that wiped the stream re-provisions the group on the
+  next write.
+- It covers per-event streams and the firehose (`events:#firehose`), but not the
+  control stream (`events:#control`), which is not a work queue.
+- Setting it at runtime provisions the group on each stream's **next** write, not
+  retroactively: a stream that never fires again keeps no group.
+- It does not upgrade the delivery guarantee. A group at `0` still loses entries
+  trimmed by `maxlen` before a slow consumer catches up (SPEC.md section 9,
+  slow-consumer contract). The win is operational: the group exists from birth,
+  so deployment ordering stops mattering.
+- Watch `eventstream_autogroup_created` / `eventstream_autogroup_failed` in
+  `INFO eventstream` to confirm provisioning.
+
 ### Recovering stuck work
 
 If a worker dies without acking, its entries sit in the group's pending list
@@ -173,6 +221,10 @@ above apply to the firehose as-is:
 XGROUP CREATE events:#firehose workers $ MKSTREAM
 XREADGROUP GROUP workers worker-1 COUNT 100 BLOCK 5000 STREAMS events:#firehose >
 ```
+
+`eventstream.auto-group` (above) covers the firehose too: with it set, the
+module creates the group on `events:#firehose` at first write, so the
+`XGROUP CREATE` line is unnecessary.
 
 Ordering. The firehose is a single stream, so its entry IDs give a total order
 across all event types on the node — including entries that landed in the same

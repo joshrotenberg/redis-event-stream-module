@@ -196,6 +196,15 @@ plus a client-side union:
 - Consumer groups still work per stream. A work queue over `expired` in
   cluster mode is N consumer groups, one per per-node stream, or one group per
   stream consumed by a per-node worker pool.
+- `eventstream.auto-group` composes with per-node mode: each node creates the
+  named group on its own `{tag}`-pinned streams as it writes them, so the N
+  per-node streams come with their group already present — no operator-side
+  `XGROUP CREATE` fan-out, and no need to re-run it after a reshard, since a
+  node re-pinned to a new tag provisions the group on the new stream's first
+  write. This is exactly the case where module-side creation at stream birth
+  beats an external sweep: the per-node stream names change after resharding.
+  The group is created at `0` on each stream, so the same slow-consumer caveats
+  apply per node (SPEC.md section 9).
 - After a reshard, the set of per-node streams changes. Consumers re-run
   discovery periodically, or when they observe a `repinned` marker on a
   control stream, and adjust which streams they read. A `{tag}` stream that
