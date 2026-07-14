@@ -241,6 +241,15 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 /// (it doubles write amplification per captured event, SPEC.md section 11);
 /// runtime-mutable, read in the post-notification job.
 static FIREHOSE: AtomicBool = AtomicBool::new(false);
+/// `eventstream.verify-oom` (issue #65): when on (the default), mirrored writes
+/// carry the `M` flag so an `XADD` is refused under `maxmemory` and counted as
+/// `dropped_oom` (SPEC.md sections 10, 11) — bounded, counted loss. When off,
+/// `xadd_call_options` drops the `M` flag so capture continues at the memory
+/// limit; growth stays bounded by `maxlen`, but the module now adds memory
+/// while the server is evicting, so `dropped_oom` becomes unreachable and the
+/// `evicted`-storm amplification of SPEC.md section 11 applies. Runtime-mutable,
+/// read per `XADD`. Default `true` preserves today's behavior.
+static VERIFY_OOM: AtomicBool = AtomicBool::new(true);
 /// `eventstream.entry-seq` (issue #66): when on, every mirrored entry carries a
 /// `seq` field with the value of `SEQ` below. Registered IMMUTABLE (load-time
 /// only, like `stream-prefix`/`cluster-streams`) so that within one process the
@@ -313,6 +322,49 @@ impl ConfigurationValue<i64> for MaxStreamsConfig {
             return Err(RedisError::String(format!(
                 "max-streams must be 0 (unlimited) or positive, got {val}"
             )));
+        }
+        self.value.store(val, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+static RETENTION_MS: RetentionMsConfig = RetentionMsConfig {
+    value: AtomicI64::new(0),
+};
+
+/// `eventstream.retention-ms` config binding (issue #108): time-based retention.
+/// When `> 0`, mirrored writes trim by `MINID ~ <now_ms - retention_ms>` instead
+/// of `MAXLEN`, dropping entries older than the window (destination streams use
+/// auto IDs, so every entry ID carries the event's millisecond timestamp). `0`
+/// disables it, preserving the count-based-only behavior. Re-validates negatives
+/// in `set()` for the same reason as `MaxlenConfig`: a module-arg value becomes
+/// the registered default and bypasses the registered 0..i64::MAX boundary
+/// check. When it transitions to `> 0` while `maxlen > 0`, `set()` logs a notice
+/// that `maxlen` is now ignored (MINID takes precedence, SPEC.md section 7).
+struct RetentionMsConfig {
+    value: AtomicI64,
+}
+
+impl ConfigurationValue<i64> for RetentionMsConfig {
+    fn get(&self, _ctx: &ConfigurationContext) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+    fn set(&self, _ctx: &ConfigurationContext, val: i64) -> Result<(), RedisError> {
+        if val < 0 {
+            return Err(RedisError::String(format!(
+                "retention-ms must be 0 (disabled) or positive, got {val}"
+            )));
+        }
+        // Precedence notice (issue #108): MINID trimming wins over MAXLEN when
+        // both are set, so activating retention-ms silently ignores maxlen for
+        // the XADD clause. Log it at the config-change point (the switch that
+        // activates precedence) so the ignored cap is not a silent surprise;
+        // the module-wide logger works without a Context, as in enabled_changed.
+        if val > 0 && MAXLEN.value.load(Ordering::Relaxed) > 0 {
+            redis_module::logging::log_notice(
+                "eventstream: retention-ms > 0; maxlen is ignored, streams trim by \
+                 MINID (time-based) instead (SPEC.md section 7)",
+            );
         }
         self.value.store(val, Ordering::Relaxed);
         Ok(())
@@ -750,6 +802,96 @@ impl ConfigurationValue<RedisString> for SourceDbConfig {
     }
 }
 
+/// Parse the maxlen-overrides grammar (issue #62): `event=cap ("," event=cap)*`,
+/// each `cap` a non-negative i64 (`0` disables trimming for that stream, exactly
+/// as the global `maxlen 0` does). Whitespace around tokens is trimmed; the
+/// empty string yields an empty map (no overrides, the default). Rejects empty
+/// tokens, a token with no `=`, an empty event name, and a non-integer or
+/// negative cap. Caps are re-validated here (not only by the registered range)
+/// because module-arg values bypass the boundary check, the same rationale as
+/// `MaxlenConfig`. The key is matched against the destination stream *suffix*,
+/// so it is the raw (sanitized) event name, e.g. `expired`; a literal `#control`
+/// targets the control stream (SPEC.md section 9). The `#` namespace cannot
+/// collide with a real event name (the sanitizer never emits `#`), so no name is
+/// stripped or sanitized here.
+fn parse_maxlen_overrides(s: &str) -> Result<HashMap<String, i64>, RedisError> {
+    let mut map = HashMap::new();
+    if s.trim().is_empty() {
+        return Ok(map);
+    }
+    for raw_token in s.split(',') {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            return Err(RedisError::String(
+                "empty maxlen-overrides token; leave the value empty to clear all overrides"
+                    .to_owned(),
+            ));
+        }
+        let (name, cap_s) = token.split_once('=').ok_or_else(|| {
+            RedisError::String(format!(
+                "maxlen-overrides entry '{token}' is not 'event=cap'"
+            ))
+        })?;
+        let name = name.trim();
+        let cap_s = cap_s.trim();
+        if name.is_empty() {
+            return Err(RedisError::String(format!(
+                "maxlen-overrides entry '{token}' has an empty event name"
+            )));
+        }
+        let cap: i64 = cap_s.parse().map_err(|_| {
+            RedisError::String(format!(
+                "maxlen-overrides cap for '{name}' is not an integer: '{cap_s}'"
+            ))
+        })?;
+        if cap < 0 {
+            return Err(RedisError::String(format!(
+                "maxlen-overrides cap for '{name}' must be 0 (trimming disabled) or positive, \
+                 got {cap}"
+            )));
+        }
+        map.insert(name.to_owned(), cap);
+    }
+    Ok(map)
+}
+
+/// `eventstream.maxlen-overrides` config binding (issue #62): per-event `maxlen`
+/// caps keyed by destination stream suffix, overriding the global
+/// `eventstream.maxlen` for the named streams. Same shape as [`FilterConfig`],
+/// storing the raw string (for `CONFIG GET`) and the parsed map behind a
+/// `RedisGILGuard` the write path reads under the GIL. Default empty (no
+/// overrides); rejection from `set()` surfaces as the `CONFIG SET` error reply.
+struct MaxlenOverridesConfig {
+    raw: RedisGILGuard<String>,
+    parsed: RedisGILGuard<HashMap<String, i64>>,
+}
+
+impl ConfigurationValue<RedisString> for MaxlenOverridesConfig {
+    fn get(&self, ctx: &ConfigurationContext) -> RedisString {
+        RedisString::create(None, self.raw.lock(ctx).as_str())
+    }
+    fn set(&self, ctx: &ConfigurationContext, val: RedisString) -> Result<(), RedisError> {
+        let s = val.try_as_str()?;
+        let parsed = parse_maxlen_overrides(s)?;
+        *self.parsed.lock(ctx) = parsed;
+        *self.raw.lock(ctx) = s.to_owned();
+        Ok(())
+    }
+}
+
+/// The effective count cap for a destination stream (issue #62): the per-event
+/// override when the map names this stream *suffix*, else the global
+/// `eventstream.maxlen`. The suffix is the sanitized event name for data streams
+/// or a `#`-namespaced literal (`#control`) for the module's own streams; the
+/// `#` namespace cannot collide with a real event name, so `#control` is
+/// addressable while an ordinary event name never is by accident. The firehose
+/// deliberately does not consult overrides (it aggregates every event type, so
+/// its window is sized for the total rate, SPEC.md section 11) and passes the
+/// global cap directly.
+fn effective_maxlen(overrides: &HashMap<String, i64>, suffix: &str, global: i64) -> i64 {
+    overrides.get(suffix).copied().unwrap_or(global)
+}
+
 /// `eventstream.stream-prefix` config binding. Registered IMMUTABLE, so `set`
 /// runs only at load time (defaults and module args); validation failure
 /// aborts the load.
@@ -890,6 +1032,14 @@ lazy_static! {
         raw: RedisGILGuard::new("*".to_owned()),
         parsed: RedisGILGuard::new(
             parse_source_dbs("*").expect("default source-dbs must parse")
+        ),
+    };
+    /// `eventstream.maxlen-overrides` (issue #62). Default empty: no per-event
+    /// caps, every stream trims under the global `eventstream.maxlen`.
+    static ref MAXLEN_OVERRIDES: MaxlenOverridesConfig = MaxlenOverridesConfig {
+        raw: RedisGILGuard::new(String::new()),
+        parsed: RedisGILGuard::new(
+            parse_maxlen_overrides("").expect("empty maxlen-overrides must parse")
         ),
     };
     static ref PREFIX: PrefixConfig = PrefixConfig {
@@ -1136,12 +1286,67 @@ fn count_no_slot_drop(ctx: &Context) {
 
 fn xadd_call_options() -> CallOptions {
     // `!` replicate, `E` errors as replies, `M` respect maxmemory
-    // (SPEC.md section 10).
-    CallOptionsBuilder::new()
-        .replicate()
-        .errors_as_replies()
-        .verify_oom()
-        .build()
+    // (SPEC.md section 10). The `M` flag is conditional on `eventstream.verify-oom`
+    // (issue #65): with it off, mirrored writes are not refused under maxmemory,
+    // so capture continues at the memory limit at the documented cost (SPEC.md
+    // section 11). Read per XADD, so a live CONFIG SET needs no cached-options
+    // invalidation and applies to mirrored entries, gap markers, and firehose
+    // copies uniformly.
+    let builder = CallOptionsBuilder::new().replicate().errors_as_replies();
+    let builder = if VERIFY_OOM.load(Ordering::Relaxed) {
+        builder.verify_oom()
+    } else {
+        builder
+    };
+    builder.build()
+}
+
+/// Server wall-clock in milliseconds via `RedisModule_Milliseconds` — the same
+/// clock the server uses to stamp auto-generated stream entry IDs (`<ms>-<seq>`,
+/// SPEC.md section 6), so a `MINID` threshold derived from it selects entries by
+/// their own timestamps (issue #108). Called only on the write path (GIL held,
+/// write-safe context); `mstime_t` is `i64`.
+fn server_now_ms() -> i64 {
+    unsafe { raw::RedisModule_Milliseconds.unwrap()() }
+}
+
+/// The inline `XADD` trim policy for one write (issues #62, #108). `maxlen` is
+/// the count cap already resolved for this stream (the per-event override or the
+/// global `eventstream.maxlen`, issue #62). `retention_ms` is the time window
+/// (`eventstream.retention-ms`, issue #108): when `> 0` the write trims by
+/// `MINID` (time-based) and `maxlen` is ignored for that `XADD`, otherwise it
+/// trims by `MAXLEN`. Redis accepts only one of the two clauses per `XADD`, so
+/// the two are mutually exclusive by construction (SPEC.md section 7). `Copy`,
+/// so it threads through the write helpers without borrow bookkeeping.
+#[derive(Clone, Copy)]
+struct Retention {
+    maxlen: i64,
+    retention_ms: i64,
+}
+
+impl Retention {
+    /// Whether this write trims by time (`MINID`) rather than count (`MAXLEN`).
+    fn is_time_based(&self) -> bool {
+        self.retention_ms > 0
+    }
+
+    /// The inline trim clause: `Some((keyword, threshold))` to push as
+    /// `<keyword> ~ <threshold>`, or `None` for no trimming. Time-based `MINID`
+    /// takes precedence over count-based `MAXLEN` (issue #108). `now_ms` is the
+    /// server clock ([`server_now_ms`]), consulted only on the `MINID` path; the
+    /// threshold is `now_ms - retention_ms` clamped at 0 and formatted `<ms>-0`
+    /// so it names a full stream ID (`<ms>-<seq>`, SPEC.md section 6). Returns an
+    /// owned threshold string the caller borrows into the `XADD` arg vector.
+    fn trim_clause(&self, now_ms: i64) -> Option<(&'static [u8], String)> {
+        if self.retention_ms > 0 {
+            let threshold = now_ms.saturating_sub(self.retention_ms).max(0);
+            Some((&b"MINID"[..], format!("{threshold}-0")))
+        } else if self.maxlen > 0 {
+            Some((&b"MAXLEN"[..], self.maxlen.to_string()))
+        } else {
+            None
+        }
+    }
 }
 
 /// Unix seconds for `LAST_ERROR_TIME` and the per-stream warning window.
@@ -1266,7 +1471,13 @@ fn enabled_changed(config_ctx: &ConfigurationContext, _name: &str, _val: &'stati
 /// is `Some` only for the `flushed` action, which carries the flushed database
 /// (`-1` for `FLUSHALL`) as an additive third field so consumers can bound the
 /// reconcile to that database (issues #74, #73).
-fn write_marker(ctx: &Context, control_stream: &str, action: &str, db: Option<i32>, maxlen: i64) {
+fn write_marker(
+    ctx: &Context,
+    control_stream: &str,
+    action: &str,
+    db: Option<i32>,
+    retention: Retention,
+) {
     let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
     if rc != raw::REDISMODULE_OK as i32 {
         count_drop(
@@ -1277,15 +1488,21 @@ fn write_marker(ctx: &Context, control_stream: &str, action: &str, db: Option<i3
         );
         return;
     }
-    let maxlen_s = maxlen.to_string();
-    // Held outside the args vec so its bytes outlive the `&[u8]` borrow below.
+    // The control stream follows the same trim strategy as data streams so
+    // replay-window reasoning is uniform (issue #108, SPEC.md section 9). Held
+    // outside the args vec so their bytes outlive the `&[u8]` borrows below.
+    let trim = retention.trim_clause(if retention.is_time_based() {
+        server_now_ms()
+    } else {
+        0
+    });
     let db_s = db.map(|d| d.to_string());
     let mut args: Vec<&[u8]> = Vec::with_capacity(12);
     args.push(control_stream.as_bytes());
-    if maxlen > 0 {
-        args.push(&b"MAXLEN"[..]);
+    if let Some((keyword, ref threshold)) = trim {
+        args.push(keyword);
         args.push(&b"~"[..]);
-        args.push(maxlen_s.as_bytes());
+        args.push(threshold.as_bytes());
     }
     args.push(&b"*"[..]);
     args.push(&b"action"[..]);
@@ -1373,7 +1590,17 @@ fn drain_pending_markers(ctx: &Context) {
         return;
     }
     let prefix_owned = PREFIX.value.lock(ctx).as_str().to_owned();
-    let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+    // The control stream's retention (issues #62, #108): its `#control` suffix is
+    // addressable as a per-event override, else the global cap; time-based
+    // retention applies to it as to any stream.
+    let control_ret = Retention {
+        maxlen: effective_maxlen(
+            &MAXLEN_OVERRIDES.parsed.lock(ctx),
+            "#control",
+            MAXLEN.value.load(Ordering::Relaxed),
+        ),
+        retention_ms: RETENTION_MS.value.load(Ordering::Relaxed),
+    };
     let dropped_count = drained.len() as u64;
     let status = ctx.add_post_notification_job(move |ctx| {
         guard_job(move || {
@@ -1391,7 +1618,13 @@ fn drain_pending_markers(ctx: &Context) {
             };
             let control_stream = format!("{prefix_owned}{seg}#control");
             for marker in &drained {
-                write_marker(ctx, &control_stream, marker.action(), marker.db(), maxlen);
+                write_marker(
+                    ctx,
+                    &control_stream,
+                    marker.action(),
+                    marker.db(),
+                    control_ret,
+                );
             }
         });
     });
@@ -1676,7 +1909,7 @@ fn mirror_entry(
     seg: &str,
     suffix: &str,
     spec: &EntrySpec,
-    maxlen: i64,
+    retention: Retention,
     max_streams: i64,
     counter: &AtomicU64,
 ) -> MirrorOutcome {
@@ -1707,13 +1940,21 @@ fn mirror_entry(
         Err(reason) => return MirrorOutcome::EncodeError { stream, reason },
     };
 
-    let maxlen_s = maxlen.to_string();
+    // The inline trim clause (issues #62, #108): count-based `MAXLEN ~ <cap>`
+    // with the per-event-resolved cap, or time-based `MINID ~ <now-window>` when
+    // `retention-ms` is set (MINID wins). Held outside the args vec so its bytes
+    // outlive the `&[u8]` borrow below.
+    let trim = retention.trim_clause(if retention.is_time_based() {
+        server_now_ms()
+    } else {
+        0
+    });
     let mut args: Vec<&[u8]> = Vec::with_capacity(5 + fields.len());
     args.push(stream.as_bytes());
-    if maxlen > 0 {
-        args.push(&b"MAXLEN"[..]);
+    if let Some((keyword, ref threshold)) = trim {
+        args.push(keyword);
         args.push(&b"~"[..]);
-        args.push(maxlen_s.as_bytes());
+        args.push(threshold.as_bytes());
     }
     args.push(&b"*"[..]);
     for f in &fields {
@@ -1819,7 +2060,8 @@ fn repin_and_retry(
     prefix: &str,
     suffix: &str,
     spec: &EntrySpec,
-    maxlen: i64,
+    retention: Retention,
+    control: Retention,
     max_streams: i64,
 ) {
     *NODE_TAG.lock().unwrap() = None;
@@ -1841,9 +2083,9 @@ fn repin_and_retry(
         &format!("{prefix}{seg}#control"),
         "repinned",
         None,
-        maxlen,
+        control,
     );
-    match mirror_entry(ctx, prefix, &seg, suffix, spec, maxlen, max_streams, &FORWARDED) {
+    match mirror_entry(ctx, prefix, &seg, suffix, spec, retention, max_streams, &FORWARDED) {
         MirrorOutcome::Written => {}
         MirrorOutcome::Oom { stream, msg } => count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg),
         // Still refused (slot in flux): a migration-window drop, delimited by
@@ -1898,7 +2140,7 @@ fn repin_and_retry(
 /// second re-pin for the same event would double the `repinned` marker and
 /// the one-retry bound. The ownership-probe fallback is likewise left to the
 /// per-event path, which hits the same failure on the same tag first.
-fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, maxlen: i64) {
+fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, retention: Retention) {
     let seg = match tag_segment(ctx) {
         Some(s) => s,
         None => {
@@ -1915,7 +2157,7 @@ fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, maxlen: i64) {
         // an identical field set and the same `seq` (issues #60, #66): they are
         // one event written twice.
         spec,
-        maxlen,
+        retention,
         // The firehose is exempt from the max-streams cap (issue #64): it is a
         // single `#`-namespaced stream, not event-derived, so it never
         // consumes a cap slot and is never blocked by it.
@@ -2022,7 +2264,34 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
     // hash tag is selected lazily (this node may own no slots yet), and that
     // probe must run in a write-safe context.
     let prefix_owned = prefix.as_str().to_owned();
-    let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+    // Retention config snapshotted here so a mid-event CONFIG SET lands on whole
+    // events (issues #62, #108), and resolved to the three destinations here,
+    // where the event suffix is already final: the data stream takes its
+    // per-event override (else the global cap), the control stream takes the
+    // `#control` override, and the firehose uses the global cap (it aggregates
+    // every event type, so it is not per-event-overridable, SPEC.md section 11).
+    // `retention_ms`, when set, selects time-based MINID trimming for all three.
+    // Resolving here keeps the job's captures `Copy` and avoids cloning the
+    // override map into the job when overrides are configured.
+    let global_maxlen = MAXLEN.value.load(Ordering::Relaxed);
+    let retention_ms = RETENTION_MS.value.load(Ordering::Relaxed);
+    let (data_ret, control_ret, firehose_ret) = {
+        let overrides = MAXLEN_OVERRIDES.parsed.lock(ctx);
+        (
+            Retention {
+                maxlen: effective_maxlen(&overrides, &suffix, global_maxlen),
+                retention_ms,
+            },
+            Retention {
+                maxlen: effective_maxlen(&overrides, "#control", global_maxlen),
+                retention_ms,
+            },
+            Retention {
+                maxlen: global_maxlen,
+                retention_ms,
+            },
+        )
+    };
     let max_streams = MAX_STREAMS.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
@@ -2076,13 +2345,17 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 class: event_type,
                 seq,
             };
+            // Resolve the trim policy per destination now the suffix is final
+            // (issues #62, #108): `data_ret`/`control_ret`/`firehose_ret` were
+            // resolved before the job was enqueued (the suffix was already
+            // final), so nothing per-event needs recomputing here.
             match mirror_entry(
                 ctx,
                 &prefix_owned,
                 &seg,
                 &suffix,
                 &spec,
-                maxlen,
+                data_ret,
                 max_streams,
                 &FORWARDED,
             ) {
@@ -2092,9 +2365,15 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 }
                 // The pinned slot migrated away in a reshard (issue #46) or is
                 // mid-migration (issue #75): re-pin and retry once.
-                MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => {
-                    repin_and_retry(ctx, &prefix_owned, &suffix, &spec, maxlen, max_streams)
-                }
+                MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => repin_and_retry(
+                    ctx,
+                    &prefix_owned,
+                    &suffix,
+                    &spec,
+                    data_ret,
+                    control_ret,
+                    max_streams,
+                ),
                 MirrorOutcome::Failed { stream, msg } => {
                     // The re-pin trigger is an empirically observed error
                     // string, so an unclassified failure could be the
@@ -2104,7 +2383,15 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                     // matched, counted in `repins_probe_detected`.
                     if pinned_tag_lost_by_probe(ctx) {
                         REPINS_PROBE_DETECTED.fetch_add(1, Ordering::Relaxed);
-                        repin_and_retry(ctx, &prefix_owned, &suffix, &spec, maxlen, max_streams);
+                        repin_and_retry(
+                            ctx,
+                            &prefix_owned,
+                            &suffix,
+                            &spec,
+                            data_ret,
+                            control_ret,
+                            max_streams,
+                        );
                     } else {
                         count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
                     }
@@ -2138,7 +2425,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
             // fail independently (issue #58). It reuses `spec`, so its field set
             // and `seq` match the per-event entry (issues #60, #66).
             if FIREHOSE.load(Ordering::Relaxed) {
-                mirror_firehose(ctx, &prefix_owned, &spec, maxlen);
+                mirror_firehose(ctx, &prefix_owned, &spec, firehose_ret);
             }
         });
     });
@@ -2296,10 +2583,17 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     let filter = FILTER.raw.lock(ctx).clone();
     let key_filter = KEY_FILTER.raw.lock(ctx).clone();
     let source_dbs = SOURCE_DBS.raw.lock(ctx).clone();
+    // Surface the per-event override count (issue #62) alongside the effective
+    // retention config (issues #108, #65) in the load notice; the full override
+    // map is available via `CONFIG GET eventstream.maxlen-overrides`.
+    let overrides_count = MAXLEN_OVERRIDES.parsed.lock(ctx).len();
     ctx.log_notice(&format!(
         "eventstream loaded: stream-prefix='{prefix}' events='{filter}' key-filter='{key_filter}' \
-         source-dbs='{source_dbs}' maxlen={} max-streams={} enabled={} extra-classes={:?}",
+         source-dbs='{source_dbs}' maxlen={} maxlen-overrides={overrides_count} retention-ms={} \
+         verify-oom={} max-streams={} enabled={} extra-classes={:?}",
         MAXLEN.value.load(Ordering::Relaxed),
+        RETENTION_MS.value.load(Ordering::Relaxed),
+        VERIFY_OOM.load(Ordering::Relaxed),
         MAX_STREAMS.value.load(Ordering::Relaxed),
         ENABLED.load(Ordering::Relaxed),
         extra,
@@ -2346,11 +2640,27 @@ fn deinit(ctx: &Context) -> Status {
         // rather than fail the unload.
         if let Some(seg) = tag_segment(ctx) {
             let control_stream = format!("{}{seg}#control", PREFIX.value.lock(ctx).as_str());
-            let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+            // Same control-stream retention resolution as the live path (issues
+            // #62, #108): `#control` override else the global cap, plus
+            // time-based retention when set.
+            let control_ret = Retention {
+                maxlen: effective_maxlen(
+                    &MAXLEN_OVERRIDES.parsed.lock(ctx),
+                    "#control",
+                    MAXLEN.value.load(Ordering::Relaxed),
+                ),
+                retention_ms: RETENTION_MS.value.load(Ordering::Relaxed),
+            };
             for marker in drained {
-                write_marker(ctx, &control_stream, marker.action(), marker.db(), maxlen);
+                write_marker(
+                    ctx,
+                    &control_stream,
+                    marker.action(),
+                    marker.db(),
+                    control_ret,
+                );
             }
-            write_marker(ctx, &control_stream, "unloading", None, maxlen);
+            write_marker(ctx, &control_stream, "unloading", None, control_ret);
         }
     }
     ctx.log_notice(&format!(
@@ -2792,12 +3102,21 @@ redis_module! {
         i64: [
             ["maxlen", &MAXLEN, 10000, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
             ["max-streams", &MAX_STREAMS, 0, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
+            // Time-based retention (issue #108): 0 disables (count-based only),
+            // >0 trims by MINID over a `retention-ms` window, taking precedence
+            // over `maxlen`. Same module-arg boundary-bypass re-validation as
+            // `maxlen`/`max-streams`.
+            ["retention-ms", &RETENTION_MS, 0, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
         ],
         string: [
             ["stream-prefix", &*PREFIX, "events:", ConfigurationFlags::IMMUTABLE, None],
             ["events", &*FILTER, "expired", ConfigurationFlags::DEFAULT, None],
             ["key-filter", &*KEY_FILTER, "*", ConfigurationFlags::DEFAULT, None],
             ["source-dbs", &*SOURCE_DBS, "*", ConfigurationFlags::DEFAULT, None],
+            // Per-event maxlen overrides (issue #62): `event=cap` pairs keyed by
+            // destination stream suffix, overriding the global `maxlen`. Default
+            // empty. Runtime-mutable like `maxlen`.
+            ["maxlen-overrides", &*MAXLEN_OVERRIDES, "", ConfigurationFlags::DEFAULT, None],
             ["cluster-streams", &*CLUSTER_STREAMS, "refuse", ConfigurationFlags::IMMUTABLE, None],
         ],
         bool: [
@@ -2806,6 +3125,11 @@ redis_module! {
             // opens no capture gap (per-event mirroring continues), so there
             // is no marker to record (issue #58).
             ["firehose", &FIREHOSE, false, ConfigurationFlags::DEFAULT, None],
+            // `verify-oom` (issue #65): default yes keeps the `M` flag on
+            // mirrored writes (refuse-and-count under maxmemory). No on-changed
+            // callback: `xadd_call_options` reads the atomic per XADD, so a live
+            // toggle needs no cached-options invalidation.
+            ["verify-oom", &VERIFY_OOM, true, ConfigurationFlags::DEFAULT, None],
             // `entry-seq` (issue #66): IMMUTABLE, so within one process every
             // stream's field set is uniform (always has `seq` or never), which
             // preserves the SAMEFIELDS compaction. Default off, so existing
@@ -3185,6 +3509,110 @@ mod tests {
         // Whitespace around indexes is trimmed.
         let f = parse_source_dbs(" 0 , 2 ").unwrap();
         assert!(f.matches(0) && f.matches(2));
+    }
+
+    // --- per-event maxlen overrides (issue #62) ---
+
+    #[test]
+    fn maxlen_overrides_default_empty_falls_back_to_global() {
+        // The default (empty) map names no stream, so every suffix resolves to
+        // the global cap: today's single-cap behavior, unchanged.
+        let m = parse_maxlen_overrides("").unwrap();
+        assert!(m.is_empty());
+        assert_eq!(effective_maxlen(&m, "expired", 10_000), 10_000);
+        assert_eq!(effective_maxlen(&m, "set", 10_000), 10_000);
+    }
+
+    #[test]
+    fn maxlen_overrides_parse_and_resolve_per_event() {
+        // A named stream takes its override; an unnamed one falls back to the
+        // global cap (issue #62). Whitespace around tokens and the `=` is
+        // trimmed.
+        let m = parse_maxlen_overrides("expired=600000, set = 1000 ").unwrap();
+        assert_eq!(effective_maxlen(&m, "expired", 10_000), 600_000);
+        assert_eq!(effective_maxlen(&m, "set", 10_000), 1_000);
+        assert_eq!(effective_maxlen(&m, "del", 10_000), 10_000);
+    }
+
+    #[test]
+    fn maxlen_overrides_zero_disables_for_that_stream() {
+        // A `0` override disables trimming for just that stream (like global
+        // `maxlen 0`), while others keep the global cap.
+        let m = parse_maxlen_overrides("audit=0").unwrap();
+        assert_eq!(effective_maxlen(&m, "audit", 10_000), 0);
+        assert_eq!(effective_maxlen(&m, "set", 10_000), 10_000);
+    }
+
+    #[test]
+    fn maxlen_overrides_control_stream_is_addressable() {
+        // The `#` namespace cannot collide with a sanitized event name, so a
+        // literal `#control` targets the control stream (issue #62, SPEC.md
+        // section 9).
+        let m = parse_maxlen_overrides("#control=50").unwrap();
+        assert_eq!(effective_maxlen(&m, "#control", 10_000), 50);
+        assert_eq!(effective_maxlen(&m, "expired", 10_000), 10_000);
+    }
+
+    #[test]
+    fn maxlen_overrides_reject_malformed_and_negative() {
+        assert!(parse_maxlen_overrides("expired").is_err()); // no '='
+        assert!(parse_maxlen_overrides("=100").is_err()); // empty name
+        assert!(parse_maxlen_overrides("expired=").is_err()); // empty cap
+        assert!(parse_maxlen_overrides("expired=abc").is_err()); // non-integer
+        assert!(parse_maxlen_overrides("expired=-1").is_err()); // negative
+        assert!(parse_maxlen_overrides("expired=100,").is_err()); // trailing empty
+        assert!(parse_maxlen_overrides("expired=100,,set=1").is_err()); // empty middle
+    }
+
+    // --- retention (MINID vs MAXLEN) trim clause (issues #62, #108) ---
+
+    #[test]
+    fn retention_maxlen_clause_when_time_disabled() {
+        // retention-ms 0 => count-based MAXLEN with the resolved cap; now_ms is
+        // ignored on this path.
+        let r = Retention {
+            maxlen: 1000,
+            retention_ms: 0,
+        };
+        assert!(!r.is_time_based());
+        let (kw, threshold) = r.trim_clause(0).expect("clause");
+        assert_eq!(kw, b"MAXLEN");
+        assert_eq!(threshold, "1000");
+    }
+
+    #[test]
+    fn retention_maxlen_zero_emits_no_clause() {
+        let r = Retention {
+            maxlen: 0,
+            retention_ms: 0,
+        };
+        assert!(r.trim_clause(0).is_none());
+    }
+
+    #[test]
+    fn retention_minid_takes_precedence_over_maxlen() {
+        // retention-ms > 0 => time-based MINID, formatted `<ms>-0`, ignoring the
+        // maxlen cap entirely (issue #108 precedence rule).
+        let r = Retention {
+            maxlen: 1000,
+            retention_ms: 60_000,
+        };
+        assert!(r.is_time_based());
+        let (kw, threshold) = r.trim_clause(1_000_000).expect("clause");
+        assert_eq!(kw, b"MINID");
+        assert_eq!(threshold, "940000-0");
+    }
+
+    #[test]
+    fn retention_minid_threshold_clamps_at_zero() {
+        // A window wider than the current clock never yields a negative MINID.
+        let r = Retention {
+            maxlen: 0,
+            retention_ms: 5000,
+        };
+        let (kw, threshold) = r.trim_clause(1000).expect("clause");
+        assert_eq!(kw, b"MINID");
+        assert_eq!(threshold, "0-0");
     }
 
     #[test]

@@ -101,7 +101,10 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.key-filter` | string | `*` | comma list of key-name globs, ANDed with `events`; matched against raw key bytes, e.g. `session:*,cache:*` |
 | `eventstream.source-dbs` | string | `*` | `*` for all databases, or a comma list of db indexes, e.g. `0,2`; standalone only |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
+| `eventstream.maxlen-overrides` | string | `` (empty) | per-event `maxlen` overrides as `event=cap` pairs keyed by stream suffix, e.g. `expired=600000,set=1000`; falls back to `maxlen`. `#control` is addressable; the firehose uses `maxlen` (SPEC.md section 7) |
+| `eventstream.retention-ms` | i64 | `0` | time-based retention: when `>0`, trim by `MINID` over a `now−retention-ms` window instead of by count, taking precedence over `maxlen`; `0` disables (SPEC.md sections 7, 11) |
 | `eventstream.max-streams` | i64 | `0` | cap on distinct destination streams; `0` is unlimited, new streams beyond the cap are dropped and counted |
+| `eventstream.verify-oom` | bool | `yes` | `yes` refuses mirrored writes under `maxmemory` (counted `dropped_oom`); `no` continues capturing at the limit at the cost of adding memory during eviction (SPEC.md sections 10, 11) |
 | `eventstream.cluster-streams` | string | `refuse` | cluster behavior: `refuse` (default) or `per-node` (see Limitations); immutable, load-time only |
 | `eventstream.entry-format` | enum | `fixed` | mirrored entry shape: `fixed` (default, `event`/`key`/`db`), `minimal` (no `event`), `verbose` (adds `class`), or `json` (one document field, base64 key); non-`fixed` entries carry a `format` discriminator (SPEC.md section 6) |
 | `eventstream.entry-seq` | bool | `no` | append a process-global monotonic `seq` field for per-node cross-stream same-millisecond ordering; immutable, load-time only (SPEC.md sections 6, 9) |
