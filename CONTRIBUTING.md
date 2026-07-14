@@ -29,6 +29,18 @@ cargo test --release --tests
 CI runs the full suite against pinned Redis 7.2, 7.4, 8.x, and Valkey 8.x, so
 a change must hold across that matrix, not just your local server.
 
+The unit tests include property tests (proptest) over the events filter
+grammar, the event-name sanitizer, and the prefix validator; `cargo test
+--lib` runs them at 256 cases per property. For a longer randomized search,
+raise the case count:
+
+```sh
+PROPTEST_CASES=100000 cargo test --lib property_tests
+```
+
+There is no coverage-guided fuzzing (cargo-fuzz) target; adding one would
+require an `rlib` crate type alongside the `cdylib` (issue #131).
+
 Dependency advisories, license policy, and source provenance are enforced by
 `cargo deny check` (policy in [deny.toml](deny.toml)); run it locally with
 [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) installed.
