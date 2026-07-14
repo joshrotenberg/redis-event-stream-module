@@ -375,6 +375,46 @@ listpack-node boundaries, so the stream can overshoot the cap by up to about one
 node (roughly `stream-node-max-entries`, default 100). Treat `maxlen` as a
 floor on retained entries, not an exact ceiling.
 
+### Per-event overrides
+
+A single global `maxlen` forces the worst-case stream's size onto every stream:
+if `expired` needs 600000 to survive a mass-expiry drain, `set`, `del`, and
+every other event pay that too, even where 1000 would do. `eventstream.maxlen-overrides`
+breaks the coupling — a comma list of `event=cap` pairs keyed by the stream
+suffix, falling back to the global `maxlen` for any stream not named:
+
+```
+CONFIG SET eventstream.maxlen-overrides expired=600000,set=1000
+```
+
+Now `events:expired` retains 600000 (~90 MB) and `events:set` only 1000, while
+every other stream keeps the global cap. A cap of `0` disables trimming for that
+one stream (like the global `maxlen 0`). The control stream is addressable as
+`#control`; the firehose is not — it aggregates every event type and stays sized
+by the global `maxlen` for the total rate. Total memory becomes the sum of the
+per-stream caps rather than one cap times the stream count.
+
+### Time-based retention
+
+Retention is often expressed in time ("keep 24h"), not entry counts. Under
+bursty traffic a fixed `maxlen` gives an unpredictable replay window — a burst
+can flush hours of history in seconds. `eventstream.retention-ms` trims by age
+instead: every entry ID already carries the event's millisecond timestamp, so
+the module can drop entries older than the window with `XADD ... MINID ~`:
+
+```
+CONFIG SET eventstream.retention-ms 86400000   # keep ~24h
+```
+
+When set (`>0`), time-based retention takes precedence over `maxlen` and any
+per-event override — a stream trims by age, not count, and the memory bound
+becomes `event_rate × window` rather than a fixed count. `0` (the default)
+disables it, leaving count-based `maxlen` in charge. One caveat: trimming is
+inline (folded into each `XADD`), so a stream that stops receiving events is
+never re-trimmed and can retain entries past the window until its next write.
+If that matters for an idle stream, an external periodic `XTRIM <stream> MINID ~ <ms>`
+closes the gap.
+
 ## Monitoring consumer lag
 
 Alert before a slow consumer falls off the retention window. Useful signals:
