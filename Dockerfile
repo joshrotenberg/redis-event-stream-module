@@ -31,10 +31,16 @@ WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends clang libclang-dev git \
     && rm -rf /var/lib/apt/lists/*
+# The root Cargo.toml is a workspace (issue #82: module crate + consumer
+# client); cargo must see every member manifest to load the workspace, so
+# crates/ is copied even though this stage only builds the module. `-p` scopes
+# the build to the module package, so the client crate (and its extra
+# dependencies) is not compiled into the image.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY examples ./examples
-RUN cargo build --release --lib \
+COPY crates ./crates
+RUN cargo build --release --lib -p redis-event-stream-module \
     && cp target/release/libredis_event_stream_module.so /module.so
 
 # --- Stage 2: the server, built from source -------------------------------

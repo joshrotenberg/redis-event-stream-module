@@ -2,7 +2,7 @@
 
 Heavier-than-CI scenarios for the cluster capture paths (SPEC.md section 10,
 issues #45/#46/#47). Each one stands up real servers, drives tens of thousands
-of events through the [example client](../examples/eventstream_client.rs),
+of events through the [consumer client](../crates/eventstream-client),
 injects a topology change or failure, and asserts the data-safety property that
 must hold. These run for a few minutes and spin up multi-node clusters, so they
 live here rather than in `cargo test`.
@@ -16,7 +16,7 @@ chaos/run.sh reshard      # one scenario (reshard | failover | massexpiry | repe
 
 Requires `redis-server` (7.2+) and `redis-cli` on `PATH`; override with
 `REDIS_SERVER_BIN` / `REDIS_CLI_BIN` to pin a specific build. The module and the
-example client are built in release automatically. The script exits nonzero if
+consumer client are built in release automatically. The script exits nonzero if
 any assertion fails.
 
 ## CI

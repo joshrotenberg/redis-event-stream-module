@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Chaos and load scenarios for the cluster capture paths (SPEC.md section 10,
 # issues #45/#46/#47). Each scenario stands up real servers, drives load through
-# the example client, injects a topology change or failure, and asserts the
+# the consumer client, injects a topology change or failure, and asserts the
 # data-safety property that must hold. These are heavier than the integration
 # suite (tens of thousands of events, real reshards and failovers), so they live
 # here rather than in `cargo test`.
@@ -42,7 +42,7 @@ RC="${REDIS_CLI_BIN:-redis-cli}"
 EXT=so
 [[ "$(uname)" == "Darwin" ]] && EXT=dylib
 MODULE="$PWD/target/release/libredis_event_stream_module.${EXT}"
-EX="$PWD/target/release/examples/eventstream_client"
+EX="$PWD/target/release/eventstream-client"
 WORK="${CHAOS_WORK_DIR:-$(mktemp -d)}"
 mkdir -p "$WORK"
 PORTS=()   # every server port we start, for cleanup
@@ -244,9 +244,11 @@ scenario_repeated() {
 
 # ---------------------------------------------------------------------------
 
-echo "building module and example client (release)..."
-cargo build --release >/dev/null 2>&1 || { echo "module build failed"; exit 1; }
-cargo build --release --example eventstream_client >/dev/null 2>&1 || { echo "example build failed"; exit 1; }
+echo "building module and consumer client (release)..."
+# One workspace build produces both the module cdylib (MODULE) and the
+# eventstream-client binary (EX); the client crate is a workspace member now
+# (issue #82), not an example.
+cargo build --release >/dev/null 2>&1 || { echo "workspace build failed"; exit 1; }
 
 want="${1:-all}"
 for s in reshard failover massexpiry repeated; do
