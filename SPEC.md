@@ -87,6 +87,7 @@ destination = <stream-prefix> + sanitize(<event-name>)
 |---|---|---|
 | Command-generated | `set`, `del`, `hset`, `lpush`, `sadd`, `zadd`, `xadd`, `rename_from`, `rename_to`, ... | Fixed set defined by Redis, roughly 60 to 80 names in 7.x. Lowercase ASCII plus `_` and `-`. |
 | Expiration / eviction | `expired`, `evicted` | `expired` fires when Redis actually removes the key (lazy access or active expire cycle), not at the nominal TTL instant. |
+| Hash-field expiration (7.4+) | `hexpired`, plus command-generated `hexpire`, `hpersist` | Fire under the HASH class, not EXPIRED, so the default `expired` filter does not match `hexpired` (section 7). `hexpired` has the same lazy/active timing as `expired` and carries only the hash key, not the field name (section 6). When the last field expires the emptied hash is deleted and a `del` event fires. Absent on servers without hash-field TTLs (Redis 7.2, Valkey 8). |
 | Module-defined | Arbitrary strings via `RM_NotifyKeyspaceEvent`, e.g. `json.set` | The only unbounded source. Any co-loaded module can fire any name under any class within `NOTIFY_ALL` (redismodule-rs's own `examples/events.rs` fires `events.send` under GENERIC), so excluding the MODULE class does not bound custom names. The real bounds are the 128-byte sanitized-name cap and per-stream `maxlen` trimming; total memory grows with distinct names, not event volume. |
 
 Subscription mechanism. `REDISMODULE_NOTIFY_ALL` covers GENERIC|STRING|LIST|SET|HASH|ZSET|EXPIRED|EVICTED|STREAM|MODULE but excludes `keymiss` (MISSED), `new` (NEW, 7.0.1+), `loaded` (LOADED), and TRIMMED (verified against the vendored `redismodule.h`), and the wrapper's `event_handlers:` macro intersects any requested mask with the server's NOTIFY_ALL, silently stripping those four. The module therefore does not use that macro: it calls `raw::RedisModule_SubscribeToKeyspaceEvents` directly in `init` with a hand-written callback. This lets it request MISSED and NEW, and makes the FFI boundary panic-safe (below).
@@ -146,7 +147,7 @@ v0.1 ships exactly one fixed entry format for mirrored events (gap markers on th
 | 2 | `key` | raw key bytes | Exact bytes of the affected key, no encoding, no escaping |
 | 3 | `db` | decimal string, e.g. `"0"` | Database index where the event fired |
 
-There is deliberately no timestamp field: the auto-generated entry ID (`<ms>-<seq>`) carries a millisecond timestamp assigned at write time, and since the write runs atomically alongside the notification, that is the event time for practical purposes. `XRANGE` by time works natively against it. These three values plus the ID are everything the notification callback receives; there is no value payload, old value, or TTL available at notification time, and the schema does not pretend otherwise.
+There is deliberately no timestamp field: the auto-generated entry ID (`<ms>-<seq>`) carries a millisecond timestamp assigned at write time, and since the write runs atomically alongside the notification, that is the event time for practical purposes. `XRANGE` by time works natively against it. These three values plus the ID are everything the notification callback receives; there is no value payload, old value, or TTL available at notification time, and the schema does not pretend otherwise. In particular, for hash-field expiration (`hexpired`, section 5) the `key` field carries the hash key; the expired field name is not part of the keyspace notification and has no slot here — unlike key-level `expired`, where the key is the expired thing.
 
 Binary safety: the wrapper hands the handler the key as `&[u8]`, and `ctx.call_ext` accepts `&[&[u8]]` argument slices (`StrCallArgs` implements `From<&[&T]> for T: AsRef<[u8]>`), so key bytes pass through untouched. Consumers must read `key` with a bytes-typed client API; clients that eagerly decode replies as UTF-8 will mangle non-UTF-8 keys, which is a client configuration issue, not stream data loss.
 
@@ -215,6 +216,7 @@ event-name := any non-empty run of characters except "," and whitespace
 |---|---|
 | `expired` | expirations only, into `events:expired` |
 | `expired,evicted` | expirations and evictions |
+| `expired,hexpired` | key and hash-field expirations (section 5); the default `expired` alone does not match `hexpired`, which is a distinct name under the HASH class |
 | `@hash` | every hash-class event, each to its own stream |
 | `*` | everything the subscription delivers |
 
@@ -601,6 +603,9 @@ Integration tests spawn a real redis-server 7.2+ and load the built module (redi
 - Events not matching the filter are not mirrored.
 - Writes to `<prefix>*` keys are never mirrored (feedback guard).
 - `MAXLEN` trimming takes effect at the configured cap.
+- `maxlen 0` disables trimming: N writes yield exactly N entries, on the per-event stream and the firehose, via both the module-arg and `CONFIG SET` paths.
+- Non-UTF-8 module event names are captured, not a crash: the lossy-decoded name lands in `event` and the `_`-substituted stream, with `handler_panics` and `skipped_invalid` both zero; an empty name increments `skipped_invalid` and registers no stream (fired via the companion notifytest module, the only source of such names).
+- `hexpired` routes under an explicit bare name and under `@hash`; the default `expired` filter does not match it (counted `skipped_filtered`); the `del` accompanying the last field's expiry is captured. Capability-gated on `HEXPIRE` presence, not server version.
 - `eventstream.enabled no` drops events; re-enabling resumes without replay.
 - Invalid `CONFIG SET eventstream.events` values are rejected with an error reply.
 - Binary (non-UTF-8) key bytes round-trip exactly through the `key` field.

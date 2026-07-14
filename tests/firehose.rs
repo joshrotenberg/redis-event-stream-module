@@ -151,6 +151,33 @@ fn maxlen_bounds_firehose_growth() {
 }
 
 #[test]
+fn maxlen_zero_disables_firehose_trimming() {
+    // The firehose XADD gates its MAXLEN clause on the same `maxlen > 0`
+    // branch as the per-event write (SPEC.md section 7: 0 disables trimming);
+    // exact length at 500 distinguishes 0 from every positive cap.
+    let s = TestServer::start(&["events", "set", "maxlen", "0", "firehose", "yes"]);
+    let mut c = s.conn();
+    for i in 0..500 {
+        let _: () = c.set(format!("k{i}"), "v").expect("SET");
+    }
+    wait_until(
+        Duration::from_secs(10),
+        "500 firehose copies written",
+        || info_field(&mut c, "firehose_forwarded") >= 500,
+    );
+    assert_eq!(
+        xlen(&mut c, "events:#firehose"),
+        500,
+        "maxlen 0 must never trim the firehose"
+    );
+    assert_eq!(
+        xlen(&mut c, "events:set"),
+        500,
+        "maxlen 0 must never trim the per-event stream"
+    );
+}
+
+#[test]
 fn event_name_with_hash_cannot_alias_the_firehose() {
     // The filter accepts a bare name containing '#', but the sanitizer maps
     // '#' to '_' (SPEC.md section 5), so even if such an event ever fired it

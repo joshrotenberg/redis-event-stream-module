@@ -12,6 +12,14 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+# Companion test module (issue #91): a second cdylib the integration suite
+# loads next to the main module to fire RM_NotifyKeyspaceEvent with arbitrary
+# event-name bytes (tests/module_events.rs). An example, not a workspace
+# member, so it shares this crate's lockfile and dependency cache.
+[[example]]
+name = "notifytest"
+crate-type = ["cdylib"]
+
 [dependencies]
 # crates.io releases of redis-module lag the repo badly; Redis's own modules
 # (e.g. RedisJSON) consume the git v2.1.x tags instead. Match RedisJSON's pin

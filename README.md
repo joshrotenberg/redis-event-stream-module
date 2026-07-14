@@ -106,6 +106,7 @@ Events route by event name into `<prefix><event>`:
 | Event | Stream |
 |-------|--------|
 | key expiration | `events:expired` |
+| hash-field expiration (Redis 7.4+) | `events:hexpired` |
 | `SET` | `events:set` |
 | `HSET` | `events:hset` |
 | `DEL` | `events:del` |
@@ -165,6 +166,12 @@ failure mode).
 ## Limitations
 
 - `expired` fires when Redis actually removes the key, not at the TTL instant.
+- Hash-field expirations (Redis 7.4+) fire `hexpired`, a distinct event under
+  the hash class that the default `expired` filter does not match: durable
+  field expiry needs `expired,hexpired` (or `@hash`) in `eventstream.events`.
+  `hexpired` has the same removal-time (not TTL-instant) timing as `expired`,
+  and the entry's `key` is the hash key — the expired field name is not part
+  of the keyspace notification (SPEC.md sections 5 and 6).
 - Capture is at-most-once: events during unloaded or disabled windows are not
   recoverable. The control stream makes the windows detectable, not the
   events.

@@ -235,6 +235,36 @@ pub fn module_path() -> PathBuf {
         .join(format!("libredis_event_stream_module.{ext}"))
 }
 
+/// Build the companion notifytest module (examples/notifytest.rs, issue #91)
+/// once per test-binary run and return its path. It fires
+/// `RM_NotifyKeyspaceEvent` with arbitrary event-name bytes — the one input
+/// shape no built-in command produces. Always built in release, matching the
+/// main module.
+pub fn notifytest_module_path() -> PathBuf {
+    static BUILD: Once = Once::new();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    BUILD.call_once(|| {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--release", "--example", "notifytest"])
+            .current_dir(&manifest)
+            .status()
+            .expect("failed to run cargo build");
+        assert!(status.success(), "companion module build failed");
+    });
+    let target = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| manifest.join("target"));
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    target
+        .join("release")
+        .join("examples")
+        .join(format!("libnotifytest.{ext}"))
+}
+
 /// A running server with the module loaded, plus its working dir (kept alive
 /// so persistence tests can restart on the same dataset).
 pub struct TestServer {
@@ -252,6 +282,19 @@ impl TestServer {
         let handle = Self::builder(port, &dir, module_args)
             .start()
             .expect("failed to start redis-server with module");
+        TestServer { handle, port, dir }
+    }
+
+    /// Like `start`, but also load the companion notifytest module
+    /// (issue #91), whose `NOTIFYTEST.FIRE` fires `RM_NotifyKeyspaceEvent`
+    /// with arbitrary event-name bytes.
+    pub fn start_with_notifytest(module_args: &[&str]) -> TestServer {
+        let port = next_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle = Self::builder(port, &dir, module_args)
+            .loadmodule(notifytest_module_path())
+            .start()
+            .expect("failed to start redis-server with companion module");
         TestServer { handle, port, dir }
     }
 
@@ -532,6 +575,22 @@ pub fn stream_field_strings(conn: &mut redis::Connection, key: &str, field: &str
         .into_iter()
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .collect()
+}
+
+/// Whether the server knows `cmd`: `COMMAND INFO` returns a non-nil row for
+/// it. A capability probe, not a version-string gate — hash-field TTLs are
+/// absent from Redis 7.2 and Valkey 8 for different reasons, and a probe
+/// covers both without parsing versions (issue #93).
+pub fn server_has_command(conn: &mut redis::Connection, cmd: &str) -> bool {
+    let reply: redis::Value = redis::cmd("COMMAND")
+        .arg("INFO")
+        .arg(cmd)
+        .query(conn)
+        .expect("COMMAND INFO");
+    match reply {
+        redis::Value::Array(rows) => rows.iter().any(|r| !matches!(r, redis::Value::Nil)),
+        _ => false,
+    }
 }
 
 /// Set a key with a short TTL and force lazy expiry, then wait for the
