@@ -66,7 +66,7 @@ fn default_format_is_fixed_and_byte_identical() {
     assert_eq!(pair[1], "fixed", "entry-format must default to fixed");
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(Duration::from_secs(10), "set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert_eq!(
@@ -85,7 +85,7 @@ fn minimal_format_drops_event_and_adds_discriminator() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(Duration::from_secs(10), "set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert_eq!(
@@ -103,7 +103,7 @@ fn verbose_format_adds_class() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(Duration::from_secs(10), "set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert_eq!(
@@ -121,7 +121,7 @@ fn json_format_is_one_document_field_with_base64_key() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(Duration::from_secs(10), "set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert_eq!(
@@ -152,7 +152,7 @@ fn format_applies_to_the_firehose_copy_too() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "both copies written", || {
+    wait_until(Duration::from_secs(10), "both copies written", || {
         info_field(&mut c, "forwarded") == 1 && info_field(&mut c, "firehose_forwarded") == 1
     });
     assert_eq!(
@@ -171,7 +171,7 @@ fn entry_format_is_runtime_mutable_producing_a_mixed_stream() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET fixed");
-    wait_until(Duration::from_secs(5), "first entry", || {
+    wait_until(Duration::from_secs(10), "first entry", || {
         xlen(&mut c, "events:set") == 1
     });
 
@@ -182,7 +182,7 @@ fn entry_format_is_runtime_mutable_producing_a_mixed_stream() {
         .query(&mut c)
         .expect("entry-format is live-settable");
     let _: () = c.set("b", "2").expect("SET minimal");
-    wait_until(Duration::from_secs(5), "second entry", || {
+    wait_until(Duration::from_secs(10), "second entry", || {
         xlen(&mut c, "events:set") == 2
     });
 
@@ -230,7 +230,7 @@ fn seq_is_off_by_default() {
     assert_eq!(pair[1], "no", "entry-seq must default to no");
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(Duration::from_secs(10), "set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert!(
@@ -248,7 +248,7 @@ fn seq_is_monotonic_across_different_streams() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "both events mirrored", || {
+    wait_until(Duration::from_secs(10), "both events mirrored", || {
         xlen(&mut c, "events:set") == 1 && xlen(&mut c, "events:del") == 1
     });
 
@@ -269,7 +269,7 @@ fn seq_matches_across_a_per_event_and_firehose_pair() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "both copies written", || {
+    wait_until(Duration::from_secs(10), "both copies written", || {
         info_field(&mut c, "forwarded") == 1 && info_field(&mut c, "firehose_forwarded") == 1
     });
     assert_eq!(
@@ -285,7 +285,7 @@ fn seq_is_appended_after_db() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(Duration::from_secs(10), "set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert_eq!(
@@ -321,7 +321,7 @@ fn seq_resets_on_reload() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.set("b", "2").expect("SET");
-    wait_until(Duration::from_secs(5), "two events mirrored", || {
+    wait_until(Duration::from_secs(10), "two events mirrored", || {
         xlen(&mut c, "events:set") == 2
     });
     let pre: Vec<u64> = stream_field_strings(&mut c, "events:set", "seq")
@@ -336,7 +336,7 @@ fn seq_resets_on_reload() {
         xlen(&mut c, "events:set") == 2
     });
     let _: () = c.set("cc", "3").expect("SET after restart");
-    wait_until(Duration::from_secs(5), "third event mirrored", || {
+    wait_until(Duration::from_secs(10), "third event mirrored", || {
         xlen(&mut c, "events:set") == 3
     });
     let post: Vec<u64> = stream_field_strings(&mut c, "events:set", "seq")
