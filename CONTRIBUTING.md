@@ -73,8 +73,39 @@ cargo test --release --tests
   language, no em dashes.
 - Dependency updates for GitHub Actions and crates arrive as weekly dependabot
   PRs. The `redis-module`/`redis-module-macros` git-tag pin in Cargo.toml is
-  excluded from that automation and is bumped by hand when
-  RedisLabsModules/redismodule-rs tags a new release.
+  excluded from that automation and is bumped by hand (see the pin policy
+  below).
+
+### redis-module pin policy
+
+`redis-module`/`redis-module-macros` are pinned to a redismodule-rs git tag
+(`v2.1.3`), not a crates.io version, because the crates.io releases lag the repo
+badly and Redis's own modules consume the git tags (Cargo.toml comment; SPEC.md
+section 1). The pin also carries live workarounds for upstream defects — the
+null-pointer guard on the raw keyspace callback's event-name pointer, and the
+`catch_unwind` wrappers around handler bodies (including the non-UTF-8
+event-name panic, RedisLabsModules/redismodule-rs#472) — so it is never bumped
+blindly. Standing policy:
+
+- **Re-verify cadence.** At each release prep, check whether redismodule-rs has
+  tagged a release newer than the pin. (Optional low-noise automation, not yet
+  added: a scheduled workflow that opens an issue when a newer tag appears.)
+- **Bump gate.** Every pin bump must pass the full CI integration matrix
+  (SPEC.md section 14) *and* a re-check that each workaround above is still
+  needed against the new tag — a fixed defect means the workaround becomes
+  removable, a regressed one means the bump is unsafe. A green matrix alone is
+  not sufficient; the workaround review is manual.
+- **Unpin trigger (git tag → crates.io).** Switch off the git tag only once a
+  crates.io `redis-module` release covers everything this crate consumes: the
+  `min-redis-compatibility-version-7-2` feature, the
+  `module_args_as_configuration` configuration API (all config types plus the
+  `enum` block), the raw keyspace-notification subscription surface, and
+  `info_command_handler`. Unpinning is also the precondition that would unblock
+  an automated release-plz flow (release-plz.toml).
+- **Publishing this crate to crates.io stays disabled** (`publish = false`): it
+  is a cdylib loaded as a compiled artifact, not a Rust library dependency
+  (release-plz.toml). This is settled; revisit only if the crate grows a
+  reusable library surface.
 
 ## Releasing
 
