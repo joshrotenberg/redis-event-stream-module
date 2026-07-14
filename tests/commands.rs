@@ -107,6 +107,70 @@ fn streams_reads_db0_from_any_client_db() {
 }
 
 #[test]
+fn streams_withstats_reports_per_stream_counters() {
+    let s = TestServer::start(&["events", "set,del"]);
+    let mut c = s.conn();
+
+    let _: () = c.set("a", "1").expect("SET");
+    let _: () = c.set("a", "2").expect("SET again");
+    let _: () = c.del("a").expect("DEL");
+    wait_until(Duration::from_secs(5), "three forwarded", || {
+        info_field(&mut c, "forwarded") == 3
+    });
+
+    // The bare reply is unchanged by the WITHSTATS addition.
+    assert_eq!(streams(&mut c), vec!["events:del", "events:set"]);
+
+    let st = streams_withstats(&mut c);
+    assert_eq!(st.len(), 2, "one row per registered stream");
+    assert_eq!(st["events:set"], (2, 0));
+    assert_eq!(st["events:del"], (1, 0));
+
+    // The per-stream forwarded counts partition the global counter.
+    assert_eq!(
+        st.values().map(|(f, _)| f).sum::<i64>(),
+        info_field(&mut c, "forwarded")
+    );
+}
+
+#[test]
+fn streams_withstats_counts_firehose_copies_per_stream() {
+    let s = TestServer::start(&["events", "set", "firehose", "yes"]);
+    let mut c = s.conn();
+
+    let _: () = c.set("a", "1").expect("SET");
+    wait_until(Duration::from_secs(5), "firehose copy written", || {
+        info_field(&mut c, "firehose_forwarded") == 1
+    });
+
+    // The firehose stream is a registered destination stream: its row's
+    // forwarded is the per-stream view of firehose_forwarded.
+    let st = streams_withstats(&mut c);
+    assert_eq!(st["events:#firehose"], (1, 0));
+    assert_eq!(st["events:set"], (1, 0));
+}
+
+#[test]
+fn streams_rejects_unknown_argument() {
+    let s = TestServer::start(&["events", "set"]);
+    let mut c = s.conn();
+
+    let err = redis::cmd("EVENTSTREAM.STREAMS")
+        .arg("BOGUS")
+        .query::<Vec<String>>(&mut c)
+        .expect_err("BOGUS must be rejected");
+    assert!(
+        err.to_string().contains("BOGUS"),
+        "error names the argument: {err}"
+    );
+    let _ = redis::cmd("EVENTSTREAM.STREAMS")
+        .arg("WITHSTATS")
+        .arg("extra")
+        .query::<Vec<Vec<redis::Value>>>(&mut c)
+        .expect_err("extra arguments must be rejected");
+}
+
+#[test]
 fn registry_survives_restart_under_aof() {
     let s = TestServer::start_aof(&["events", "set,del"]);
     {
@@ -150,4 +214,10 @@ fn registry_rebuilds_after_flushall() {
     wait_until(Duration::from_secs(5), "registry rebuilt", || {
         streams(&mut c) == vec!["events:set"]
     });
+
+    // Per-stream counters count since load or last flush (issue #71): the
+    // pre-flush write is gone from the per-stream row, while the global
+    // counter remains strictly since-load.
+    assert_eq!(streams_withstats(&mut c)["events:set"], (1, 0));
+    assert_eq!(info_field(&mut c, "forwarded"), 2);
 }

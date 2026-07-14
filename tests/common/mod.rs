@@ -473,6 +473,39 @@ pub fn info_field(conn: &mut redis::Connection, field: &str) -> i64 {
         .expect("numeric INFO field")
 }
 
+/// Parse `EVENTSTREAM.STREAMS WITHSTATS` (issue #71) into
+/// name -> (forwarded, dropped). Each element is
+/// `[name, "forwarded", <n>, "dropped", <n>]`.
+pub fn streams_withstats(
+    conn: &mut redis::Connection,
+) -> std::collections::HashMap<String, (i64, i64)> {
+    let rows: Vec<Vec<redis::Value>> = redis::cmd("EVENTSTREAM.STREAMS")
+        .arg("WITHSTATS")
+        .query(conn)
+        .expect("STREAMS WITHSTATS");
+    rows.into_iter()
+        .map(|row| {
+            assert_eq!(row.len(), 5, "row must be name + two field/value pairs");
+            let text = |v: &redis::Value| -> String {
+                match v {
+                    redis::Value::SimpleString(s) => s.clone(),
+                    redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+                    other => panic!("unexpected string value: {other:?}"),
+                }
+            };
+            let int = |v: &redis::Value| -> i64 {
+                match v {
+                    redis::Value::Int(n) => *n,
+                    other => panic!("unexpected integer value: {other:?}"),
+                }
+            };
+            assert_eq!(text(&row[1]), "forwarded");
+            assert_eq!(text(&row[3]), "dropped");
+            (text(&row[0]), (int(&row[2]), int(&row[4])))
+        })
+        .collect()
+}
+
 /// XLEN that treats a missing key as 0.
 pub fn xlen(conn: &mut redis::Connection, key: &str) -> i64 {
     redis::cmd("XLEN").arg(key).query(conn).unwrap_or(0)

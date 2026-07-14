@@ -94,7 +94,10 @@ sections do not appear in plain `INFO`; name the section or use
 `INFO everything`. Two readonly commands are also registered:
 `EVENTSTREAM.STATS` returns the counters as a structured reply, and
 `EVENTSTREAM.STREAMS` lists the destination streams written so far, backed by
-a persistent registry that survives restart.
+a persistent registry that survives restart; `EVENTSTREAM.STREAMS WITHSTATS`
+adds this process's per-stream forwarded and dropped counts. Write failures
+log per stream, rate-limited to one warning per stream per 60 seconds with
+suppressed-count summaries, plus a notice when a failing stream recovers.
 
 ## How it works
 
