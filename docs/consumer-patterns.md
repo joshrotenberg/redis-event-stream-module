@@ -445,6 +445,20 @@ ACL SETUSER events-consumer on >secret ~events:* +@read +xreadgroup +xack +xauto
 reading, consumer-group processing, and introspection without any write or
 admin access (SPEC.md section 12).
 
+To also let the consumer call the module's own introspection commands
+(`EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`), grant the custom `@eventstream`
+ACL category, which carries both as a group:
+
+```
+ACL SETUSER events-consumer on >secret ~events:* +@read +xreadgroup +xack +xautoclaim +xinfo +@eventstream
+```
+
+The `@eventstream` category needs `RM_AddACLCategory` (Redis 7.4+, and Valkey
+builds that expose it); run `ACL CAT` to confirm it exists on your server. On
+Redis 7.2/7.3 the category is unavailable — the module loads without it and you
+grant the commands by name instead (`+eventstream.stats +eventstream.streams`).
+See SPEC.md section 8.
+
 ## Handling gaps
 
 None of the above recovers events the module never captured (module disabled,
