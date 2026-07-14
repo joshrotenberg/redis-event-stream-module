@@ -76,6 +76,31 @@ cargo test --release --tests
   excluded from that automation and is bumped by hand (see the pin policy
   below).
 
+### Source layout
+
+`src/lib.rs` holds only the module wiring: the `redis_module!` registration, the
+version encoding, `init`, and `deinit`. The rest is split by concern (#86), each
+file owning its own statics, helpers, and unit tests, mirroring the `tests/`
+partition so a change to one concern touches one file:
+
+- `src/config.rs`: config value types and statics, the event/key/source-db
+  filter and prefix/auto-group grammars and validators, and the `enabled`
+  on-changed callback.
+- `src/capture.rs`: the capture hot path (sanitization, entry-format encoding,
+  the mirrored `XADD` writers, the keyspace-notification callback, and the
+  flush/SWAPDB handlers).
+- `src/cluster.rs`: per-node cluster mode (slot-pinned hash-tag selection, the
+  CRC16 slot math and Redis 7.2 fallback table, migration classification, and
+  re-pin-and-retry).
+- `src/markers.rs`: the gap-marker queue and its deferred write to the
+  `#control` stream, plus the FFI panic guards.
+- `src/stats.rs`: the counters and per-stream records behind `INFO eventstream`
+  and the `WITHSTATS` join, plus the drop-counting helpers.
+- `src/commands.rs`: the `EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`, and
+  `EVENTSTREAM.PRUNE` command handlers.
+
+Cross-module items are `pub(crate)`; the split changes no runtime behavior.
+
 ### redis-module pin policy
 
 `redis-module`/`redis-module-macros` are pinned to a redismodule-rs git tag
