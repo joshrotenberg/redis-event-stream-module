@@ -201,6 +201,20 @@ expecting per-database streams (SPEC.md section 6):
 XRANGE events:expired - + | ... filter entries where db == "2"
 ```
 
+If you only care about a subset of databases, filter at the source instead with
+`eventstream.source-dbs` (SPEC.md section 7): events from other databases are
+then never captured, trimmed, replicated, or read, rather than filtered
+client-side after the write:
+
+```
+CONFIG SET eventstream.source-dbs 2      # capture only db 2
+CONFIG SET eventstream.source-dbs 0,2,5  # or a set of databases
+```
+
+Client-side `db` filtering still works and remains the right choice when a
+single consumer wants most databases but distinguishes a few; the module-side
+filter is for cutting the write and memory cost of databases no consumer wants.
+
 ## Discovery
 
 The module tracks every destination stream it has written in a persistent

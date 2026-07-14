@@ -105,11 +105,31 @@ static DROPPED_OOM: AtomicU64 = AtomicU64::new(0);
 static DROPPED_DEFER_ERROR: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_SELF: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_FILTERED: AtomicU64 = AtomicU64::new(0);
+/// Events dropped by the key-name glob filter (`eventstream.key-filter`, issue
+/// #61). Distinct from `SKIPPED_FILTERED` so operators can tell an over-narrow
+/// event-name filter from an over-narrow key filter (SPEC.md section 13).
+static SKIPPED_KEY_FILTERED: AtomicU64 = AtomicU64::new(0);
+/// Events dropped because their origin database is outside
+/// `eventstream.source-dbs` (issue #63).
+static SKIPPED_DB: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_INVALID: AtomicU64 = AtomicU64::new(0);
+/// Events dropped because creating their destination stream would exceed
+/// `eventstream.max-streams` (issue #64); part of the `dropped` sum. Streams
+/// already registered keep receiving events; only new-stream creation is
+/// blocked. First-failure logging latches on `LOGGED_MAX_STREAMS`.
+static DROPPED_MAX_STREAMS: AtomicU64 = AtomicU64::new(0);
+static LOGGED_MAX_STREAMS: AtomicBool = AtomicBool::new(false);
 static CONTROL_MARKERS: AtomicU64 = AtomicU64::new(0);
 /// Distinct destination streams written since load, excluding the control
-/// stream; the membership records live in `STREAM_STATS`.
+/// stream; the membership records live in `STREAM_STATS`. Never resets, so it
+/// can exceed the current distinct count after a flush (SPEC.md section 13).
 static ACTIVE_STREAMS: AtomicU64 = AtomicU64::new(0);
+/// Currently-registered distinct destination streams: like `ACTIVE_STREAMS`
+/// but reset to 0 on flush (when `STREAM_STATS` is cleared), so it tracks the
+/// streams the in-process registry cache currently knows about. This is the
+/// basis for the `eventstream.max-streams` cap (issue #64): "streams already
+/// known keep receiving events; only creation of new streams is blocked."
+static CURRENT_STREAMS: AtomicI64 = AtomicI64::new(0);
 /// Unix seconds of the most recent drop, 0 if none (SPEC.md section 13).
 static LAST_ERROR_TIME: AtomicU64 = AtomicU64::new(0);
 
@@ -232,6 +252,35 @@ impl ConfigurationValue<i64> for MaxlenConfig {
         if val < 0 {
             return Err(RedisError::String(format!(
                 "maxlen must be 0 (trimming disabled) or positive, got {val}"
+            )));
+        }
+        self.value.store(val, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+static MAX_STREAMS: MaxStreamsConfig = MaxStreamsConfig {
+    value: AtomicI64::new(0),
+};
+
+/// `eventstream.max-streams` config binding (issue #64): the cap on the number
+/// of distinct destination streams the module will create; `0` is unlimited.
+/// Re-validates negatives in `set()` for the same reason as `MaxlenConfig`: a
+/// module-arg value becomes the registered default and bypasses the registered
+/// 0..i64::MAX boundary check (redis 7.2 `module.c`/`config.c`), and a negative
+/// cap is meaningless. Rejection aborts the load like any malformed module arg.
+struct MaxStreamsConfig {
+    value: AtomicI64,
+}
+
+impl ConfigurationValue<i64> for MaxStreamsConfig {
+    fn get(&self, _ctx: &ConfigurationContext) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+    fn set(&self, _ctx: &ConfigurationContext, val: i64) -> Result<(), RedisError> {
+        if val < 0 {
+            return Err(RedisError::String(format!(
+                "max-streams must be 0 (unlimited) or positive, got {val}"
             )));
         }
         self.value.store(val, Ordering::Relaxed);
@@ -425,6 +474,251 @@ impl ConfigurationValue<RedisString> for FilterConfig {
     }
 }
 
+/// Byte-glob match with Redis `stringmatchlen` semantics (`*`, `?`, `[...]`
+/// classes and ranges, `\` escape), case-sensitive, operating on raw bytes so
+/// it never allocates or lossy-decodes and works on arbitrary binary keys
+/// (issue #61, SPEC.md section 7 key-filter grammar). A faithful port of
+/// Redis's `stringmatchlen_impl`, including the `skip_longer` early-out that
+/// bounds the cost of adversarial patterns (`a*a*a*...`) and a recursion-depth
+/// guard against a hostile pattern exhausting the stack.
+fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
+    let mut skip_longer = false;
+    glob_match_impl(pattern, 0, string, 0, &mut skip_longer, 0)
+}
+
+fn glob_match_impl(
+    pat: &[u8],
+    mut pi: usize,
+    s: &[u8],
+    mut si: usize,
+    skip_longer: &mut bool,
+    nesting: u32,
+) -> bool {
+    if nesting > 1000 {
+        return false;
+    }
+    while pi < pat.len() && si < s.len() {
+        match pat[pi] {
+            b'*' => {
+                while pi + 1 < pat.len() && pat[pi + 1] == b'*' {
+                    pi += 1;
+                }
+                if pi + 1 == pat.len() {
+                    return true;
+                }
+                while si < s.len() {
+                    if glob_match_impl(pat, pi + 1, s, si, skip_longer, nesting + 1) {
+                        return true;
+                    }
+                    if *skip_longer {
+                        return false;
+                    }
+                    si += 1;
+                }
+                *skip_longer = true;
+                return false;
+            }
+            b'?' => {
+                si += 1;
+            }
+            b'[' => {
+                pi += 1;
+                let negate = pi < pat.len() && pat[pi] == b'^';
+                if negate {
+                    pi += 1;
+                }
+                let mut matched = false;
+                loop {
+                    if pi >= pat.len() {
+                        // Unterminated class: back up so the trailing byte is
+                        // consumed by the outer advance, matching Redis.
+                        pi -= 1;
+                        break;
+                    } else if pat[pi] == b'\\' && pat.len() - pi >= 2 {
+                        pi += 1;
+                        if pat[pi] == s[si] {
+                            matched = true;
+                        }
+                    } else if pat[pi] == b']' {
+                        break;
+                    } else if pat.len() - pi >= 3 && pat[pi + 1] == b'-' {
+                        let mut start = pat[pi];
+                        let mut end = pat[pi + 2];
+                        if start > end {
+                            std::mem::swap(&mut start, &mut end);
+                        }
+                        pi += 2;
+                        if s[si] >= start && s[si] <= end {
+                            matched = true;
+                        }
+                    } else if pat[pi] == s[si] {
+                        matched = true;
+                    }
+                    pi += 1;
+                }
+                if negate {
+                    matched = !matched;
+                }
+                if !matched {
+                    return false;
+                }
+                si += 1;
+            }
+            b'\\' if pat.len() - pi >= 2 => {
+                pi += 1;
+                if pat[pi] != s[si] {
+                    return false;
+                }
+                si += 1;
+            }
+            c => {
+                if c != s[si] {
+                    return false;
+                }
+                si += 1;
+            }
+        }
+        pi += 1;
+        if si == s.len() {
+            while pi < pat.len() && pat[pi] == b'*' {
+                pi += 1;
+            }
+            break;
+        }
+    }
+    pi == pat.len() && si == s.len()
+}
+
+/// Parsed form of the `eventstream.key-filter` glob list (issue #61). `star`
+/// is set when any pattern is a bare `*`, letting the notification hot path
+/// short-circuit the default match-all without a byte scan. Patterns are the
+/// raw bytes of each token, matched against the raw key bytes via
+/// [`glob_match`]; multiple patterns OR together.
+#[derive(Clone, Debug, Default)]
+struct ParsedKeyFilter {
+    star: bool,
+    patterns: Vec<Vec<u8>>,
+}
+
+impl ParsedKeyFilter {
+    fn matches(&self, key: &[u8]) -> bool {
+        self.star || self.patterns.iter().any(|p| glob_match(p, key))
+    }
+}
+
+/// Parse the key-filter grammar: `glob ("," glob)*`. Whitespace around each
+/// pattern is trimmed; empty patterns and the empty string are rejected, the
+/// same rule as `eventstream.events` (to pause the module use
+/// `eventstream.enabled no`). A bare `*` sets the match-all short-circuit.
+fn parse_key_filter(s: &str) -> Result<ParsedKeyFilter, RedisError> {
+    let mut filter = ParsedKeyFilter::default();
+    for raw_token in s.split(',') {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            return Err(RedisError::String(
+                "empty key-filter pattern; to pause the module use 'eventstream.enabled no'"
+                    .to_owned(),
+            ));
+        }
+        if token == "*" {
+            filter.star = true;
+        } else {
+            filter.patterns.push(token.as_bytes().to_vec());
+        }
+    }
+    Ok(filter)
+}
+
+/// `eventstream.key-filter` config binding (issue #61): stores the raw string
+/// (for `CONFIG GET`) and the parsed pattern list behind a `RedisGILGuard`, the
+/// notification handler reading the parsed form under the GIL without extra
+/// locking. Same shape as [`FilterConfig`]; rejection from `set()` surfaces as
+/// the `CONFIG SET` error reply (SPEC.md section 7).
+struct KeyFilterConfig {
+    raw: RedisGILGuard<String>,
+    parsed: RedisGILGuard<ParsedKeyFilter>,
+}
+
+impl ConfigurationValue<RedisString> for KeyFilterConfig {
+    fn get(&self, ctx: &ConfigurationContext) -> RedisString {
+        RedisString::create(None, self.raw.lock(ctx).as_str())
+    }
+    fn set(&self, ctx: &ConfigurationContext, val: RedisString) -> Result<(), RedisError> {
+        let s = val.try_as_str()?;
+        let parsed = parse_key_filter(s)?;
+        *self.parsed.lock(ctx) = parsed;
+        *self.raw.lock(ctx) = s.to_owned();
+        Ok(())
+    }
+}
+
+/// Parsed form of the `eventstream.source-dbs` filter (issue #63). `star` makes
+/// the filter a match-all no-op (the default); otherwise `dbs` holds the named
+/// database indexes and an event's origin db must be a member.
+#[derive(Clone, Debug, Default)]
+struct ParsedDbFilter {
+    star: bool,
+    dbs: HashSet<u32>,
+}
+
+impl ParsedDbFilter {
+    fn matches(&self, db: i32) -> bool {
+        // `RedisModule_GetSelectedDb` yields a non-negative index; guard the
+        // cast regardless. Out-of-range indexes simply never match (issue #63).
+        self.star || (db >= 0 && self.dbs.contains(&(db as u32)))
+    }
+}
+
+/// Parse the source-db grammar: `*` or `index ("," index)*`, each index a
+/// non-negative decimal integer. Whitespace around tokens is trimmed; empty
+/// tokens, the empty string, and non-`u32` tokens are rejected. The server's
+/// databases count is not known at load, so any in-`u32`-range index is
+/// accepted and an out-of-range one simply never matches (issue #63).
+fn parse_source_dbs(s: &str) -> Result<ParsedDbFilter, RedisError> {
+    let mut filter = ParsedDbFilter::default();
+    for raw_token in s.split(',') {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            return Err(RedisError::String(
+                "empty source-dbs token; to pause the module use 'eventstream.enabled no'"
+                    .to_owned(),
+            ));
+        }
+        if token == "*" {
+            filter.star = true;
+        } else {
+            let db: u32 = token.parse().map_err(|_| {
+                RedisError::String(format!(
+                    "source-dbs token '{token}' is not a non-negative database index"
+                ))
+            })?;
+            filter.dbs.insert(db);
+        }
+    }
+    Ok(filter)
+}
+
+/// `eventstream.source-dbs` config binding (issue #63): same shape as
+/// [`FilterConfig`], storing the raw string and the parsed index set behind a
+/// `RedisGILGuard`.
+struct SourceDbConfig {
+    raw: RedisGILGuard<String>,
+    parsed: RedisGILGuard<ParsedDbFilter>,
+}
+
+impl ConfigurationValue<RedisString> for SourceDbConfig {
+    fn get(&self, ctx: &ConfigurationContext) -> RedisString {
+        RedisString::create(None, self.raw.lock(ctx).as_str())
+    }
+    fn set(&self, ctx: &ConfigurationContext, val: RedisString) -> Result<(), RedisError> {
+        let s = val.try_as_str()?;
+        let parsed = parse_source_dbs(s)?;
+        *self.parsed.lock(ctx) = parsed;
+        *self.raw.lock(ctx) = s.to_owned();
+        Ok(())
+    }
+}
+
 /// `eventstream.stream-prefix` config binding. Registered IMMUTABLE, so `set`
 /// runs only at load time (defaults and module args); validation failure
 /// aborts the load.
@@ -551,6 +845,22 @@ lazy_static! {
             parse_filter("expired").expect("default filter must parse")
         ),
     };
+    /// `eventstream.key-filter` (issue #61). Default `*` matches every key, so
+    /// the filter is a no-op until an operator narrows it.
+    static ref KEY_FILTER: KeyFilterConfig = KeyFilterConfig {
+        raw: RedisGILGuard::new("*".to_owned()),
+        parsed: RedisGILGuard::new(
+            parse_key_filter("*").expect("default key-filter must parse")
+        ),
+    };
+    /// `eventstream.source-dbs` (issue #63). Default `*` captures every
+    /// database, the pre-filter behavior.
+    static ref SOURCE_DBS: SourceDbConfig = SourceDbConfig {
+        raw: RedisGILGuard::new("*".to_owned()),
+        parsed: RedisGILGuard::new(
+            parse_source_dbs("*").expect("default source-dbs must parse")
+        ),
+    };
     static ref PREFIX: PrefixConfig = PrefixConfig {
         value: RedisGILGuard::new("events:".to_owned()),
     };
@@ -564,8 +874,8 @@ lazy_static! {
     /// Per-stream records behind `ACTIVE_STREAMS` and the WITHSTATS join
     /// (issues #68, #71): registry membership, counters, failure-log state.
     /// Touched on the capture and marker write paths, with the GIL held.
-    /// Bounded by the distinct destination names, exactly as the former
-    /// membership set was (the #64 max-streams cap remains future work).
+    /// Bounded by the distinct destination names, and by
+    /// `eventstream.max-streams` when that cap is set (issue #64).
     static ref STREAM_STATS: RedisGILGuard<HashMap<String, StreamStats>> =
         RedisGILGuard::new(HashMap::new());
 }
@@ -1049,6 +1359,10 @@ enum MirrorOutcome {
     Oom { stream: String, msg: String },
     /// Any other `XADD` failure; stream carried as in [`MirrorOutcome::Oom`].
     Failed { stream: String, msg: String },
+    /// Refused before the `XADD` because the destination stream is new and
+    /// `eventstream.max-streams` is reached (issue #64): the stream was never
+    /// created. Carries the rejected name so the first-failure log names it.
+    MaxStreams { stream: String },
 }
 
 /// Write one mirrored entry to `<prefix><seg><suffix>`, and on the first write
@@ -1070,10 +1384,27 @@ fn mirror_entry(
     key: &[u8],
     db: &str,
     maxlen: i64,
+    max_streams: i64,
     counter: &AtomicU64,
 ) -> MirrorOutcome {
     let stream = format!("{prefix}{seg}{suffix}");
     let registry = format!("{prefix}{seg}#streams");
+
+    // Max-streams cap (issue #64): before the XADD, refuse to create a new
+    // event-derived destination stream once the cap is reached. Streams already
+    // registered in this process keep receiving events; only new-stream
+    // creation is blocked. `CURRENT_STREAMS` is the currently-registered count
+    // (resets on flush), so the cap tracks distinct streams the registry cache
+    // knows about, matching `active_streams`. `max_streams` 0 is unlimited; the
+    // firehose, control stream, and gap markers pass 0 (exempt: the `#`
+    // namespace is not event-derived and markers must never be dropped).
+    if max_streams > 0 {
+        let stats = STREAM_STATS.lock(ctx);
+        let known = stats.get(&stream).is_some_and(|s| s.registered);
+        if !known && CURRENT_STREAMS.load(Ordering::Relaxed) >= max_streams {
+            return MirrorOutcome::MaxStreams { stream };
+        }
+    }
 
     let maxlen_s = maxlen.to_string();
     let mut args: Vec<&[u8]> = Vec::with_capacity(12);
@@ -1148,6 +1479,9 @@ fn mirror_entry(
                 if sadd.is_ok() {
                     entry.registered = true;
                     ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                    // Currently-registered count backing the max-streams cap
+                    // (issue #64); resets on flush with STREAM_STATS.
+                    CURRENT_STREAMS.fetch_add(1, Ordering::Relaxed);
                 }
             }
             MirrorOutcome::Written
@@ -1182,6 +1516,7 @@ fn mirror_entry(
 /// retry the entry once so the triggering event is captured rather than
 /// dropped. Bounded: a refusal on the retry is a counted drop, never another
 /// re-pin. Runs only in a write-safe context (a post-notification job).
+#[allow(clippy::too_many_arguments)]
 fn repin_and_retry(
     ctx: &Context,
     prefix: &str,
@@ -1190,6 +1525,7 @@ fn repin_and_retry(
     key: &[u8],
     db: &str,
     maxlen: i64,
+    max_streams: i64,
 ) {
     *NODE_TAG.lock().unwrap() = None;
     *PROBE_VERIFIED_TAG.lock().unwrap() = None;
@@ -1207,7 +1543,7 @@ fn repin_and_retry(
     // where this node's stream name changed (SPEC.md section 9).
     write_marker(ctx, &format!("{prefix}{seg}#control"), "repinned", maxlen);
     match mirror_entry(
-        ctx, prefix, &seg, suffix, event, key, db, maxlen, &FORWARDED,
+        ctx, prefix, &seg, suffix, event, key, db, maxlen, max_streams, &FORWARDED,
     ) {
         MirrorOutcome::Written => {}
         MirrorOutcome::Oom { stream, msg } => count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg),
@@ -1231,6 +1567,14 @@ fn repin_and_retry(
         MirrorOutcome::Failed { stream, msg } => {
             count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg)
         }
+        // The re-pinned name is new after a tag change; if the cap is reached
+        // the entry is dropped like any other new stream (issue #64).
+        MirrorOutcome::MaxStreams { stream } => count_drop(
+            ctx,
+            &DROPPED_MAX_STREAMS,
+            &LOGGED_MAX_STREAMS,
+            &format!("max-streams cap reached after re-pin; new stream '{stream}' not created; entry dropped (dropped_max_streams)"),
+        ),
     }
 }
 
@@ -1264,6 +1608,10 @@ fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &s
         key,
         db,
         maxlen,
+        // The firehose is exempt from the max-streams cap (issue #64): it is a
+        // single `#`-namespaced stream, not event-derived, so it never
+        // consumes a cap slot and is never blocked by it.
+        0,
         &FIREHOSE_FORWARDED,
     ) {
         MirrorOutcome::Written => {}
@@ -1285,6 +1633,9 @@ fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &s
         MirrorOutcome::Failed { stream, msg } => {
             count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg)
         }
+        // Unreachable: the firehose passes max_streams 0 (exempt), so the cap
+        // gate never fires for it.
+        MirrorOutcome::MaxStreams { .. } => {}
     }
 }
 
@@ -1319,32 +1670,47 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
         return;
     }
 
-    // 4. Filter predicate.
+    // 4. Event-name/class filter predicate.
     if !FILTER.parsed.lock(ctx).matches(event_type, event) {
         SKIPPED_FILTERED.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
-    // 5. Routable name.
+    // 5. Key-name glob filter (issue #61): AND with the events filter, checked
+    // against the raw key bytes. The default `*` short-circuits (no byte scan);
+    // a borrowed match keeps the skip path allocation-free (SPEC.md section 11).
+    if !KEY_FILTER.parsed.lock(ctx).matches(key) {
+        SKIPPED_KEY_FILTERED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    // 6. Source-db filter (issue #63): the origin database, also recorded in
+    // the entry's `db` field, is captured once here and reused for the entry.
+    // The default `*` short-circuits; only db 0 exists in cluster mode. The
+    // stream itself always lives in db 0 (SPEC.md section 6).
+    let db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
+    if !SOURCE_DBS.parsed.lock(ctx).matches(db) {
+        SKIPPED_DB.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    // 7. Routable name.
     let suffix = sanitize(event);
     if suffix.is_empty() {
         SKIPPED_INVALID.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
-    // 6. Origin database, recorded in the entry's `db` field. The stream
-    // itself always lives in db 0 (SPEC.md section 6).
-    let db = unsafe { raw::RedisModule_GetSelectedDb.unwrap()(ctx.ctx) };
-
     // Names are resolved in the job, not here: in per-node cluster mode the
     // hash tag is selected lazily (this node may own no slots yet), and that
     // probe must run in a write-safe context.
     let prefix_owned = prefix.as_str().to_owned();
     let maxlen = MAXLEN.value.load(Ordering::Relaxed);
+    let max_streams = MAX_STREAMS.value.load(Ordering::Relaxed);
     let event_owned = event.to_owned();
     let key_owned = key.to_vec();
 
-    // 7. Deferred write, atomic with the notification.
+    // 8. Deferred write, atomic with the notification.
     let status = ctx.add_post_notification_job(move |ctx| {
         guard_job(move || {
             // All destination streams are consolidated in db 0.
@@ -1378,6 +1744,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 &key_owned,
                 &db_s,
                 maxlen,
+                max_streams,
                 &FORWARDED,
             ) {
                 MirrorOutcome::Written => {}
@@ -1394,6 +1761,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                     &key_owned,
                     &db_s,
                     maxlen,
+                    max_streams,
                 ),
                 MirrorOutcome::Failed { stream, msg } => {
                     // The re-pin trigger is an empirically observed error
@@ -1412,11 +1780,23 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                             &key_owned,
                             &db_s,
                             maxlen,
+                            max_streams,
                         );
                     } else {
                         count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
                     }
                 }
+                // Max-streams cap reached (issue #64): the new stream was never
+                // created. First-failure-per-reason log, then counted silently.
+                MirrorOutcome::MaxStreams { stream } => count_drop(
+                    ctx,
+                    &DROPPED_MAX_STREAMS,
+                    &LOGGED_MAX_STREAMS,
+                    &format!(
+                        "max-streams cap ({max_streams}) reached; new stream '{stream}' \
+                         not created; entry dropped (dropped_max_streams)"
+                    ),
+                ),
             }
             // The firehose copy runs after the per-event outcome is settled,
             // gated on the runtime-mutable config; the two writes succeed or
@@ -1556,10 +1936,13 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
 
     let prefix = PREFIX.value.lock(ctx).clone();
     let filter = FILTER.raw.lock(ctx).clone();
+    let key_filter = KEY_FILTER.raw.lock(ctx).clone();
+    let source_dbs = SOURCE_DBS.raw.lock(ctx).clone();
     ctx.log_notice(&format!(
-        "eventstream loaded: stream-prefix='{prefix}' events='{filter}' maxlen={} \
-         enabled={} extra-classes={:?}",
+        "eventstream loaded: stream-prefix='{prefix}' events='{filter}' key-filter='{key_filter}' \
+         source-dbs='{source_dbs}' maxlen={} max-streams={} enabled={} extra-classes={:?}",
         MAXLEN.value.load(Ordering::Relaxed),
+        MAX_STREAMS.value.load(Ordering::Relaxed),
         ENABLED.load(Ordering::Relaxed),
         extra,
     ));
@@ -1614,15 +1997,19 @@ fn deinit(ctx: &Context) -> Status {
     }
     ctx.log_notice(&format!(
         "eventstream unloading: forwarded={} firehose_forwarded={} dropped={} skipped_self={} \
-         skipped_filtered={} skipped_invalid={} control_markers={} active_streams={}",
+         skipped_filtered={} skipped_key_filtered={} skipped_db={} skipped_invalid={} \
+         control_markers={} active_streams={}",
         FORWARDED.load(Ordering::Relaxed),
         FIREHOSE_FORWARDED.load(Ordering::Relaxed),
         DROPPED_XADD_ERROR.load(Ordering::Relaxed)
             + DROPPED_OOM.load(Ordering::Relaxed)
             + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-            + DROPPED_MIGRATING.load(Ordering::Relaxed),
+            + DROPPED_MIGRATING.load(Ordering::Relaxed)
+            + DROPPED_MAX_STREAMS.load(Ordering::Relaxed),
         SKIPPED_SELF.load(Ordering::Relaxed),
         SKIPPED_FILTERED.load(Ordering::Relaxed),
+        SKIPPED_KEY_FILTERED.load(Ordering::Relaxed),
+        SKIPPED_DB.load(Ordering::Relaxed),
         SKIPPED_INVALID.load(Ordering::Relaxed),
         CONTROL_MARKERS.load(Ordering::Relaxed),
         ACTIVE_STREAMS.load(Ordering::Relaxed),
@@ -1640,7 +2027,8 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-        + DROPPED_MIGRATING.load(Ordering::Relaxed);
+        + DROPPED_MIGRATING.load(Ordering::Relaxed)
+        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed);
     ctx.builder()
         .add_section("stats")
         .field("enabled", ENABLED.load(Ordering::Relaxed) as i64)?
@@ -1659,8 +2047,17 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
             "dropped_defer_error",
             DROPPED_DEFER_ERROR.load(Ordering::Relaxed),
         )?
+        .field(
+            "dropped_max_streams",
+            DROPPED_MAX_STREAMS.load(Ordering::Relaxed),
+        )?
         .field("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed))?
         .field("skipped_filtered", SKIPPED_FILTERED.load(Ordering::Relaxed))?
+        .field(
+            "skipped_key_filtered",
+            SKIPPED_KEY_FILTERED.load(Ordering::Relaxed),
+        )?
+        .field("skipped_db", SKIPPED_DB.load(Ordering::Relaxed))?
         .field("skipped_invalid", SKIPPED_INVALID.load(Ordering::Relaxed))?
         .field("active_streams", ACTIVE_STREAMS.load(Ordering::Relaxed))?
         .field("control_markers", CONTROL_MARKERS.load(Ordering::Relaxed))?
@@ -1705,6 +2102,10 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
 fn on_flush(ctx: &Context, event: FlushSubevent) {
     if let FlushSubevent::Started = event {
         STREAM_STATS.lock(ctx).clear();
+        // The registry cache is empty again, so the max-streams cap (issue #64)
+        // counts distinct streams from zero: the first `max-streams` names seen
+        // after the flush re-register and win.
+        CURRENT_STREAMS.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1716,8 +2117,9 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
     let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-        + DROPPED_MIGRATING.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 19] = [
+        + DROPPED_MIGRATING.load(Ordering::Relaxed)
+        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed);
+    let pairs: [(&str, i64); 22] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
         (
@@ -1734,11 +2136,20 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
             "dropped_defer_error",
             DROPPED_DEFER_ERROR.load(Ordering::Relaxed) as i64,
         ),
+        (
+            "dropped_max_streams",
+            DROPPED_MAX_STREAMS.load(Ordering::Relaxed) as i64,
+        ),
         ("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed) as i64),
         (
             "skipped_filtered",
             SKIPPED_FILTERED.load(Ordering::Relaxed) as i64,
         ),
+        (
+            "skipped_key_filtered",
+            SKIPPED_KEY_FILTERED.load(Ordering::Relaxed) as i64,
+        ),
+        ("skipped_db", SKIPPED_DB.load(Ordering::Relaxed) as i64),
         (
             "skipped_invalid",
             SKIPPED_INVALID.load(Ordering::Relaxed) as i64,
@@ -1882,10 +2293,13 @@ redis_module! {
     configurations: [
         i64: [
             ["maxlen", &MAXLEN, 10000, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
+            ["max-streams", &MAX_STREAMS, 0, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
         ],
         string: [
             ["stream-prefix", &*PREFIX, "events:", ConfigurationFlags::IMMUTABLE, None],
             ["events", &*FILTER, "expired", ConfigurationFlags::DEFAULT, None],
+            ["key-filter", &*KEY_FILTER, "*", ConfigurationFlags::DEFAULT, None],
+            ["source-dbs", &*SOURCE_DBS, "*", ConfigurationFlags::DEFAULT, None],
             ["cluster-streams", &*CLUSTER_STREAMS, "refuse", ConfigurationFlags::IMMUTABLE, None],
         ],
         bool: [
@@ -1980,6 +2394,117 @@ mod tests {
                 "reject reason for {token} should mention {needle}, got: {msg}"
             );
         }
+    }
+
+    // --- Key-name glob filter (issue #61) ---
+
+    #[test]
+    fn glob_literal_and_wildcards() {
+        assert!(glob_match(b"session:*", b"session:abc123"));
+        assert!(!glob_match(b"session:*", b"cache:xyz"));
+        assert!(glob_match(b"*", b"anything"));
+        // Faithful to Redis `stringmatchlen`: a leading `*` against an empty
+        // string returns false (the match loop is entered only while the string
+        // has bytes left). The empty-key case is covered by the filter's `star`
+        // short-circuit (see `key_filter_default_matches_all`), not this path.
+        assert!(!glob_match(b"*", b""));
+        assert!(glob_match(b"foo", b"foo"));
+        assert!(!glob_match(b"foo", b"foo!"));
+        // Trailing literal after a star must still match (regression guard for
+        // the trailing-`*` handling in the port).
+        assert!(glob_match(b"a*z", b"az"));
+        assert!(glob_match(b"a*z", b"abcz"));
+        assert!(!glob_match(b"a*z", b"abc"));
+    }
+
+    #[test]
+    fn glob_question_class_and_escape() {
+        assert!(glob_match(b"h?llo", b"hello"));
+        assert!(!glob_match(b"h?llo", b"hllo"));
+        assert!(glob_match(b"[abc]at", b"bat"));
+        assert!(!glob_match(b"[abc]at", b"dat"));
+        assert!(glob_match(b"[^abc]at", b"dat"));
+        assert!(!glob_match(b"[^abc]at", b"bat"));
+        assert!(glob_match(b"[a-z]9", b"m9"));
+        assert!(!glob_match(b"[a-z]9", b"M9"));
+        // Backslash escapes a metacharacter so it matches literally.
+        assert!(glob_match(b"a\\*b", b"a*b"));
+        assert!(!glob_match(b"a\\*b", b"axb"));
+    }
+
+    #[test]
+    fn glob_matches_raw_binary_bytes() {
+        // Keys are arbitrary bytes; a `?` matches one byte regardless of UTF-8.
+        assert!(glob_match(b"k:?", &[b'k', b':', 0xff]));
+        assert!(glob_match(b"*", &[0x00, 0xfe, 0xff]));
+        assert!(glob_match(&[0xff, b'*'], &[0xff, 0x01, 0x02]));
+        assert!(!glob_match(&[0xff, b'*'], &[0xfe, 0x01]));
+    }
+
+    #[test]
+    fn key_filter_default_matches_all() {
+        let f = parse_key_filter("*").unwrap();
+        assert!(f.star);
+        assert!(f.matches(b"anything"));
+        assert!(f.matches(&[0xff, 0x00]));
+        // The default filter matches even an empty key via the star
+        // short-circuit, without calling into `glob_match`.
+        assert!(f.matches(b""));
+    }
+
+    #[test]
+    fn key_filter_multiple_patterns_or_together() {
+        let f = parse_key_filter("session:*, cache:*").unwrap();
+        assert!(!f.star);
+        assert!(f.matches(b"session:1"));
+        assert!(f.matches(b"cache:1"));
+        assert!(!f.matches(b"user:1"));
+    }
+
+    #[test]
+    fn key_filter_trims_and_rejects_empty() {
+        assert!(parse_key_filter("").is_err());
+        assert!(parse_key_filter("session:*,").is_err());
+        assert!(parse_key_filter("a,,b").is_err());
+        // Whitespace around patterns is trimmed.
+        let f = parse_key_filter("  session:*  ").unwrap();
+        assert!(f.matches(b"session:x"));
+    }
+
+    // --- Source-db filter (issue #63) ---
+
+    #[test]
+    fn source_dbs_default_matches_all() {
+        let f = parse_source_dbs("*").unwrap();
+        assert!(f.star);
+        assert!(f.matches(0));
+        assert!(f.matches(15));
+    }
+
+    #[test]
+    fn source_dbs_named_membership() {
+        let f = parse_source_dbs("0,2,5").unwrap();
+        assert!(!f.star);
+        assert!(f.matches(0));
+        assert!(f.matches(2));
+        assert!(f.matches(5));
+        assert!(!f.matches(1));
+        assert!(!f.matches(3));
+        // A negative or out-of-range origin never matches a named list.
+        assert!(!f.matches(-1));
+        assert!(!f.matches(9));
+    }
+
+    #[test]
+    fn source_dbs_rejects_empty_and_non_integer() {
+        assert!(parse_source_dbs("").is_err());
+        assert!(parse_source_dbs("0,").is_err());
+        assert!(parse_source_dbs("0,,2").is_err());
+        assert!(parse_source_dbs("0,foo").is_err());
+        assert!(parse_source_dbs("-1").is_err());
+        // Whitespace around indexes is trimmed.
+        let f = parse_source_dbs(" 0 , 2 ").unwrap();
+        assert!(f.matches(0) && f.matches(2));
     }
 
     #[test]

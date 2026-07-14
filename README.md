@@ -84,7 +84,10 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.firehose` | bool | `no` | also mirror every captured event into one combined `<prefix>#firehose` stream; doubles write amplification (SPEC.md section 11) |
 | `eventstream.stream-prefix` | string | `events:` | destination stream prefix; immutable, load-time only |
 | `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
+| `eventstream.key-filter` | string | `*` | comma list of key-name globs, ANDed with `events`; matched against raw key bytes, e.g. `session:*,cache:*` |
+| `eventstream.source-dbs` | string | `*` | `*` for all databases, or a comma list of db indexes, e.g. `0,2`; standalone only |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
+| `eventstream.max-streams` | i64 | `0` | cap on distinct destination streams; `0` is unlimited, new streams beyond the cap are dropped and counted |
 | `eventstream.cluster-streams` | string | `refuse` | cluster behavior: `refuse` (default) or `per-node` (see Limitations); immutable, load-time only |
 
 The full filter grammar is in SPEC.md section 7. The high-volume `@missed`

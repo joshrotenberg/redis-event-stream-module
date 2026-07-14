@@ -41,15 +41,17 @@ All work happens on the main thread, inside the execution unit of the command th
  | 1. enabled == yes?                 no -> return                          |
  | 2. key starts with stream-prefix?  yes -> skipped_self++, return  (guard)|
  | 3. MASTER flag set, LOADING clear? no -> return                          |
- | 4. event matches filter?           no -> skipped_filtered++, return      |
- | 5. sanitize(event) non-empty?      no -> skipped_invalid++, return       |
- | 6. capture db index (raw RedisModule_GetSelectedDb)                      |
- | 7. ctx.add_post_notification_job(closure)                                |
+ | 4. event matches events filter?    no -> skipped_filtered++, return      |
+ | 5. key matches key-filter?         no -> skipped_key_filtered++, return  |
+ | 6. capture db; db in source-dbs?   no -> skipped_db++, return            |
+ | 7. sanitize(event) non-empty?      no -> skipped_invalid++, return       |
+ | 8. ctx.add_post_notification_job(closure)                                |
  +---------------------------------------------------------------------------+
         |
         v   (runs atomically alongside the notification, writes now safe)
  post-notification job:
    SelectDb(0)                      (raw binding; failure -> dropped_xadd_error)
+   new stream and max-streams cap reached? -> dropped_max_streams++, drop
    ctx.call_ext("XADD",
      [<prefix><event>, "MAXLEN", "~", <maxlen>, "*",
       "event", <raw event>, "key", <key bytes>, "db", <db>],
@@ -167,7 +169,10 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | `eventstream.firehose` | bool | `no` | yes | `yes` / `no` |
 | `eventstream.stream-prefix` | string | `events:` | no (IMMUTABLE) | non-empty; at most 128 bytes; characters limited to `A-Z a-z 0-9 : . _ - { }`; glob metacharacters (`*`, `?`, `[`, `]`, `\`) rejected |
 | `eventstream.events` | string | `expired` | yes | filter grammar below; empty string rejected |
+| `eventstream.key-filter` | string | `*` | yes | comma-separated list of glob patterns (key-filter grammar below); whitespace around patterns trimmed; empty patterns and the empty string rejected |
+| `eventstream.source-dbs` | string | `*` | yes | `*` (all databases) or a comma-separated list of non-negative decimal database indexes; whitespace trimmed; empty tokens, the empty string, and non-integer tokens rejected. Only meaningful on standalone (cluster has only db 0) |
 | `eventstream.maxlen` | i64 | `10000` | yes | `0` to `i64::MAX`; `0` disables trimming. Redis enforces the registered range on `CONFIG SET` and redis.conf paths only; a module-arg value becomes the registered default and bypasses the boundary check (verified against redis 7.2 `module.c`/`config.c`), so the module's config binding re-validates and rejects negatives, aborting the load |
+| `eventstream.max-streams` | i64 | `0` | yes | `0` (unlimited) to `i64::MAX`; caps the number of distinct destination streams created. Same module-arg boundary-bypass quirk as `maxlen`, so the binding re-validates and rejects negatives, aborting the load |
 | `eventstream.cluster-streams` | string | `refuse` | no (IMMUTABLE) | `refuse` or `per-node` (section 10). Only meaningful in cluster mode |
 
 **`eventstream.enabled`.** Master kill switch. There is no unsubscribe API for keyspace notifications, so `no` is an early return at the top of the notification handler (one atomic load per event). Flipping back to `yes` does not replay events that occurred while disabled.
@@ -178,7 +183,13 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 
 **`eventstream.events`.** Which events to mirror. Default `expired` captures only key expirations and creates exactly one stream; mirroring everything by default would silently add write amplification to any production workload the moment the module loads. Operators widen it deliberately.
 
+**`eventstream.key-filter`.** A key-name glob filter, ANDed with `eventstream.events`: an event is mirrored only if it passes both. The default `*` is a match-all no-op, so existing deployments are unaffected. It selects by the affected key (e.g. `session:*`), an axis `eventstream.events` cannot express, and it cuts writes at the source — non-matching events cost one predicate evaluation and one counter increment (`skipped_key_filtered`), never an `XADD`. Patterns match the raw key **bytes** (keys are arbitrary binary), not a UTF-8 decode, and the skip path allocates nothing (section 11). Evaluated in the notification callback alongside the events-filter predicate (gate 5, section 4), before sanitize and defer.
+
+**`eventstream.source-dbs`.** Restricts capture to events whose origin database is in the named set. The default `*` captures every database (the historical behavior). Otherwise a comma-separated list of decimal indexes, e.g. `0` or `0,2,5`; an event fired in any other database is dropped and counted (`skipped_db`) before the `XADD`, so a busy multi-database instance no longer pays capture, write, memory, and replication cost for databases a consumer will discard. The server's database count is not known at config-set time, so any non-negative `u32` index is accepted and an out-of-range one simply never matches. Streams still live in db 0 and each entry still records its origin in the `db` field (section 6). Only meaningful on standalone: in cluster mode only db 0 exists, so any list containing `0` is equivalent to `*` (same register as the `cluster-streams` "only meaningful in cluster mode" note).
+
 **`eventstream.maxlen`.** Per-stream retention cap, applied inline as `XADD ... MAXLEN ~ <n>` on every write. Default 10000 bounds worst-case memory (section 11) while degrading to "recent history" rather than degrading to an outage. Alternative considered: periodic `XTRIM`. Rejected: inline approximate `MAXLEN` achieves the same bound with no extra writes and no timer.
+
+**`eventstream.max-streams`.** Caps the number of distinct destination streams the module will create. Module-defined event names are the only unbounded source of streams (section 5): a wide-open filter against a buggy or hostile co-loaded module grows memory linearly with distinct names (`total ≈ distinct_event_names × maxlen × bytes_per_entry`, section 11), and neither the 128-byte name cap nor per-stream `maxlen` bounds the *count*. The default `0` is unlimited. When the cap is nonzero and a captured event would create a new stream beyond it, the event is dropped and counted (`dropped_max_streams`, part of the `dropped` sum) rather than captured; streams already registered keep receiving events. The count is process-local (like `active_streams`) and matches its semantics: it resets on flush and on restart, so the first `max-streams` distinct names seen afterward win, and the persistent registry stops growing once the in-process count re-fills. Lowering the cap below the current count at runtime is accepted: existing streams continue and no new streams are created until the count is under the cap again. The control stream and gap markers are exempt (the `#` namespace is not event-derived and markers must never be dropped); the firehose, being a single fixed `#`-namespaced stream, is likewise never itself blocked, but it does register like any destination stream and so occupies one cap slot (matching `active_streams`, which counts it) — size `max-streams` as one larger when the firehose is enabled. Enforced at the point a first write registers a new stream (section 5 Discovery), before the `XADD`.
 
 Example:
 
@@ -220,6 +231,31 @@ event-name := any non-empty run of characters except "," and whitespace
 | `@hash` | every hash-class event, each to its own stream |
 | `*` | everything the subscription delivers |
 
+### Key-filter grammar
+
+`eventstream.key-filter` is a comma-separated list of glob patterns, evaluated against the raw key bytes and ANDed with the events filter:
+
+```
+key-filter := pattern ( "," pattern )*
+pattern    := any non-empty run of bytes except ","
+```
+
+- Whitespace around each pattern is trimmed; empty patterns and the empty string are rejected (to pause the module use `eventstream.enabled no`, the same rule as `eventstream.events`).
+- Patterns use Redis `stringmatchlen` glob semantics: `*` (any run, including empty), `?` (one byte), `[...]` classes with `[^...]` negation and `a-z` ranges, and `\` to escape a metacharacter. Matching is case-sensitive and byte-exact — patterns are compared against the raw key bytes, never a UTF-8 decode, so binary keys match predictably.
+- Multiple patterns OR together; a key mirrored if it matches any one. A bare `*` is the match-all default and short-circuits without a byte scan.
+- Because tokens split on `,`, a pattern cannot contain a literal comma; this matches the multi-token shape of the events grammar.
+
+| Value | Captures |
+|---|---|
+| `*` | every key (default, no-op) |
+| `session:*` | only keys beginning `session:` |
+| `session:*,cache:*` | keys beginning `session:` or `cache:` |
+| `user:[0-9]*` | `user:` followed by a digit and any suffix |
+
+### Source-db grammar
+
+`eventstream.source-dbs` is `*` (every database) or a comma-separated list of non-negative decimal database indexes (`0`, `0,2,5`). Whitespace around tokens is trimmed; empty tokens, the empty string, and non-integer tokens are rejected. Any in-`u32`-range index is accepted at config time; an index beyond the server's `databases` count simply never matches (the count is a server config not known to the module binding).
+
 ### Validation mechanics
 
 The wrapper's stock `ConfigurationValue` impls never reject beyond UTF-8 conversion, and `on_changed` fires after the value is stored and cannot veto. Rejection is only possible from `ConfigurationValue::set` returning `Err`, which the wrapper surfaces as the `CONFIG SET` error reply (`ConfigrationPrivateData::set_val`, redismodule-rs `src/configuration.rs`). `eventstream.stream-prefix` and `eventstream.events` therefore bind to custom static types implementing `ConfigurationValue<RedisString>`: `set()` parses and validates, storing both the raw string (for `CONFIG GET`) and the parsed form (class bitmask plus name set) behind a `RedisGILGuard`, which the notification handler (always run with the GIL held) reads without extra locking.
@@ -251,7 +287,10 @@ Module delivery does not depend on `notify-keyspace-events`. Verified against Re
 | `enabled` to `no` | dropped at handler entry | still execute |
 | `firehose` | firehose copy written or skipped per the new value | still execute (completed before the change) |
 | `events` | new predicate applies | still execute (matched under old filter) |
+| `key-filter` | new glob set applies | still execute (matched under old filter) |
+| `source-dbs` | new db set applies | still execute (matched under old set) |
 | `maxlen` | new cap on each `XADD` | old cap; an idle stream is re-trimmed only on its next write |
+| `max-streams` | new cap on new-stream creation | still execute; a stream already registered keeps writing even if the cap was lowered below the current count |
 
 Since post-notification jobs run atomically within the triggering command and `CONFIG SET` is a separate serialized command, the enqueue-to-execute window never spans a config change in a way that needs special handling. The prefix cannot change at runtime, so the feedback guard always matches the single current prefix.
 
@@ -468,6 +507,7 @@ Measurement plan (documented in the README): memtier_benchmark, 60 second runs, 
 | `maxmemory` reached | `XADD` refused via `M` flag, entry dropped | `dropped_oom` | Raise `maxmemory`, lower `maxlen`, or narrow the filter |
 | Job scheduling failure | Entry dropped | `dropped_defer_error` | Investigate via log; not expected in practice |
 | Empty event name after sanitization | Not routed | `skipped_invalid` | None; hostile or buggy co-loaded module |
+| `max-streams` cap reached | Entry to a *new* destination stream dropped; existing streams unaffected | `dropped_max_streams` | Raise `eventstream.max-streams`, narrow the filter, or investigate the event-name source (a buggy or hostile co-loaded module firing unbounded names, section 5) |
 | Slow consumer | Trimming outruns it; detectable via first-entry ID and `XINFO GROUPS` `lag` | n/a | Alert on lag over ~50 percent of `maxlen`; scale consumers in the group |
 | Non-UTF-8 module event name | Captured: the hand-written raw callback decodes the name with `from_utf8_lossy`, so the entry's `event` field carries replacement characters for the invalid bytes (section 5) | n/a | None needed; resolved, see section 17 Q1 |
 | Cluster mode | Refuses to load by default; opt-in slot-pinned per-node capture via `eventstream.cluster-streams per-node` (section 10) | n/a | Deploy on standalone/replicated topologies, or opt in to per-node capture on a cluster |
@@ -494,8 +534,11 @@ eventstream_dropped:3
 eventstream_dropped_xadd_error:3
 eventstream_dropped_oom:0
 eventstream_dropped_defer_error:0
+eventstream_dropped_max_streams:0
 eventstream_skipped_self:1204
 eventstream_skipped_filtered:220
+eventstream_skipped_key_filtered:0
+eventstream_skipped_db:0
 eventstream_skipped_invalid:0
 eventstream_active_streams:1
 eventstream_control_markers:2
@@ -509,7 +552,7 @@ eventstream_cluster_pinned_tag:
 eventstream_last_error_time:1752071011
 ```
 
-`dropped` is the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, and `dropped_migrating`. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `active_streams` counts stream registrations since load, excluding the control stream: normally the number of distinct destination streams written, but the counter never resets — a flush clears the in-process registry cache, so a stream re-registered after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO. Per-stream forwarded/dropped counters live in the `EVENTSTREAM.STREAMS WITHSTATS` reply (section 8), never in INFO: one field set per event type ever seen is unbounded cardinality, hostile to INFO scrapers.
+`dropped` is the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, `dropped_migrating`, and `dropped_max_streams`. `dropped_max_streams` counts events dropped because creating their destination stream would exceed `eventstream.max-streams` (section 7); the stream was never created and existing streams are unaffected. `skipped_key_filtered` and `skipped_db` count events dropped in the notification callback by the key-name glob filter and the source-db filter respectively (section 7), kept separate from `skipped_filtered` (the event-name/class filter) so a "forwarded flat while `expired_keys` rises" diagnosis can tell which filter is too narrow. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `active_streams` counts stream registrations since load, excluding the control stream: normally the number of distinct destination streams written, but the counter never resets — a flush clears the in-process registry cache, so a stream re-registered after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO. Per-stream forwarded/dropped counters live in the `EVENTSTREAM.STREAMS WITHSTATS` reply (section 8), never in INFO: one field set per event type ever seen is unbounded cardinality, hostile to INFO scrapers.
 
 Documentation must state plainly: module sections do not appear in default `INFO` or `INFO all`; use `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. This is otherwise a recurring support question.
 
@@ -518,6 +561,7 @@ Alerting guidance:
 | Signal | Source | Condition |
 |---|---|---|
 | `eventstream_dropped` | INFO | any increase |
+| `eventstream_dropped_max_streams` | INFO | any increase: the `max-streams` cap is refusing new streams (section 7); raise it, narrow the filter, or investigate the name source |
 | `eventstream_enabled` | INFO | 0 when expected 1 |
 | `eventstream_forwarded` | INFO | flat while `expired_keys` in `INFO stats` rises (filter misconfigured) |
 | `eventstream_dropped_migrating` | INFO | any increase outside a planned reshard (section 10 migration window) |
@@ -629,7 +673,7 @@ Each item is additive (new config key, counter, command, or entry field), so not
 - Additional entry formats (minimal without `event`, verbose with `class`, JSON) behind an `entry-format` enum config, with a format discriminator and a `dropped_encode_error` counter (issue #60).
 - `MISSED`/`NEW` capture via a direct `raw::RedisModule_SubscribeToKeyspaceEvents` subscription is implemented (section 5); the hand-written handler also fixed the non-UTF-8 panic via lossy decode. `LOADED` and `TRIMMED` remain uncapturable by construction (dataset-load and cluster-reshard only).
 - Cluster support: the slot-pinned per-node hashtag design shipped in v0.2.0 as `eventstream.cluster-streams per-node` (section 10), including per-node discovery and reshard handling. The original proposal in [docs/cluster-design.md](docs/cluster-design.md) is retained as design history (rewriting it as as-built documentation is issue #83).
-- Key-name glob filter (issue #61), per-event maxlen overrides (issue #62), source-db filter (issue #63), max-streams cap on distinct event names (issue #64), an option to disable `verify_oom` (issue #65), a global monotonic `seq` entry field for cross-stream same-millisecond ordering (issue #66).
+- Key-name glob filter (`eventstream.key-filter`, issue #61), source-db filter (`eventstream.source-dbs`, issue #63), and a max-streams cap on distinct event names (`eventstream.max-streams`, issue #64) are implemented (section 7; counters `skipped_key_filtered`, `skipped_db`, and `dropped_max_streams`, section 13). Still future work: per-event maxlen overrides (issue #62), an option to disable `verify_oom` (issue #65), a global monotonic `seq` entry field for cross-stream same-millisecond ordering (issue #66).
 - Shutdown gap marker via the Shutdown server-event hook: investigated and rejected in #67; no delivery channel survives shutdown (section 9).
 - Custom `@eventstream` ACL category (needs `RM_AddACLCategory`, Redis 7.4+, with 7.2/7.3 fallback) (issue #69). Per-stream rate-limited failure logging with recovery notices is implemented (section 13, issue #68).
 - Full benchmark matrix (mass-expiry drain p99, maxlen sensitivity) with CI regression gates (issue #70).
