@@ -2,6 +2,11 @@
 
 [Introduction](./introduction.md)
 
+# Deployment
+
+- [Docker image](./docker.md)
+- [Redis Enterprise](./enterprise.md)
+
 # Guides
 
 - [Consumer patterns](./consumer-patterns.md)

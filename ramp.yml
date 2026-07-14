@@ -1,0 +1,56 @@
+# RAMP manifest for Redis Enterprise Software packaging (issue #103).
+#
+# `ramp pack` (PyPI `ramp-packer`, the reference tool RedisJSON and other Redis
+# modules use) reads this file, loads the .so into a throwaway redis-server to
+# extract the registered commands and module version, and emits a zip
+# containing the .so plus a generated module.json. Enterprise's `POST
+# /v1/modules` endpoint accepts that zip; a bare .so is rejected.
+#
+# Scope (must stay visible to anyone building or uploading this bundle):
+#   * Self-managed Redis Enterprise Software only. Redis Cloud does not accept
+#     uncertified custom modules; this bundle does not make the module
+#     deployable there.
+#   * Enterprise clustering is not OSS cluster mode. Each shard is an ordinary
+#     non-clustered Redis process behind the proxy, so ContextFlags::CLUSTER is
+#     not set and the per-node capture path (SPEC.md section 10) does not apply;
+#     each shard mirrors its own events into shard-local streams. `clustering`
+#     is left off below until multi-shard behavior is validated (see docs).
+#   * min_redis_version is 7.2 (SPEC.md section 14). On pre-7.2 servers the
+#     load is a process abort inside the wrapper's registration path; the RAMP
+#     metadata front-runs that with a clean refusal at upload time.
+
+module_name: eventstream
+# Architecture and OS are not declared here: ramp-packer derives them from the
+# .so it loads at pack time, so restating them risks drifting from the actual
+# artifact. One bundle is produced per target by packing that target's .so.
+
+# The module has no data type and registers only the two readonly, keyless
+# introspection commands (eventstream.stats, eventstream.streams); ramp-packer
+# extracts their arity/flags from the loaded module, so they are not restated
+# here. There is no config_command / info-only surface to declare beyond that.
+
+# Version floors. min_redis_version is the hard 7.2 floor from SPEC.md section
+# 14. min_redis_pack_version is the earliest Redis Enterprise Software release
+# claimed; 7.4.0 is the first Enterprise line shipping a Redis 7.2+ core.
+# TODO(validation): confirm against the Enterprise version actually tested
+# before the first release that ships this bundle (issue #103, step 3).
+min_redis_version: "7.2"
+min_redis_pack_version: "7.4.0"
+
+# Streams are ordinary keys, so the module composes with eviction/expiry,
+# both persistence engines, replicas, and backup/restore. `clustering` is
+# intentionally absent: Enterprise sharding is not OSS cluster mode and the
+# multi-shard (per-shard-stream) semantics still need explicit validation.
+capabilities:
+  - eviction_expiry
+  - persistence_aof
+  - persistence_rdb
+  - replica_of
+  - backup_restore
+
+# Load-time module arguments. Left empty so the bundle loads with the default
+# expirations-only configuration. Mutable eventstream.* configs can be changed
+# per-database via CONFIG SET; IMMUTABLE keys (eventstream.stream-prefix,
+# eventstream.cluster-streams) can only be set here as load args and must be
+# supplied through Enterprise's module-args field at database-create time.
+command_line_args: ""
