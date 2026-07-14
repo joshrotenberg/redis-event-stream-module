@@ -28,7 +28,8 @@ use lazy_static::lazy_static;
 use redis_module::configuration::ConfigurationContext;
 #[cfg(not(test))]
 use redis_module::{
-    configuration::ConfigurationFlags, redis_module, InfoContext, RedisResult, RedisValue,
+    configuration::ConfigurationFlags, redis_module, AclCategory, InfoContext, RedisResult,
+    RedisValue,
 };
 use redis_module::{
     enum_configuration, raw, CallOptions, CallOptionsBuilder, CallResult, ConfigurationValue,
@@ -2550,6 +2551,22 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     }
     SUBSCRIBED_EXTRA.store(extra.bits() as i64, Ordering::Relaxed);
 
+    // @eventstream ACL category (issue #69). The redis_module! macro has already
+    // run by the time init fires: on 7.4+ it registered the category via
+    // RM_AddACLCategory and tagged both commands into it; on 7.2/7.3 the API
+    // pointer is null, so the macro skipped it and the commands carry only their
+    // flag-derived categories (@read, @fast). Surface which path this server took
+    // once, at notice, so an operator writing a least-privilege ACL knows whether
+    // +@eventstream is available or must grant the commands individually (SPEC.md
+    // section 8). Reading the raw API pointer mirrors the canonical-name gate.
+    if unsafe { raw::RedisModule_AddACLCategory }.is_none() {
+        ctx.log_notice(
+            "eventstream: this server predates RM_AddACLCategory (Redis 7.4+); the \
+             @eventstream ACL category is unavailable, so grant the module's commands \
+             individually (+eventstream.stats +eventstream.streams)",
+        );
+    }
+
     // Subscribe to the flush and SWAPDB server events through the raw
     // `RedisModule_SubscribeToServerEvent` binding rather than the wrapper's
     // `#[flush_event_handler]` macro. The safe wrapper delivers only
@@ -3086,14 +3103,27 @@ redis_module! {
     version: MODULE_VERSION,
     allocator: (redis_module::alloc::RedisAlloc, redis_module::alloc::RedisAlloc),
     data_types: [],
+    // Custom @eventstream ACL category (issue #69). RM_AddACLCategory is Redis
+    // 7.4+, so the macro registers this only where the API pointer is non-null;
+    // on 7.2/7.3 it logs and skips (the null-pointer gate, same class as #45).
+    // Declaring the category here (not mandatory on the commands below) keeps
+    // registration additive: an absent API never fails the load.
+    acl_categories: [
+        "eventstream",
+    ],
     init: init,
     deinit: deinit,
     // Readonly, keyless introspection commands (SPEC.md sections 5, 8). STATS
     // is O(1); STREAMS is O(N) in the number of registered streams, so it is
-    // not flagged fast.
+    // not flagged fast. The 8th tuple field is the *optional* ACL category:
+    // @eventstream is attached on 7.4+ (in addition to the flag-derived @read/
+    // @fast) but skipped without error where RM_SetCommandACLCategories is null
+    // (7.2/7.3), so the commands stay individually grantable everywhere. The
+    // 7th field (mandatory categories) stays empty so no server fails the load
+    // over ACL wiring (issue #69).
     commands: [
-        ["eventstream.stats", cmd_stats, "readonly fast", 0, 0, 0, ""],
-        ["eventstream.streams", cmd_streams, "readonly", 0, 0, 0, ""],
+        ["eventstream.stats", cmd_stats, "readonly fast", 0, 0, 0, "", "eventstream"],
+        ["eventstream.streams", cmd_streams, "readonly", 0, 0, 0, "", "eventstream"],
     ],
     // No event_handlers: the module subscribes to keyspace events itself in
     // init, via a raw callback, so it can request MISSED and NEW (which the
