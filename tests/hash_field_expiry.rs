@@ -79,13 +79,22 @@ fn hexpired_routes_under_explicit_name() {
 
 #[test]
 fn hash_class_selects_hexpired() {
-    // `hexpired` fires under HASH, so `@hash` selects it (and the
-    // command-generated events like `hexpire`, each to its own stream).
+    // On Redis, `hexpired` fires under the HASH class, so `@hash` selects it
+    // (alongside the command-generated events like `hexpire`, each to its own
+    // stream). This is a Redis-specific classification: Valkey 9 emits
+    // `hexpired` under a different class, so `@hash` does not capture it there
+    // (the explicit-name filter in `hexpired_routes_under_explicit_name`, which
+    // matches the event name rather than a class, works on both). Gate to Redis;
+    // the divergence is a documented cross-server caveat (SPEC.md section 5).
     let s = TestServer::start(&["events", "@hash"]);
     if !hexpire_supported(&s) {
         return;
     }
     let mut c = s.conn();
+    if is_valkey(&mut c) {
+        eprintln!("skipping: Valkey classifies hexpired outside the HASH class");
+        return;
+    }
 
     expire_field_and_wait(&mut c, "hexpired mirrored via @hash", |c| {
         xlen(c, "events:hexpired") > 0

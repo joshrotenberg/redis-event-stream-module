@@ -606,6 +606,18 @@ pub fn server_has_command(conn: &mut redis::Connection, cmd: &str) -> bool {
     }
 }
 
+/// True when the server is Valkey (rather than Redis). Valkey reports
+/// `server_name:valkey` in `INFO server`; Redis has no such field. Used to gate
+/// tests over behavior that diverges between the two lineages — e.g. the
+/// keyspace-notification class a `hexpired` event carries (issue #93).
+pub fn is_valkey(conn: &mut redis::Connection) -> bool {
+    let info: String = redis::cmd("INFO")
+        .arg("server")
+        .query(conn)
+        .expect("INFO server");
+    info.lines().any(|l| l.trim() == "server_name:valkey")
+}
+
 /// Set a key with a short TTL and force lazy expiry, then wait for the
 /// expired event to land in `stream`, growing its length past `prior_len`.
 pub fn expire_key_and_wait(server: &TestServer, key: &str, stream: &str, prior_len: i64) {

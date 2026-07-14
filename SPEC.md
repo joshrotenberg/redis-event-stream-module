@@ -610,7 +610,7 @@ Integration tests spawn a real redis-server 7.2+ and load the built module (redi
 - `MAXLEN` trimming takes effect at the configured cap.
 - `maxlen 0` disables trimming: N writes yield exactly N entries, on the per-event stream and the firehose, via both the module-arg and `CONFIG SET` paths.
 - Non-UTF-8 module event names are captured, not a crash: the lossy-decoded name lands in `event` and the `_`-substituted stream, with `handler_panics` and `skipped_invalid` both zero; an empty name increments `skipped_invalid` and registers no stream (fired via the companion notifytest module, the only source of such names).
-- `hexpired` routes under an explicit bare name and under `@hash`; the default `expired` filter does not match it (counted `skipped_filtered`); the `del` accompanying the last field's expiry is captured. Capability-gated on `HEXPIRE` presence, not server version.
+- `hexpired` routes under an explicit bare name and under `@hash`; the default `expired` filter does not match it (counted `skipped_filtered`); the `del` accompanying the last field's expiry is captured. Capability-gated on `HEXPIRE` presence, not server version. Cross-server caveat: this class membership is Redis-specific — Valkey 9 emits `hexpired` under a different keyspace-notification class, so `@hash` does not select it there; the explicit `hexpired` bare name matches on both lineages. Filter by name, not class, for portable hash-field-expiry capture.
 - `eventstream.enabled no` drops events; re-enabling resumes without replay.
 - Invalid `CONFIG SET eventstream.events` values are rejected with an error reply.
 - Binary (non-UTF-8) key bytes round-trip exactly through the `key` field.
