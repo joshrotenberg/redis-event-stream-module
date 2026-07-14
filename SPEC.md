@@ -556,6 +556,10 @@ The safe deferred-write path requires `RedisModule_AddPostNotificationJob`, mapp
 
 The crate builds with the wrapper's `min-redis-compatibility-version-7-2` feature. Under it, the macro-generated registration path (commands, then configs) unwraps 7.2-only API pointers before `init` ever runs, so on any pre-7.2 server the load panics inside the wrapper and aborts the redis-server process; with `loadmodule` in redis.conf that is a startup abort with the panic in the log, not the polite error message a clean refusal would give (verified against the wrapper source at v2.1.3). The explicit `ctx.get_redis_version()` check in `init` is retained as defense in depth: it is the path that would fire if the wrapper's registration behavior ever becomes graceful, and it documents the requirement in code. Alternatives rejected: writing inside the callback on older servers (documented unsafe, loses atomicity) and buffering through a `DetachedContext` background thread (loses atomicity, can drop on crash, adds GIL contention).
 
+### Module version
+
+The integer version registered with `RedisModule_Init` — the `ver` field in `MODULE LIST` — is the crate version encoded as `major*10000 + minor*100 + patch`, the convention Redis's own modules use: 0.2.0 registers 200, 1.3.7 would register 10307. The value is computed at compile time from `CARGO_PKG_VERSION`, so it cannot drift from Cargo.toml; a version the encoding cannot represent (a non-`major.minor.patch` shape, a pre-release or build suffix, or minor/patch of 100 or more, which would collide with a neighboring release) fails the build rather than registering something wrong. `MODULE LIST` is the server-side surface for auditing which release a running server actually loaded — the check an in-place upgrade runbook needs. Gap markers' `module-version` field (section 9) carries the semver string but only appears when a marker is written and reflects marker-write time, not necessarily the currently loaded module.
+
 ## 15. v0.1 scope
 
 The primary need is durable expiration events. v0.1 is the smallest module that serves it correctly.

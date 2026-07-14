@@ -50,6 +50,49 @@ const MAX_EVENT_NAME_LEN: usize = 128;
 /// Maximum prefix length in bytes (SPEC.md section 7).
 const MAX_PREFIX_LEN: usize = 128;
 
+/// Integer module version registered with `RedisModule_Init` and reported as
+/// `ver` by `MODULE LIST` (SPEC.md section 14): `CARGO_PKG_VERSION` encoded as
+/// `major*10000 + minor*100 + patch`, the convention Redis's own modules use
+/// (0.2.0 -> 200). Derived at compile time so it cannot drift from Cargo.toml;
+/// a version the encoder cannot represent fails the build, never registers 0.
+const MODULE_VERSION: i32 = encode_semver(env!("CARGO_PKG_VERSION"));
+
+/// Encodes a plain `major.minor.patch` semver string as
+/// `major*10000 + minor*100 + patch`. Evaluated in const context, so every
+/// rejection below is a compile error: non-digit bytes (including pre-release
+/// or build suffixes, whose ordering the integer cannot express), a component
+/// count other than three, an empty component, or minor/patch >= 100, which
+/// would collide with a neighboring release's encoding.
+const fn encode_semver(v: &str) -> i32 {
+    let bytes = v.as_bytes();
+    let mut parts = [0i64; 3];
+    let mut part = 0;
+    let mut digits = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'.' {
+            assert!(digits > 0, "empty version component");
+            assert!(part < 2, "more than three version components");
+            part += 1;
+            digits = 0;
+        } else {
+            assert!(b.is_ascii_digit(), "non-digit in version");
+            parts[part] = parts[part] * 10 + (b - b'0') as i64;
+            digits += 1;
+            // Bounds the accumulator, so overflow checks are unnecessary.
+            assert!(parts[part] <= 9999, "version component out of range");
+        }
+        i += 1;
+    }
+    assert!(part == 2 && digits > 0, "version must be major.minor.patch");
+    assert!(
+        parts[1] < 100 && parts[2] < 100,
+        "minor and patch must be under 100 to encode unambiguously"
+    );
+    (parts[0] * 10000 + parts[1] * 100 + parts[2]) as i32
+}
+
 // Counters (SPEC.md section 13): process-lifetime, monotonic, reset on load.
 static FORWARDED: AtomicU64 = AtomicU64::new(0);
 /// Copies written to the combined firehose stream when `eventstream.firehose`
@@ -1821,7 +1864,7 @@ fn cmd_streams(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
 #[cfg(not(test))]
 redis_module! {
     name: "eventstream",
-    version: 1,
+    version: MODULE_VERSION,
     allocator: (redis_module::alloc::RedisAlloc, redis_module::alloc::RedisAlloc),
     data_types: [],
     init: init,
@@ -2095,5 +2138,50 @@ mod tests {
             assert_eq!(u32::from(crc16(tag.as_bytes())) % SLOT_COUNT, slot);
             assert!(tag.bytes().all(|b| b.is_ascii_alphanumeric()), "{tag}");
         }
+    }
+
+    #[test]
+    fn semver_encoding_pins() {
+        // The `MODULE LIST` `ver` encoding (SPEC.md section 14): these vectors
+        // are the documented mapping, so a change here is a breaking change to
+        // the operator-facing version surface.
+        assert_eq!(encode_semver("0.1.0"), 100);
+        assert_eq!(encode_semver("0.2.0"), 200);
+        assert_eq!(encode_semver("1.3.7"), 10307);
+        assert_eq!(encode_semver("12.34.56"), 123456);
+    }
+
+    #[test]
+    fn module_version_tracks_crate_version() {
+        // Independent parse of CARGO_PKG_VERSION through std, so a bug in the
+        // const encoder cannot silently agree with itself.
+        let mut parts = env!("CARGO_PKG_VERSION")
+            .split('.')
+            .map(|p| p.parse::<i32>().expect("numeric component"));
+        let (maj, min, pat) = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        assert_eq!(parts.next(), None);
+        assert_eq!(MODULE_VERSION, maj * 10000 + min * 100 + pat);
+    }
+
+    #[test]
+    #[should_panic(expected = "major.minor.patch")]
+    fn semver_encoding_rejects_two_components() {
+        encode_semver("0.2");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-digit")]
+    fn semver_encoding_rejects_prerelease_suffix() {
+        encode_semver("1.0.0-rc.1");
+    }
+
+    #[test]
+    #[should_panic(expected = "under 100")]
+    fn semver_encoding_rejects_wide_minor() {
+        encode_semver("1.100.0");
     }
 }

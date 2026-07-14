@@ -44,6 +44,10 @@ The server's `notify-keyspace-events` setting is not required: module
 subscribers receive keyspace events regardless of that setting, which gates
 pub/sub delivery only (SPEC.md section 7).
 
+`MODULE LIST` reports the crate version as `ver`, encoded
+`major*10000 + minor*100 + patch` (0.2.0 reports `ver 200`), so the loaded
+release is auditable server-side (SPEC.md section 14).
+
 Quick check in `redis-cli` (the default configuration captures expirations
 only):
 

@@ -100,6 +100,12 @@ Each marker carries `action` and `module-version`. Markers replicate, respect
 `maxmemory`, and persist like any other entry, and only a master writes them
 (replicas receive them via replication).
 
+A marker's `module-version` reflects marker-write time, not necessarily the
+module currently loaded. To audit which release a running server has loaded,
+use `MODULE LIST`: the module registers its crate version as the `ver` field,
+encoded `major*10000 + minor*100 + patch`, so 0.2.0 reports `ver 200` and a
+future 1.3.7 would report `ver 10307`.
+
 ### Delimiting a gap window
 
 The window between a `disabled` or `unloading` marker and the next `enabled` or

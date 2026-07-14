@@ -34,6 +34,50 @@ fn info_section_has_all_fields() {
 }
 
 #[test]
+fn module_list_reports_encoded_crate_version() {
+    // The `ver` field is CARGO_PKG_VERSION encoded major*10000 + minor*100 +
+    // patch (SPEC.md section 14, issue #87): the server-side check an upgrade
+    // runbook uses to confirm which release is actually loaded.
+    let s = TestServer::start(&[]);
+    let mut c = s.conn();
+
+    let mut parts = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .map(|p| p.parse::<i64>().expect("numeric component"));
+    let expected =
+        parts.next().unwrap() * 10000 + parts.next().unwrap() * 100 + parts.next().unwrap();
+
+    let as_str = |v: &redis::Value| match v {
+        redis::Value::SimpleString(s) => Some(s.clone()),
+        redis::Value::BulkString(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        _ => None,
+    };
+    // RESP2 reply: one flat [name, <name>, ver, <ver>, ...] array per module.
+    let modules: Vec<Vec<redis::Value>> = redis::cmd("MODULE")
+        .arg("LIST")
+        .query(&mut c)
+        .expect("MODULE LIST");
+    let entry = modules
+        .iter()
+        .find(|m| {
+            m.chunks(2).any(|kv| {
+                kv.len() == 2
+                    && as_str(&kv[0]).as_deref() == Some("name")
+                    && as_str(&kv[1]).as_deref() == Some("eventstream")
+            })
+        })
+        .expect("eventstream listed");
+    let ver = entry
+        .chunks(2)
+        .find_map(|kv| match kv {
+            [k, redis::Value::Int(n)] if as_str(k).as_deref() == Some("ver") => Some(*n),
+            _ => None,
+        })
+        .expect("ver field present");
+    assert_eq!(ver, expected);
+}
+
+#[test]
 fn counters_track_capture_activity() {
     let s = TestServer::start(&["events", "set"]);
     let mut c = s.conn();
