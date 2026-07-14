@@ -1,0 +1,145 @@
+name: Chaos
+
+# Scheduled run of the cluster chaos/load suite (chaos/run.sh, SPEC.md section
+# 10, issue #99). The suite stands up multi-node clusters and drives tens of
+# thousands of events through real reshards, failovers, and mass expirations to
+# assert the data-safety properties. It is too slow and the failover scenario
+# too timing-sensitive to gate PRs (see chaos/README.md), so it runs weekly
+# instead: enough to catch a regression within a week of it landing on main,
+# which matches how this module ships (manual releases).
+#
+# Trigger choice: weekly schedule + manual dispatch, NOT pull_request/push.
+# Server: the newest line in ci.yml's matrix only (redis 8.8.0), reusing the
+# same source-build + cache key so this job rides ci.yml's cached build. The
+# full 7.2/7.4/8/valkey matrix stays on the integration suite.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # 06:00 UTC every Monday
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Scenario to run"
+        type: choice
+        default: all
+        options:
+          - all
+          - reshard
+          - failover
+          - massexpiry
+          - repeated
+
+env:
+  CARGO_TERM_COLOR: always
+  REDIS_VERSION: 8.8.0
+
+# gh issue create/comment on a failed scheduled run needs issues:write.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SERVER_DIR: ${{ github.workspace }}/.server/redis-8
+      # Resolved once here so schedule (no inputs) and dispatch share one value.
+      SCENARIO: ${{ github.event.inputs.scenario || 'all' }}
+      # Pin the scratch dir to a known path and keep it, so the failure-artifact
+      # step can upload the per-node redis.log / soak.log the script leaves.
+      CHAOS_WORK_DIR: ${{ github.workspace }}/chaos-work
+      CHAOS_KEEP_WORK: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Same path and key as ci.yml's redis-8 integration leg, so this job
+      # reuses the server build CI has already cached.
+      - name: Cache server build
+        id: server-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SERVER_DIR }}
+          key: server-redis-8-${{ env.REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build redis from source
+        if: steps.server-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+          mkdir -p "$SERVER_DIR"
+          curl -fsSL "https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz" \
+            | tar xz -C "$SERVER_DIR" --strip-components=1
+          make -C "$SERVER_DIR" -j"$(nproc)" BUILD_TLS=no
+
+      - name: Resolve binaries and assert version
+        run: |
+          set -euo pipefail
+          SRV="$SERVER_DIR/src/redis-server"
+          CLI="$SERVER_DIR/src/redis-cli"
+          test -x "$SRV" || { echo "server binary missing: $SRV"; exit 1; }
+          test -x "$CLI" || { echo "cli binary missing: $CLI"; exit 1; }
+          # chaos/run.sh reads REDIS_SERVER_BIN / REDIS_CLI_BIN (not the TEST_
+          # prefix the cargo integration suite uses).
+          echo "REDIS_SERVER_BIN=$SRV" >> "$GITHUB_ENV"
+          echo "REDIS_CLI_BIN=$CLI" >> "$GITHUB_ENV"
+          "$SRV" --version
+          # Fail loudly if the built binary is not the pinned version, so a
+          # stray server on PATH cannot silently test the wrong build.
+          "$SRV" --version | grep -q "$REDIS_VERSION" \
+            || { echo "version mismatch: expected $REDIS_VERSION"; exit 1; }
+
+      # Gating scenarios: deterministic, so a failure here fails the run.
+      # Skipped when a dispatch selects only the failover scenario.
+      - name: Gating scenarios (reshard, massexpiry, repeated)
+        if: env.SCENARIO == 'all' || env.SCENARIO == 'reshard' || env.SCENARIO == 'massexpiry' || env.SCENARIO == 'repeated'
+        run: |
+          set -uo pipefail
+          if [ "$SCENARIO" = all ]; then
+            chaos/run.sh reshard && chaos/run.sh massexpiry && chaos/run.sh repeated
+          else
+            chaos/run.sh "$SCENARIO"
+          fi
+
+      # Failover is timing-sensitive (replica promotion), so a single flake is
+      # retried once; two consecutive failures still fail the job. Skipped when
+      # a dispatch selects a non-failover scenario.
+      - name: Failover scenario (retried once)
+        if: env.SCENARIO == 'all' || env.SCENARIO == 'failover'
+        run: |
+          set -uo pipefail
+          chaos/run.sh failover || {
+            echo "failover flaked once; retrying after a short pause"
+            sleep 5
+            chaos/run.sh failover
+          }
+
+      # Open (or comment on) a bug issue only for scheduled failures; a manual
+      # dispatch failure is visible to the person who triggered it.
+      - name: Report scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Chaos suite failed on the weekly schedule"
+          existing="$(gh issue list --state open --label bug --label area:ci \
+            --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Chaos suite failed again: $RUN_URL"
+          else
+            gh issue create --title "$title" --label bug --label area:ci \
+              --body "The weekly chaos run failed. Logs and per-node redis.log are attached to the run: $RUN_URL"
+          fi
+
+      - name: Upload chaos work dir on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-logs
+          path: ${{ env.CHAOS_WORK_DIR }}
+          if-no-files-found: ignore
+          retention-days: 5
