@@ -52,6 +52,11 @@ const MAX_PREFIX_LEN: usize = 128;
 
 // Counters (SPEC.md section 13): process-lifetime, monotonic, reset on load.
 static FORWARDED: AtomicU64 = AtomicU64::new(0);
+/// Copies written to the combined firehose stream when `eventstream.firehose`
+/// is on (issue #58). Kept apart from `FORWARDED` so that counter keeps
+/// meaning "captured events", not "XADDs issued"; firehose write failures
+/// share the existing `dropped_*` counters.
+static FIREHOSE_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_XADD_ERROR: AtomicU64 = AtomicU64::new(0);
 static DROPPED_OOM: AtomicU64 = AtomicU64::new(0);
 static DROPPED_DEFER_ERROR: AtomicU64 = AtomicU64::new(0);
@@ -145,6 +150,11 @@ fn extra_classes_named(f: &ParsedFilter) -> NotifyEvent {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
+/// `eventstream.firehose` (issue #58): when on, every captured event is also
+/// written to the combined `<prefix><seg>#firehose` stream. Off by default
+/// (it doubles write amplification per captured event, SPEC.md section 11);
+/// runtime-mutable, read in the post-notification job.
+static FIREHOSE: AtomicBool = AtomicBool::new(false);
 static MAXLEN: MaxlenConfig = MaxlenConfig {
     value: AtomicI64::new(10_000),
 };
@@ -866,9 +876,12 @@ enum MirrorOutcome {
 }
 
 /// Write one mirrored entry to `<prefix><seg><suffix>`, and on the first write
-/// to a stream register it in `<prefix><seg>#streams`. Returns a classified
-/// outcome; the caller counts drops and, on [`MirrorOutcome::SlotMigrated`],
-/// re-pins. Runs only in a write-safe context (a post-notification job).
+/// to a stream register it in `<prefix><seg>#streams`. A success increments
+/// `counter`: `FORWARDED` for per-event entries, `FIREHOSE_FORWARDED` for
+/// firehose copies (issue #58), so `forwarded` stays a pure captured-event
+/// count. Returns a classified outcome; the caller counts drops and, on
+/// [`MirrorOutcome::SlotMigrated`], re-pins. Runs only in a write-safe context
+/// (a post-notification job).
 #[allow(clippy::too_many_arguments)]
 fn mirror_entry(
     ctx: &Context,
@@ -879,6 +892,7 @@ fn mirror_entry(
     key: &[u8],
     db: &str,
     maxlen: i64,
+    counter: &AtomicU64,
 ) -> MirrorOutcome {
     let stream = format!("{prefix}{seg}{suffix}");
     let registry = format!("{prefix}{seg}#streams");
@@ -913,7 +927,7 @@ fn mirror_entry(
     let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
     match res {
         Ok(_) => {
-            FORWARDED.fetch_add(1, Ordering::Relaxed);
+            counter.fetch_add(1, Ordering::Relaxed);
             // A successful write proves current ownership, so reset the probe
             // budget: without this, a tag verified once (after an unrelated
             // transient failure) would never be re-probed, and a later
@@ -993,7 +1007,9 @@ fn repin_and_retry(
     // A `repinned` gap marker on the new control stream delimits the window
     // where this node's stream name changed (SPEC.md section 9).
     write_marker(ctx, &format!("{prefix}{seg}#control"), "repinned", maxlen);
-    match mirror_entry(ctx, prefix, &seg, suffix, event, key, db, maxlen) {
+    match mirror_entry(
+        ctx, prefix, &seg, suffix, event, key, db, maxlen, &FORWARDED,
+    ) {
         MirrorOutcome::Written => {}
         MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
         // Still refused (slot in flux): a migration-window drop, delimited by
@@ -1010,6 +1026,60 @@ fn repin_and_retry(
             &DROPPED_MIGRATING,
             &LOGGED_MIGRATING,
             &format!("{msg} (after re-pin; entry dropped in migration window)"),
+        ),
+        MirrorOutcome::Failed(msg) => {
+            count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
+        }
+    }
+}
+
+/// Write the firehose copy of a captured event (issue #58): a second `XADD`
+/// to `<prefix><seg>#firehose` with fields identical to the per-event entry,
+/// the same `MAXLEN ~` trimming and call options. Runs after the per-event
+/// outcome is settled and succeeds or fails independently of it; a success
+/// counts in `firehose_forwarded`, a failure in the existing `dropped_*`
+/// counters. The tag segment is re-resolved so a re-pin performed by the
+/// per-event write lands the copy on the new tag. A cluster refusal here is
+/// counted, never re-pinned: slot ownership cannot change between the two
+/// XADDs (both run inside one execution unit), so a refusal only occurs in a
+/// migration window the per-event write already re-pinned through, and a
+/// second re-pin for the same event would double the `repinned` marker and
+/// the one-retry bound. The ownership-probe fallback is likewise left to the
+/// per-event path, which hits the same failure on the same tag first.
+fn mirror_firehose(ctx: &Context, prefix: &str, event: &[u8], key: &[u8], db: &str, maxlen: i64) {
+    let seg = match tag_segment(ctx) {
+        Some(s) => s,
+        None => {
+            count_no_slot_drop(ctx);
+            return;
+        }
+    };
+    match mirror_entry(
+        ctx,
+        prefix,
+        &seg,
+        "#firehose",
+        event,
+        key,
+        db,
+        maxlen,
+        &FIREHOSE_FORWARDED,
+    ) {
+        MirrorOutcome::Written => {}
+        MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
+        MirrorOutcome::SlotMigrated => count_drop(
+            ctx,
+            &DROPPED_MIGRATING,
+            &LOGGED_MIGRATING,
+            "firehose XADD refused as non-local; copy dropped in migration \
+             window (dropped_migrating); one re-pin per event, owned by the \
+             per-event write",
+        ),
+        MirrorOutcome::Migrating(msg) => count_drop(
+            ctx,
+            &DROPPED_MIGRATING,
+            &LOGGED_MIGRATING,
+            &format!("{msg} (firehose copy dropped in migration window)"),
         ),
         MirrorOutcome::Failed(msg) => {
             count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg)
@@ -1107,6 +1177,7 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                 &key_owned,
                 &db_s,
                 maxlen,
+                &FORWARDED,
             ) {
                 MirrorOutcome::Written => {}
                 MirrorOutcome::Oom(msg) => count_drop(ctx, &DROPPED_OOM, &LOGGED_OOM, &msg),
@@ -1143,6 +1214,19 @@ fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &str, key: &
                         count_drop(ctx, &DROPPED_XADD_ERROR, &LOGGED_XADD_ERROR, &msg);
                     }
                 }
+            }
+            // The firehose copy runs after the per-event outcome is settled,
+            // gated on the runtime-mutable config; the two writes succeed or
+            // fail independently (issue #58).
+            if FIREHOSE.load(Ordering::Relaxed) {
+                mirror_firehose(
+                    ctx,
+                    &prefix_owned,
+                    event_owned.as_bytes(),
+                    &key_owned,
+                    &db_s,
+                    maxlen,
+                );
             }
         });
     });
@@ -1326,9 +1410,10 @@ fn deinit(ctx: &Context) -> Status {
         }
     }
     ctx.log_notice(&format!(
-        "eventstream unloading: forwarded={} dropped={} skipped_self={} skipped_filtered={} \
-         skipped_invalid={} control_markers={} active_streams={}",
+        "eventstream unloading: forwarded={} firehose_forwarded={} dropped={} skipped_self={} \
+         skipped_filtered={} skipped_invalid={} control_markers={} active_streams={}",
         FORWARDED.load(Ordering::Relaxed),
+        FIREHOSE_FORWARDED.load(Ordering::Relaxed),
         DROPPED_XADD_ERROR.load(Ordering::Relaxed)
             + DROPPED_OOM.load(Ordering::Relaxed)
             + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
@@ -1357,6 +1442,10 @@ fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
         .add_section("stats")
         .field("enabled", ENABLED.load(Ordering::Relaxed) as i64)?
         .field("forwarded", FORWARDED.load(Ordering::Relaxed))?
+        .field(
+            "firehose_forwarded",
+            FIREHOSE_FORWARDED.load(Ordering::Relaxed),
+        )?
         .field("dropped", dropped)?
         .field(
             "dropped_xadd_error",
@@ -1421,9 +1510,13 @@ fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
         + DROPPED_OOM.load(Ordering::Relaxed)
         + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
         + DROPPED_MIGRATING.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 18] = [
+    let pairs: [(&str, i64); 19] = [
         ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
         ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
+        (
+            "firehose_forwarded",
+            FIREHOSE_FORWARDED.load(Ordering::Relaxed) as i64,
+        ),
         ("dropped", dropped as i64),
         (
             "dropped_xadd_error",
@@ -1545,6 +1638,10 @@ redis_module! {
         ],
         bool: [
             ["enabled", &ENABLED, true, ConfigurationFlags::DEFAULT, Some(Box::new(enabled_changed))],
+            // No on-changed callback: unlike `enabled`, toggling the firehose
+            // opens no capture gap (per-event mirroring continues), so there
+            // is no marker to record (issue #58).
+            ["firehose", &FIREHOSE, false, ConfigurationFlags::DEFAULT, None],
         ],
         // The expansion with module_args_as_configuration requires all four
         // config-type lists (verified against v2.1.3; SPEC.md section 17 Q4).
@@ -1642,6 +1739,15 @@ mod tests {
         assert_eq!(sanitize("foo bar"), "foo_bar");
         assert_eq!(sanitize("foo?bar"), "foo_bar");
         assert_eq!(sanitize("a#b"), "a_b");
+    }
+
+    #[test]
+    fn sanitize_cannot_alias_firehose() {
+        // `#` is outside the sanitizer alphabet, so no event name can route
+        // to the reserved firehose key (issue #58): a raw `#firehose` event
+        // lands in `<prefix>_firehose`, never `<prefix>#firehose`.
+        assert_eq!(sanitize("#firehose"), "_firehose");
+        assert!(!sanitize("evil#firehose").contains('#'));
     }
 
     #[test]

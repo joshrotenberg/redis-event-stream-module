@@ -162,8 +162,15 @@ fn per_node_mode_forms_cluster_and_captures_on_every_node() {
 fn per_node_single_shard_captures() {
     // Single shard: one master owns all 16384 slots. This is the safest cluster
     // deployment for per-node mode and must just work, with a normal client.
-    let s =
-        TestServer::start_single_shard_cluster(&["events", "set", "cluster-streams", "per-node"]);
+    // The firehose rides along to pin its per-node placement (issue #58).
+    let s = TestServer::start_single_shard_cluster(&[
+        "events",
+        "set",
+        "cluster-streams",
+        "per-node",
+        "firehose",
+        "yes",
+    ]);
     let mut c = s.conn();
     for i in 0..20 {
         let _: () = redis::cmd("SET")
@@ -189,6 +196,12 @@ fn per_node_single_shard_captures() {
     };
     assert!(!tag.is_empty(), "single node must pin a tag");
     assert!(xlen(&mut c, &format!("events:{{{tag}}}set")) > 0);
+    // The firehose composes with the tag segment exactly like the per-event
+    // streams (`events:{tag}#firehose`) and holds a copy of every capture;
+    // no untagged `events:#firehose` may appear in per-node mode.
+    assert_eq!(info_field(&mut c, "firehose_forwarded"), 20);
+    assert_eq!(xlen(&mut c, &format!("events:{{{tag}}}#firehose")), 20);
+    assert_eq!(xlen(&mut c, "events:#firehose"), 0);
 }
 
 #[test]
@@ -196,10 +209,20 @@ fn per_node_repins_after_slot_migration() {
     // A reshard that moves a node's pinned slot must not stop capture: the node
     // detects the local-refusal on its next mirrored write, re-pins to a slot it
     // still owns, and keeps capturing on a new tag. The old entries follow the
-    // migrated slot to its new owner and stay reachable (issue #46).
-    let cluster =
-        TestCluster::try_start(3, Some(&["events", "set", "cluster-streams", "per-node"]))
-            .expect("per-node cluster forms");
+    // migrated slot to its new owner and stay reachable (issue #46). The
+    // firehose rides along to pin that it survives the re-pin (issue #58).
+    let cluster = TestCluster::try_start(
+        3,
+        Some(&[
+            "events",
+            "set",
+            "cluster-streams",
+            "per-node",
+            "firehose",
+            "yes",
+        ]),
+    )
+    .expect("per-node cluster forms");
     let n = cluster.num_masters();
     assert_eq!(n, 3);
     let mut conn = cluster.cluster_conn();
@@ -279,6 +302,16 @@ fn per_node_repins_after_slot_migration() {
         .query(&mut conn)
         .expect("new stream len");
     assert!(new_len > 0, "capture resumed on the new tag");
+
+    // The firehose re-pinned with everything else: the copy of the event that
+    // triggered the re-pin (and of every later capture) lands under the new
+    // tag, because the copy resolves the tag segment after the per-event
+    // write settled (issue #58).
+    let firehose_len: i64 = redis::cmd("XLEN")
+        .arg(format!("events:{{{new_tag}}}#firehose"))
+        .query(&mut conn)
+        .expect("new firehose len");
+    assert!(firehose_len > 0, "firehose resumed on the new tag");
 
     // The re-pin boundary is marked on the new control stream.
     let control_len: i64 = redis::cmd("XLEN")
