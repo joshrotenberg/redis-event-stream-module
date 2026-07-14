@@ -344,6 +344,19 @@ impl TestServer {
         TestServer { handle, port, dir }
     }
 
+    /// The server's log contents, for asserting the module's one-time log
+    /// lines. The wrapper keeps each node's files in a `node-<port>`
+    /// subdirectory of the working dir and defaults the logfile there;
+    /// readiness detection is PING-based, so nothing else consumes the log.
+    pub fn log(&self) -> String {
+        let path = self
+            .dir
+            .path()
+            .join(format!("node-{}", self.port))
+            .join("redis.log");
+        std::fs::read_to_string(path).expect("read server log")
+    }
+
     /// Restart on the same working directory (persistence across restarts).
     /// The previous process must already be stopped.
     pub fn restart(self, module_args: &[&str]) -> TestServer {
