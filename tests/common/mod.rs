@@ -618,6 +618,29 @@ pub fn is_valkey(conn: &mut redis::Connection) -> bool {
     info.lines().any(|l| l.trim() == "server_name:valkey")
 }
 
+/// The running server's `(major, minor)` from `INFO server`'s `redis_version`.
+/// Used by the SPEC.md section 15 load-refusal test (issue #77) to record the
+/// harness floor: the version gate can only be exercised for real on a pre-7.2
+/// server, and the CI matrix floor is 7.2.8, so the test asserts the running
+/// server is >= 7.2 (the supported side of the gate) and that the module loaded
+/// without the version-refusal log line. `redis_version` is present on both
+/// Redis and Valkey.
+pub fn server_version(conn: &mut redis::Connection) -> (u32, u32) {
+    let info: String = redis::cmd("INFO")
+        .arg("server")
+        .query(conn)
+        .expect("INFO server");
+    let raw = info
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("redis_version:"))
+        .expect("redis_version in INFO server")
+        .trim();
+    let mut parts = raw.split('.').map(|p| p.parse::<u32>().expect("numeric"));
+    let major = parts.next().expect("major");
+    let minor = parts.next().expect("minor");
+    (major, minor)
+}
+
 /// Set a key with a short TTL and force lazy expiry, then wait for the
 /// expired event to land in `stream`, growing its length past `prior_len`.
 pub fn expire_key_and_wait(server: &TestServer, key: &str, stream: &str, prior_len: i64) {

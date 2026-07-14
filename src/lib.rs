@@ -2478,6 +2478,20 @@ extern "C" fn raw_keyspace_event(
     raw::Status::Ok as c_int
 }
 
+/// The 7.2 floor, where `RedisModule_AddPostNotificationJob` (the safe
+/// deferred-write path, SPEC.md section 14) first appears. Pulled out of `init`
+/// so the boundary is unit-testable: `init` is `#[cfg(not(test))]`, so the
+/// mocked-version variant of the SPEC.md section 15 refusal check has to assert
+/// against a pure function rather than the gate in context (issue #77). This is
+/// defense in depth on a real pre-7.2 server: the wrapper unwraps 7.2-only API
+/// pointers during macro-generated registration, before `init` runs, so the
+/// load aborts in the wrapper and this gate never fires there — it is the path
+/// that would refuse cleanly if registration ever became graceful (SPEC.md
+/// section 14).
+fn version_supported(major: i32, minor: i32) -> bool {
+    (major, minor) >= (7, 2)
+}
+
 /// Module init: version and topology gates (SPEC.md sections 10 and 14), the
 /// keyspace subscription, then log the effective configuration. Compiled out
 /// of unit-test builds along with the raw callback it registers.
@@ -2485,7 +2499,7 @@ extern "C" fn raw_keyspace_event(
 fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     match ctx.get_redis_version() {
         Ok(v) => {
-            if (v.major, v.minor) < (7, 2) {
+            if !version_supported(v.major, v.minor) {
                 ctx.log_warning(&format!(
                     "eventstream requires Redis 7.2 or newer (RM_AddPostNotificationJob); \
                      running server is {}.{}.{}",
@@ -2498,6 +2512,23 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
             ctx.log_warning(&format!("eventstream: cannot determine Redis version: {e}"));
             return Status::Err;
         }
+    }
+
+    // Direct API-pointer check beside the version gate: the safe deferred-write
+    // path is `RedisModule_AddPostNotificationJob`, whose bound pointer is null
+    // on any server predating it (7.2) — the same null-pointer signal the 7.4+
+    // canonical-name API gives in `select_owned_tag`. Checking the pointer
+    // rather than the version string refuses cleanly even if a server ever
+    // reports >= 7.2 without providing the symbol. Like the version gate this
+    // is unreachable on real old servers today (the wrapper unwraps the pointer
+    // during registration, before `init`, and aborts there); retained for the
+    // day registration becomes graceful (SPEC.md section 14, issue #77).
+    if unsafe { raw::RedisModule_AddPostNotificationJob }.is_none() {
+        ctx.log_warning(
+            "eventstream requires RedisModule_AddPostNotificationJob (Redis 7.2 or newer); the \
+             running server does not provide it; refusing to load.",
+        );
+        return Status::Err;
     }
 
     if ctx.get_flags().contains(ContextFlags::CLUSTER) {
@@ -3771,6 +3802,24 @@ mod tests {
             assert_eq!(u32::from(crc16(tag.as_bytes())) % SLOT_COUNT, slot);
             assert!(tag.bytes().all(|b| b.is_ascii_alphanumeric()), "{tag}");
         }
+    }
+
+    #[test]
+    fn version_gate_refuses_below_7_2() {
+        // The SPEC.md section 15 refusal check, mocked-version variant (issue
+        // #77): the real pre-7.2 refusal aborts in the wrapper before `init`
+        // runs and CI has no pre-7.2 server, so the 7.2 floor is pinned here
+        // against the extracted gate. Below 7.2 refuses; 7.2 (where
+        // `RM_AddPostNotificationJob` lands) and every later line the CI matrix
+        // and the supported Redis/Valkey lineages report is accepted. 7.0 is
+        // closed issue #9's example server.
+        assert!(!version_supported(6, 2));
+        assert!(!version_supported(7, 0));
+        assert!(!version_supported(7, 1));
+        assert!(version_supported(7, 2));
+        assert!(version_supported(7, 4));
+        assert!(version_supported(8, 0));
+        assert!(version_supported(9, 0));
     }
 
     #[test]
