@@ -59,9 +59,9 @@ cargo test --release --tests
 ## Conventions
 
 - Conventional-commit prefixes on commit messages and PR titles (`feat:`,
-  `fix:`, `docs:`, `test:`, `ci:`, `chore:`). Releases and the changelog are
-  generated from them by release-plz, so the prefix you choose is
-  user-visible.
+  `fix:`, `docs:`, `test:`, `ci:`, `chore:`). The CHANGELOG is hand-written, not
+  generated, but the prefix groups the change and is user-visible in PR history,
+  so choose it deliberately.
 - Work on a feature branch and open a pull request; PRs that change behavior
   include tests that pin the new behavior and SPEC.md updates in the same PR.
 - Integration tests must converge through polling (`wait_until` in
@@ -72,6 +72,26 @@ cargo test --release --tests
   PRs. The `redis-module`/`redis-module-macros` git-tag pin in Cargo.toml is
   excluded from that automation and is bumped by hand when
   RedisLabsModules/redismodule-rs tags a new release.
+
+## Releasing
+
+Releases are two manual steps plus one automated step:
+
+1. Open a "chore: release prep for vX.Y.Z" PR that bumps `version` in
+   `Cargo.toml` and adds a `## [X.Y.Z]` section at the top of `CHANGELOG.md`.
+2. Merge it to main.
+3. Tag the merged commit and push the tag:
+
+   ```sh
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+The tag push triggers `.github/workflows/release.yml`, which verifies that the
+tag, `Cargo.toml`, and the top CHANGELOG section all agree, creates the GitHub
+release from that CHANGELOG section, then builds and attaches the prebuilt
+`.so`/`.dylib` artifacts (linux-x86_64, linux-aarch64, macos-aarch64,
+macos-x86_64) with sha256 checksums and Sigstore build-provenance attestations.
+release-plz does not release this crate; see `release-plz.toml` for why.
 
 ## Reporting problems
 

@@ -1,0 +1,84 @@
+name: Release
+
+# Automates step 3 of the release flow (#85): on a pushed vX.Y.Z tag, create
+# the GitHub release from the matching CHANGELOG section, then build and attach
+# the prebuilt artifacts. Steps 1-2 (the "chore: release prep" PR that bumps
+# Cargo.toml and adds the CHANGELOG entry, then merging it) stay manual; the
+# releaser tags the merged commit and pushes the tag to trigger this.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# contents: write for the create-release job; id-token/attestations: write are
+# passed down to the reusable artifacts workflow for build-provenance signing.
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  create-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify tag, Cargo.toml, and CHANGELOG agree
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          CHANGELOG_VERSION="$(grep -m1 -E '^## \[[0-9]' CHANGELOG.md \
+            | sed -E 's/^## \[([^]]+)\].*/\1/')"
+          echo "tag=${VERSION} cargo=${CARGO_VERSION} changelog=${CHANGELOG_VERSION}"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::tag ${VERSION} does not match Cargo.toml ${CARGO_VERSION}"
+            exit 1
+          fi
+          if [ "$VERSION" != "$CHANGELOG_VERSION" ]; then
+            echo "::error::tag ${VERSION} does not match top CHANGELOG section ${CHANGELOG_VERSION}"
+            exit 1
+          fi
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Extract the ## [VERSION] section: print from its header up to the
+          # next ## [ header (the awk one-liner the manual step 3 used).
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" {f=1; print; next}
+            /^## \[/ {f=0}
+            f
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::no CHANGELOG section found for ${VERSION}"
+            exit 1
+          fi
+          # Append the shared install/verify snippet (shasum + gh attestation
+          # verify + --loadmodule). Kept in a committed file so the backticks
+          # need no YAML-heredoc gymnastics.
+          cat .github/release-install-notes.md >> notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --target main \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md
+
+  artifacts:
+    name: Build and attach artifacts
+    needs: create-release
+    uses: ./.github/workflows/release-artifacts.yml
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    with:
+      tag: ${{ github.ref_name }}

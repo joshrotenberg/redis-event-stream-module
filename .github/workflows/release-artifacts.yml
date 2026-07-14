@@ -1,11 +1,26 @@
 name: Release artifacts
 
+# contents: write         - upload artifacts to the release.
+# id-token: write         - OIDC token for keyless Sigstore signing (#104).
+# attestations: write     - store the build-provenance attestation (#104).
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 on:
   release:
     types: [published]
+  # Called by release.yml after it creates the release from a pushed tag.
+  # Releases created by a workflow using GITHUB_TOKEN do not emit a
+  # `release: published` event, so the automated path invokes this workflow
+  # directly and passes the tag rather than relying on that trigger (#85).
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to upload artifacts to."
+        required: true
+        type: string
   # Self-validation: build (but do not upload to a release) whenever this
   # workflow file itself changes in a PR, so runner and build breakage is
   # caught before a release depends on it.
@@ -34,14 +49,32 @@ jobs:
           - name: macos-aarch64
             runner: macos-14
             ext: dylib
+          # No Intel macOS runner exists (macos-13 is retired), so x86_64 macOS
+          # is cross-compiled from the arm64 runner (#101). A musl leg for
+          # Alpine/musl Redis images is deliberately left to a follow-up: it
+          # serves only musl-linked servers, not older-glibc hosts (the
+          # ubuntu-22.04 pin already covers those), and its smoke test needs an
+          # Alpine container.
+          - name: macos-x86_64
+            runner: macos-14
+            ext: dylib
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release cdylib
-        run: cargo build --release
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --target "${{ matrix.target }}"
+          else
+            cargo build --release
+          fi
 
       - name: Package artifact with checksum
         id: pkg
@@ -50,14 +83,33 @@ jobs:
           VERSION="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           NAME="redis-event-stream-module-${VERSION}-${{ matrix.name }}.${{ matrix.ext }}"
+          if [ -n "${{ matrix.target }}" ]; then
+            SRC="target/${{ matrix.target }}/release/libredis_event_stream_module.${{ matrix.ext }}"
+          else
+            SRC="target/release/libredis_event_stream_module.${{ matrix.ext }}"
+          fi
           mkdir -p dist
-          cp "target/release/libredis_event_stream_module.${{ matrix.ext }}" "dist/${NAME}"
+          cp "${SRC}" "dist/${NAME}"
           cd dist
           shasum -a 256 "${NAME}" > "${NAME}.sha256"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           shasum -a 256 -c "${NAME}.sha256"
 
+      # Attest each uploaded artifact so consumers can trace the .so/.dylib back
+      # to this repo, commit, and workflow run (#104). Skipped on the PR
+      # self-validation path, which builds but never uploads: attesting a
+      # throwaway artifact is noise and the OIDC claims would name the PR ref.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ steps.pkg.outputs.name }}
+
       - name: Smoke test the artifact loads
+        # Cross-compiled legs (matrix.target set) cannot run natively here, and
+        # Rosetta only helps with an x86_64 redis-server; skip the load smoke,
+        # mirroring the too-old-distro skip below.
+        if: matrix.target == ''
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -81,17 +133,21 @@ jobs:
           echo "artifact loads cleanly"
 
       - name: Upload to the release
-        if: github.event_name == 'release'
+        # release: published (manual/UI release) or workflow_call from
+        # release.yml (github.event_name is the caller's `push`); the only
+        # non-uploading path is the PR self-validation build.
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "$TAG" \
             "dist/${{ steps.pkg.outputs.name }}" \
             "dist/${{ steps.pkg.outputs.name }}.sha256" \
             --clobber
 
       - name: Upload as workflow artifact (PR validation runs)
-        if: github.event_name != 'release'
+        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
