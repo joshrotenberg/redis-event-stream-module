@@ -147,13 +147,19 @@ them.
 Counters (forwarded, dropped and skipped by reason, active streams, gap
 markers) are exposed in a module INFO section: `INFO eventstream`. Module
 sections do not appear in plain `INFO`; name the section or use
-`INFO everything`. Two readonly commands are also registered:
-`EVENTSTREAM.STATS` returns the counters as a structured reply, and
-`EVENTSTREAM.STREAMS` lists the destination streams written so far, backed by
-a persistent registry that survives restart; `EVENTSTREAM.STREAMS WITHSTATS`
-adds this process's per-stream forwarded and dropped counts. Write failures
-log per stream, rate-limited to one warning per stream per 60 seconds with
-suppressed-count summaries, plus a notice when a failing stream recovers.
+`INFO everything`. Three keyless commands are also registered:
+`EVENTSTREAM.STATS` (readonly) returns the counters as a structured reply, and
+`EVENTSTREAM.STREAMS` (readonly) lists the destination streams written so far,
+backed by a persistent registry that survives restart. `EVENTSTREAM.STREAMS
+WITHSTATS` adds this process's per-stream forwarded and dropped counts, and
+`VERBOSE` annotates each name with its live existence and `XLEN` (`[name, exists,
+length]`), all without mutating the registry — so discovery keeps working on
+replicas. The opt-in cleanup is the separate `write` command `EVENTSTREAM.PRUNE`,
+which removes the registered names whose key is absent (deleted) and returns the
+count removed; keeping it a distinct command is what lets `EVENTSTREAM.STREAMS`
+stay `readonly`. Write failures log per stream, rate-limited to one warning per
+stream per 60 seconds with suppressed-count summaries, plus a notice when a
+failing stream recovers.
 
 ## How it works
 

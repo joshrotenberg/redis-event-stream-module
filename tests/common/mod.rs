@@ -562,6 +562,72 @@ pub fn streams_withstats(
         .collect()
 }
 
+/// Parse `EVENTSTREAM.STREAMS VERBOSE` (issue #81) into
+/// name -> (exists, length). Each element is `[name, exists (0/1), length]`.
+pub fn streams_verbose(
+    conn: &mut redis::Connection,
+) -> std::collections::HashMap<String, (i64, i64)> {
+    let rows: Vec<Vec<redis::Value>> = redis::cmd("EVENTSTREAM.STREAMS")
+        .arg("VERBOSE")
+        .query(conn)
+        .expect("STREAMS VERBOSE");
+    rows.into_iter()
+        .map(|row| {
+            assert_eq!(row.len(), 3, "row must be name + exists + length");
+            let name = match &row[0] {
+                redis::Value::SimpleString(s) => s.clone(),
+                redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+                other => panic!("unexpected name value: {other:?}"),
+            };
+            let int = |v: &redis::Value| -> i64 {
+                match v {
+                    redis::Value::Int(n) => *n,
+                    other => panic!("unexpected integer value: {other:?}"),
+                }
+            };
+            (name, (int(&row[1]), int(&row[2])))
+        })
+        .collect()
+}
+
+/// `EVENTSTREAM.PRUNE` (issue #81): the separate `write` command that removes
+/// the registry members whose destination key is absent, returning the count
+/// removed. (Distinct from the `readonly` `EVENTSTREAM.STREAMS`, which never
+/// mutates the registry.)
+pub fn prune(conn: &mut redis::Connection) -> i64 {
+    redis::cmd("EVENTSTREAM.PRUNE")
+        .query(conn)
+        .expect("EVENTSTREAM.PRUNE")
+}
+
+/// The command flags reported by `COMMAND INFO <cmd>` (element 2 of the info
+/// row), as lowercase strings. Used to assert `EVENTSTREAM.STREAMS` stays
+/// `readonly` and `EVENTSTREAM.PRUNE` is `write` — the #81 replica regression
+/// guard.
+pub fn command_flags(conn: &mut redis::Connection, cmd: &str) -> Vec<String> {
+    let reply: Vec<redis::Value> = redis::cmd("COMMAND")
+        .arg("INFO")
+        .arg(cmd)
+        .query(conn)
+        .expect("COMMAND INFO");
+    let info = match reply.first() {
+        Some(redis::Value::Array(a)) => a,
+        other => panic!("unexpected COMMAND INFO reply for {cmd}: {other:?}"),
+    };
+    let flags = match info.get(2) {
+        Some(redis::Value::Array(a)) => a,
+        other => panic!("unexpected flags element for {cmd}: {other:?}"),
+    };
+    flags
+        .iter()
+        .map(|v| match v {
+            redis::Value::SimpleString(s) => s.clone(),
+            redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+            other => panic!("unexpected flag value for {cmd}: {other:?}"),
+        })
+        .collect()
+}
+
 /// XLEN that treats a missing key as 0.
 pub fn xlen(conn: &mut redis::Connection, key: &str) -> i64 {
     redis::cmd("XLEN").arg(key).query(conn).unwrap_or(0)
