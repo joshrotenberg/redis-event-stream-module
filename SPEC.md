@@ -122,6 +122,16 @@ SCAN 0 MATCH events:* TYPE stream
 
 (The prefix validation rules in section 7 reject glob metacharacters precisely so this pattern never needs escaping.) The pattern also matches the control and registry keys; consumers enumerating event streams should skip keys under `<prefix>#`, which is safe because the sanitizer can never emit `#` in an event-derived name.
 
+### Firehose stream
+
+`eventstream.firehose yes` (section 7; default `no`) adds a combined stream at `<prefix>#firehose` (default `events:#firehose`), so one consumer group over a single key covers every captured event. The `#` namespace is reserved by the sanitizer (above), so no event-derived stream name can collide with it. In cluster per-node mode the name composes with the node's tag segment exactly like the control stream and the registry (`<prefix>{tag}#firehose`, section 10) and re-pins along with them.
+
+Write path: in the post-notification job, after the per-event write's outcome is settled (including any re-pin it performed), the module issues a second `XADD` to the firehose with fields identical to the per-event entry (`event`, `key`, `db`, section 6), the same `MAXLEN ~` trimming, and the same call options. The two writes succeed or fail independently: a firehose failure never affects the per-event entry, and vice versa. A successful copy counts in `firehose_forwarded` (section 13), never in `forwarded`, which keeps meaning captured events rather than XADDs issued; a failed copy counts in the existing `dropped_*` counters under the same classification and first-failure logging as per-event writes. Drop accounting is per write, not per event: an event whose per-event entry and firehose copy are both refused counts two drops (in per-node mode this includes `dropped_no_owned_slot` counting twice for one event when no slot is owned after a re-pin), so with the firehose enabled, drop counters bound XADD failures, not lost events. The firehose registers in `<prefix><seg>#streams` on its first write, so `EVENTSTREAM.STREAMS` discovers it, and it counts in `active_streams` like any destination stream. The feedback guard covers it (the key is under the prefix), so the firehose's own `xadd` notifications are never mirrored.
+
+Cluster interaction: the firehose copy resolves the tag segment after the per-event write, so when that write triggered a re-pin the copy already lands on the new tag. A cluster refusal of the copy itself is counted (`dropped_migrating` or `dropped_xadd_error`), never re-pinned: slot ownership cannot change between the two XADDs (they run in one execution unit), so such a refusal only occurs in a migration window the per-event write already re-pinned through once, and the one-re-pin-per-event bound holds.
+
+Ordering property: the firehose is a single stream, so its entry IDs give a total per-node order across all event types — including entries within the same millisecond, which merging per-event streams by ID cannot order (section 9). Cost: enabling it doubles write amplification per captured event and adds one stream to the memory bound (section 11).
+
 ### Namespace ownership
 
 Keys under `<stream-prefix>` belong to the module. If a user key already exists at a destination name: a non-stream key causes `WRONGTYPE` errors (entries dropped and counted, the module never deletes or overwrites a non-stream key); a pre-existing stream will receive module entries and be trimmed under the module's `maxlen` policy. Deployment docs recommend restricting write access to `<prefix>*` via ACLs.
@@ -153,12 +163,15 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | Key | Type | Default | Live-settable | Validation |
 |---|---|---|---|---|
 | `eventstream.enabled` | bool | `yes` | yes | `yes` / `no` |
+| `eventstream.firehose` | bool | `no` | yes | `yes` / `no` |
 | `eventstream.stream-prefix` | string | `events:` | no (IMMUTABLE) | non-empty; at most 128 bytes; characters limited to `A-Z a-z 0-9 : . _ - { }`; glob metacharacters (`*`, `?`, `[`, `]`, `\`) rejected |
 | `eventstream.events` | string | `expired` | yes | filter grammar below; empty string rejected |
 | `eventstream.maxlen` | i64 | `10000` | yes | `0` to `i64::MAX`; `0` disables trimming. Redis enforces the registered range on `CONFIG SET` and redis.conf paths only; a module-arg value becomes the registered default and bypasses the boundary check (verified against redis 7.2 `module.c`/`config.c`), so the module's config binding re-validates and rejects negatives, aborting the load |
 | `eventstream.cluster-streams` | string | `refuse` | no (IMMUTABLE) | `refuse` or `per-node` (section 10). Only meaningful in cluster mode |
 
 **`eventstream.enabled`.** Master kill switch. There is no unsubscribe API for keyspace notifications, so `no` is an early return at the top of the notification handler (one atomic load per event). Flipping back to `yes` does not replay events that occurred while disabled.
+
+**`eventstream.firehose`.** Opt-in combined stream at `<prefix>#firehose` (section 5): when `yes`, every captured event is written a second time to the firehose with fields identical to its per-event entry. Off by default because enabling it doubles write amplification per captured event (section 11). Runtime-mutable; toggling takes effect on the next captured event, and events captured while it was off are not replayed into the firehose. Toggling opens no capture gap (per-event mirroring continues either way), so unlike `enabled` it records no gap marker.
 
 **`eventstream.stream-prefix`.** Registered with `ConfigurationFlags::IMMUTABLE`: settable via module args, a `loadmodule` line, redis.conf directive, or `MODULE LOADEX CONFIG`, but not via `CONFIG SET`. Rationale: a runtime-mutable prefix drags in dual-prefix feedback-guard machinery, old-stream cleanup semantics, and registry-reset questions, all for no v0.1 user; relaxing IMMUTABLE to mutable later is non-breaking. An empty prefix is rejected because the feedback guard (skip keys starting with the prefix) would then match every key and blackhole all events. Braces are allowed in the charset; they are reserved for the future cluster design (section 10), not a working cluster recipe in v0.1.
 
@@ -234,6 +247,7 @@ Module delivery does not depend on `notify-keyspace-events`. Verified against Re
 | Key changed | Next event | Jobs enqueued before the change |
 |---|---|---|
 | `enabled` to `no` | dropped at handler entry | still execute |
+| `firehose` | firehose copy written or skipped per the new value | still execute (completed before the change) |
 | `events` | new predicate applies | still execute (matched under old filter) |
 | `maxlen` | new cap on each `XADD` | old cap; an idle stream is re-trimmed only on its next write |
 
@@ -272,7 +286,7 @@ The triggering command, its notification, and the mirrored `XADD` complete withi
 
 - Per stream: entries appear in exactly notification order (single command-execution thread, monotonic IDs), preserved on replicas and through AOF replay because IDs propagate verbatim.
 - Per key within one event name: total order.
-- Per key across event names: not directly readable as one sequence (`hset k`, `del k`, `expired k` land in three streams). Merging streams by entry ID reconstructs order except for ties within the same millisecond.
+- Per key across event names: not directly readable as one sequence (`hset k`, `del k`, `expired k` land in three streams). Merging streams by entry ID reconstructs order except for ties within the same millisecond. The firehose (section 5), when enabled, closes this: it is a single stream carrying every captured event, so its entry order is a total per-node order across event types, ties included.
 - Cross-stream, cross-key: no guarantee beyond entry ID timestamps.
 
 ### Loss windows
@@ -429,7 +443,9 @@ Storm cases:
 
 Trimming is folded into the append (`XADD ... MAXLEN ~ <n>`); approximate trimming only trims at whole listpack-node boundaries, so amortized trim cost is near zero and actual length can overshoot by up to one node (about `stream-node-max-entries`, default 100).
 
-Memory bound: `total ≈ distinct_event_names × maxlen × bytes_per_entry`. A three-field entry with a 32-byte key costs roughly 150 bytes. Streams are consolidated in database 0 (section 6), so the bound is independent of how many databases fire events; the control stream (section 9) adds one more stream under the same `maxlen`.
+Firehose amplification: `eventstream.firehose yes` (section 5) turns every captured event into two `XADD`s plus trim instead of one, roughly doubling the added CPU per captured event; the storm cases above double with it. Off by default for exactly this reason.
+
+Memory bound: `total ≈ distinct_event_names × maxlen × bytes_per_entry`. A three-field entry with a 32-byte key costs roughly 150 bytes. Streams are consolidated in database 0 (section 6), so the bound is independent of how many databases fire events; the control stream (section 9) adds one more stream under the same `maxlen`, and the firehose, when enabled, one more (its `maxlen` window spans all event types combined, so a busy type can crowd a quiet one out of it; size `maxlen` for the total event rate).
 
 | maxlen | Distinct event names | Estimated total |
 |---|---|---|
@@ -469,6 +485,7 @@ One module INFO section via the wrapper's `InfoContext` builder (`#[info_command
 # eventstream_stats
 eventstream_enabled:1
 eventstream_forwarded:48211
+eventstream_firehose_forwarded:0
 eventstream_dropped:3
 eventstream_dropped_xadd_error:3
 eventstream_dropped_oom:0
@@ -488,7 +505,7 @@ eventstream_cluster_pinned_tag:
 eventstream_last_error_time:1752071011
 ```
 
-`dropped` is the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, and `dropped_migrating`. `active_streams` counts stream registrations since load, excluding the control stream: normally the number of distinct destination streams written, but the counter never resets — a flush clears the in-process registry cache, so a stream re-registered after a flush counts again and the value can exceed the number of currently distinct streams (section 5). `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO.
+`dropped` is the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, and `dropped_migrating`. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `active_streams` counts stream registrations since load, excluding the control stream: normally the number of distinct destination streams written, but the counter never resets — a flush clears the in-process registry cache, so a stream re-registered after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO.
 
 Documentation must state plainly: module sections do not appear in default `INFO` or `INFO all`; use `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. This is otherwise a recurring support question.
 
@@ -593,7 +610,7 @@ Each item is additive (new config key, counter, command, or entry field), so not
 
 - `EVENTSTREAM.STATS` and `EVENTSTREAM.STREAMS` commands are implemented (section 8; readonly and keyless as planned, though `STREAMS` is O(N) in registered streams and therefore not flagged `fast`).
 - Persistent stream registry: a Redis set at `<prefix>#streams`, SADD-ed (replicated) alongside first write, with in-process dedupe cache invalidated on flush via `FlushSubevent`; source of truth for discovery. Implemented (sections 5 and 8; carried in the v0.1.0 release, section 15). The join with process-local per-stream counters remains future (issue #71).
-- Firehose stream at `<prefix>#firehose` behind a bool config, for one consumer group over all events (the `#` namespace is already protected by the sanitizer) (issue #58).
+- Firehose stream at `<prefix>#firehose` behind a bool config is implemented (`eventstream.firehose`, section 5, issue #58): one consumer group over all captured events, off by default; the `#` namespace is protected by the sanitizer as planned.
 - Runtime-mutable `stream-prefix`, with the current-plus-previous-prefix guard and documented old-stream cleanup semantics (issue #59).
 - Additional entry formats (minimal without `event`, verbose with `class`, JSON) behind an `entry-format` enum config, with a format discriminator and a `dropped_encode_error` counter (issue #60).
 - `MISSED`/`NEW` capture via a direct `raw::RedisModule_SubscribeToKeyspaceEvents` subscription is implemented (section 5); the hand-written handler also fixed the non-UTF-8 panic via lossy decode. `LOADED` and `TRIMMED` remain uncapturable by construction (dataset-load and cluster-reshard only).

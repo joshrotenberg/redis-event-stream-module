@@ -77,6 +77,7 @@ command line) and, except where noted, live via `CONFIG SET`:
 | Config | Type | Default | Meaning |
 |--------|------|---------|---------|
 | `eventstream.enabled` | bool | `yes` | master on/off switch |
+| `eventstream.firehose` | bool | `no` | also mirror every captured event into one combined `<prefix>#firehose` stream; doubles write amplification (SPEC.md section 11) |
 | `eventstream.stream-prefix` | string | `events:` | destination stream prefix; immutable, load-time only |
 | `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
 | `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |

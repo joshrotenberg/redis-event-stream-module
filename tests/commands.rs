@@ -51,6 +51,7 @@ fn stats_agrees_with_info() {
     for f in [
         "enabled",
         "forwarded",
+        "firehose_forwarded",
         "dropped",
         "skipped_self",
         "active_streams",

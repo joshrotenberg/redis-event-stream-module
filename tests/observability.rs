@@ -15,6 +15,7 @@ fn info_section_has_all_fields() {
     for f in [
         "enabled",
         "forwarded",
+        "firehose_forwarded",
         "dropped",
         "dropped_xadd_error",
         "dropped_oom",
