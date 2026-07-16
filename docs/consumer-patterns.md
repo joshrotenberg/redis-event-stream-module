@@ -164,6 +164,62 @@ list and `XAUTOCLAIM` drops it from the pending list as it scans. Treat a
 nil-field claimed entry as lost, not as work to do (SPEC.md section 9,
 slow-consumer contract).
 
+### Dead-lettering poison entries
+
+Pending entries fail in three distinct ways, and only the third needs a
+dead-letter:
+
+1. **Crash before `XACK`.** The entry is redelivered; idempotent processing
+   (natural key: stream + entry ID) makes this benign.
+2. **Trimmed while pending.** The entry reads back with nil fields and
+   `XAUTOCLAIM` drops it — handled above; treat as lost, not work.
+3. **Poison entry.** The entry is delivered fine but *fails processing on every
+   attempt* (malformed downstream state, an unactionable key, a bug triggered by
+   one payload). Under the patterns above it cycles forever: claimed, fails,
+   goes idle, is `XAUTOCLAIM`ed to another worker, fails again — pinning workers
+   and growing the PEL without bound. Break the cycle with a dead-letter.
+
+Redis Streams already track what you need: `XPENDING` and `XAUTOCLAIM` return a
+per-entry **delivery counter**, incremented on each `XREADGROUP` delivery and
+each non-`JUSTID` `XAUTOCLAIM`. Inspect it without inflating it using
+`XAUTOCLAIM ... JUSTID` (which does not increment) or `XPENDING` — the fourth
+element per entry is the delivery count:
+
+```
+XPENDING events:expired workers IDLE 60000 - + 100
+```
+
+After N deliveries (keep N small — 3 to 5; retries beyond that rarely succeed
+and each costs a worker slot), copy the entry to an application-owned
+dead-letter stream and acknowledge the original so it leaves the PEL:
+
+```
+# entry 1730000000123-0 has reached delivery-count N:
+XADD myapp:dead-letter * source-stream events:expired source-id 1730000000123-0 \
+  deliveries 5 event expired key session:abc db 0
+XACK events:expired workers 1730000000123-0
+```
+
+Carry the original stream name, entry ID, delivery count, and all three entry
+fields, so the dead-letter record stands alone after the source entry is
+trimmed. Do the delivery-count check in both the startup PEL drain and the
+periodic `XAUTOCLAIM` sweep — those are where old entries resurface.
+
+**The dead-letter stream must live outside the module's prefix** (not
+`events:*`). Two reasons: the prefix feedback guard only protects the module's
+own streams, so an `events:*`-named dead-letter would itself be captured if the
+filter is ever widened to `xadd`-family events; and the least-privilege consumer
+ACL below is deliberately read-only over `events:*`. A dead-lettering consumer
+therefore also needs write access to its own stream:
+
+```
+ACL SETUSER events-consumer on >secret ~events:* +@read +xreadgroup +xack +xautoclaim +xinfo \
+  ~myapp:dead-letter +xadd
+```
+
+The dead-letter stream is itself an ordinary stream: `XLEN`/`XRANGE` it, alert on
+growth, and drain it with the same replay patterns above.
+
 ## Replay
 
 Because entries persist, you can reprocess history. Read a whole stream:

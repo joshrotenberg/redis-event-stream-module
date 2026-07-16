@@ -482,6 +482,7 @@ Consumers delimit gap windows by reading marker pairs: the window between a `dis
 2. Delivery is at-least-once within the retention window per stream: the last `maxlen` (approximately) entries when trimming by count, or the last `eventstream.retention-ms` (approximately) of wall-clock time when time-based retention is set (section 7). A consumer whose lag exceeds the window loses the overrun permanently; with time-based retention an idle stream can retain past the window until its next write (section 7 caveat).
 3. Loss is detectable, not silent: compare the resume ID against the stream's first entry ID, or use `XINFO STREAM` (`entries-added`, `max-deleted-entry-id`) and `XINFO GROUPS` `lag` (Redis 7.0+) to alert before it happens.
 4. Pending entries are not protected from trimming. A trimmed unacknowledged entry reads back from the PEL with a nil field list; `XAUTOCLAIM` removes such dead references while scanning. Ack promptly, keep PELs small.
+5. An entry that is delivered fine but fails processing on every attempt (a "poison" entry) is the consumer's responsibility, not the module's: the module writes an entry once and never participates in the consumer group, so it has no delivery-count to act on. Bound the retries with the delivery counter (`XPENDING`/`XAUTOCLAIM`) and move the entry to an application-owned dead-letter stream — outside `<stream-prefix>` — after N attempts. The pattern is documented in the consumer guide (docs/consumer-patterns.md, "Dead-lettering poison entries").
 
 ### Consumer patterns
 
