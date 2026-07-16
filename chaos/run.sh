@@ -13,6 +13,9 @@
 #   massexpiry 50k expirations (the heaviest capture path): zero loss.
 #   repeated   migrate a node's pinned slot several times in a row: one clean
 #              re-pin per migration, capture continues throughout.
+#   sentinel   standalone HA: 3 sentinels SIGKILL-promote a replica; the
+#              promoted node captures, its pending loaded marker flushes, and
+#              loss is bounded by the replication lag at kill (SPEC.md sec 10).
 #
 # Usage:
 #   chaos/run.sh                 # all scenarios
@@ -242,6 +245,149 @@ scenario_repeated() {
     fi
 }
 
+scenario_sentinel() {
+    echo "[sentinel] Sentinel-orchestrated failover of a standalone master"
+    local dir="$WORK/sentinel" master=7641 replica=7642
+    local sentinels=(7643 7644 7645) p _
+
+    start_node "$master" "$dir/$master" --loadmodule "$MODULE" events set
+    start_node "$replica" "$dir/$replica" --loadmodule "$MODULE" events set \
+        --replicaof 127.0.0.1 "$master"
+    sleep 1
+
+    # Wait for the replica to finish its initial sync.
+    local synced=0
+    for _ in $(seq 1 30); do
+        [[ "$("$RC" -p "$replica" info replication 2>/dev/null | grep -o master_link_status:up)" == master_link_status:up ]] \
+            && { synced=1; break; }
+        sleep 0.4
+    done
+    [[ $synced -eq 1 ]] || { fail "replica did not sync to master"; return; }
+
+    # Three sentinels, quorum 2, tuned for fast test turnaround. Each rewrites
+    # its own config, so it must be writable in $WORK.
+    for p in "${sentinels[@]}"; do
+        mkdir -p "$dir/$p"
+        cat >"$dir/$p/sentinel.conf" <<EOF
+port $p
+dir $dir/$p
+sentinel monitor mymaster 127.0.0.1 $master 2
+sentinel down-after-milliseconds mymaster 2000
+sentinel failover-timeout mymaster 10000
+sentinel parallel-syncs mymaster 1
+EOF
+        "$RS" "$dir/$p/sentinel.conf" --sentinel --daemonize yes --logfile "$dir/$p/sentinel.log"
+        PORTS+=("$p")
+    done
+    # Wait until a sentinel has discovered both the master and the replica.
+    local seen=0
+    for _ in $(seq 1 30); do
+        [[ "$("$RC" -p 7643 sentinel master mymaster 2>/dev/null | grep -c .)" -gt 0 \
+            && "$("$RC" -p 7643 sentinel replicas mymaster 2>/dev/null | grep -c .)" -gt 0 ]] \
+            && { seen=1; break; }
+        sleep 0.4
+    done
+    [[ $seen -eq 1 ]] || { fail "sentinels did not discover master+replica"; return; }
+
+    # Batch 1: durable. Produce, then confirm it replicated to the replica, so
+    # these events are guaranteed present on the promoted node.
+    local n1=500
+    "$EX" produce --url "redis://127.0.0.1:$master" --sets "$n1" >/dev/null 2>&1
+    local repl_ok=0
+    for _ in $(seq 1 40); do
+        [[ "$("$RC" -p "$replica" xlen events:set 2>/dev/null)" -ge "$n1" ]] && { repl_ok=1; break; }
+        sleep 0.3
+    done
+    [[ $repl_ok -eq 1 ]] || { fail "batch1 did not replicate to the replica"; return; }
+    local control_before
+    control_before="$("$RC" -p "$replica" xlen 'events:#control' 2>/dev/null)"
+
+    # Batch 2: in flight at kill. Produced to completion (acked on the master)
+    # but NOT waited on for replication, so its unreplicated tail is the loss
+    # window the failover contract permits (SPEC.md section 10).
+    local n2=1000
+    "$EX" produce --url "redis://127.0.0.1:$master" --sets "$n2" >/dev/null 2>&1
+    local acked mpid
+    acked="$("$RC" -p "$master" xlen events:set)"   # events acked on the old master
+
+    # SIGKILL the master (kill -9, not SHUTDOWN): nothing flushes, mirroring the
+    # crash contract — no closing gap marker is written (SPEC.md section 9). Kill
+    # by PID from INFO: redis rewrites its process title to `redis-server *:port`
+    # on some platforms, so a pkill on the --dir path would miss it.
+    mpid="$("$RC" -p "$master" info server 2>/dev/null | grep -o 'process_id:[0-9]*' | cut -d: -f2 | tr -d '\r')"
+    if [[ -z "$mpid" ]]; then fail "could not resolve the master PID to kill"; return; fi
+    kill -9 "$mpid" 2>/dev/null
+
+    # Wait for Sentinel to promote the replica. Sentinel issues REPLICAOF NO ONE
+    # on the replica, flipping it to role:master — the reliable signal. (The
+    # sentinel-tracked address also flips to the replica's port; grep the port
+    # out of the 2-element reply for the log line.)
+    local promoted=0
+    for _ in $(seq 1 60); do
+        [[ "$("$RC" -p "$replica" info replication 2>/dev/null | grep -o role:master)" == role:master ]] \
+            && { promoted=1; break; }
+        sleep 0.5
+    done
+    if [[ $promoted -ne 1 ]]; then fail "sentinel did not promote the replica"; return; fi
+    # Confirm the sentinel's own tracked master address converges to the replica
+    # (it lags the role flip by a beat). Non-fatal: role:master above is the
+    # authoritative promotion signal, and only a sentinel could have sent the
+    # REPLICAOF NO ONE that flipped it.
+    local tracked=""
+    for _ in $(seq 1 20); do
+        tracked="$("$RC" -p 7643 sentinel get-master-addr-by-name mymaster 2>/dev/null | grep -oE '[0-9]+' | tail -1)"
+        [[ "$tracked" == "$replica" ]] && break
+        sleep 0.3
+    done
+    echo "  sentinel promoted the replica; tracked master port now $tracked"
+
+    # What the promoted node holds now: batch1 (durable) plus the replicated
+    # part of batch2. Read before resuming writes.
+    local present lost
+    present="$("$RC" -p "$replica" xlen events:set)"
+    lost=$(( acked - present ))
+    echo "  acked-on-old-master=$acked present-on-new=$present loss-window=$lost"
+
+    # Batch 3: resume writes against the promoted node.
+    local n3=300
+    "$EX" produce --url "redis://127.0.0.1:$replica" --sets "$n3" >/dev/null 2>&1
+    local fwd
+    for _ in $(seq 1 40); do fwd="$(es_field "$replica" forwarded)"; [[ "$fwd" -ge "$n3" ]] && break; sleep 0.3; done
+
+    # Assertion 1: the promoted node mirrors its own post-promotion events. Its
+    # forwarded counter started at 0 (a replica captures nothing), so it now
+    # equals exactly the post-promotion batch, and the stream grew by that much.
+    local final
+    final="$("$RC" -p "$replica" xlen events:set)"
+    if [[ "$fwd" -eq "$n3" && "$final" -eq $(( present + n3 )) ]]; then
+        pass "promoted node captured its own $n3 events (forwarded=$fwd, stream $present -> $final)"
+    else
+        fail "post-promotion capture wrong (forwarded=$fwd want $n3; stream $present -> $final want $(( present + n3 )))"
+    fi
+
+    # Assertion 2: the pending loaded marker flushed on the first post-promotion
+    # event (the behavior tests/replication.rs pins for manual promotion, now
+    # under sentinel-driven promotion): the control stream gained an entry and
+    # its newest action is loaded.
+    local control_after newest
+    control_after="$("$RC" -p "$replica" xlen 'events:#control' 2>/dev/null)"
+    newest="$("$RC" -p "$replica" xrevrange 'events:#control' + - COUNT 1 2>/dev/null)"
+    if [[ "$control_after" -gt "$control_before" ]] && echo "$newest" | grep -q loaded; then
+        pass "pending loaded marker flushed on promotion (control $control_before -> $control_after)"
+    else
+        fail "no post-promotion loaded marker (control $control_before -> $control_after; newest=[$newest])"
+    fi
+
+    # Assertion 3: loss is bounded by the replication lag at kill. All of batch1
+    # (durable) survived, nothing beyond what the master acked ever appeared, and
+    # there are no duplicates (the stream length equals the events accounted for).
+    if [[ "$present" -ge "$n1" && "$present" -le "$acked" && "$final" -eq $(( present + n3 )) ]]; then
+        pass "loss bounded by replication lag: batch1 durable, $lost event(s) in the window, no duplicates"
+    else
+        fail "loss outside the window (n1=$n1 present=$present acked=$acked final=$final)"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 
 echo "building module and consumer client (release)..."
@@ -251,7 +397,7 @@ echo "building module and consumer client (release)..."
 cargo build --release >/dev/null 2>&1 || { echo "workspace build failed"; exit 1; }
 
 want="${1:-all}"
-for s in reshard failover massexpiry repeated; do
+for s in reshard failover massexpiry repeated sentinel; do
     if [[ "$want" == all || "$want" == "$s" ]]; then
         pkill -9 -f "redis-server .*${WORK}" >/dev/null 2>&1; sleep 1
         "scenario_$s"
