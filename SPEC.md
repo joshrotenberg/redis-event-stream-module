@@ -385,7 +385,7 @@ Three keyless commands were added after v0.1 — two read-only introspection com
 
 | Command | Reply | Flags |
 |---|---|---|
-| `EVENTSTREAM.STATS` | The section 13 counters as a flat array of field/value pairs, agreeing with the INFO section at call time | `readonly fast`, keyless |
+| `EVENTSTREAM.STATS` | The section 13 counters as a flat array of field/value pairs, agreeing with the INFO section field-for-field at call time — every value an integer except `cluster_pinned_tag`, a bulk string | `readonly fast`, keyless |
 | `EVENTSTREAM.STREAMS [WITHSTATS \| VERBOSE]` | The registered destination streams (section 5 Discovery), read live from `<prefix>#streams`; per-argument reply below | `readonly`, keyless (O(N) in registered streams, so not `fast`) |
 | `EVENTSTREAM.PRUNE` | Removes the registered names whose destination key is absent, returning the integer count removed (section 5 Discovery) | `write`, keyless (O(N) in registered streams) |
 

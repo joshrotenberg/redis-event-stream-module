@@ -7,7 +7,6 @@
 
 use crate::cluster::*;
 use crate::config::*;
-use crate::markers::*;
 use crate::stats::*;
 use redis_module::{
     raw, CallOptions, CallOptionsBuilder, CallResult, Context, RedisError, RedisResult,
@@ -34,94 +33,17 @@ pub(crate) fn prune_call_options() -> CallOptions {
 /// call. Readonly, fast, keyless.
 #[cfg(not(test))]
 pub(crate) fn cmd_stats(_ctx: &Context, _args: Vec<RedisString>) -> RedisResult {
-    let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
-        + DROPPED_OOM.load(Ordering::Relaxed)
-        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-        + DROPPED_MIGRATING.load(Ordering::Relaxed)
-        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
-        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
-    let pairs: [(&str, i64); 25] = [
-        ("enabled", ENABLED.load(Ordering::Relaxed) as i64),
-        ("forwarded", FORWARDED.load(Ordering::Relaxed) as i64),
-        (
-            "firehose_forwarded",
-            FIREHOSE_FORWARDED.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "autogroup_created",
-            AUTOGROUP_CREATED.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "autogroup_failed",
-            AUTOGROUP_FAILED.load(Ordering::Relaxed) as i64,
-        ),
-        ("dropped", dropped as i64),
-        (
-            "dropped_xadd_error",
-            DROPPED_XADD_ERROR.load(Ordering::Relaxed) as i64,
-        ),
-        ("dropped_oom", DROPPED_OOM.load(Ordering::Relaxed) as i64),
-        (
-            "dropped_defer_error",
-            DROPPED_DEFER_ERROR.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "dropped_max_streams",
-            DROPPED_MAX_STREAMS.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "dropped_encode_error",
-            DROPPED_ENCODE_ERROR.load(Ordering::Relaxed) as i64,
-        ),
-        ("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed) as i64),
-        (
-            "skipped_filtered",
-            SKIPPED_FILTERED.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "skipped_key_filtered",
-            SKIPPED_KEY_FILTERED.load(Ordering::Relaxed) as i64,
-        ),
-        ("skipped_db", SKIPPED_DB.load(Ordering::Relaxed) as i64),
-        (
-            "skipped_invalid",
-            SKIPPED_INVALID.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "active_streams",
-            ACTIVE_STREAMS.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "control_markers",
-            CONTROL_MARKERS.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "handler_panics",
-            HANDLER_PANICS.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "dropped_no_owned_slot",
-            DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed) as i64,
-        ),
-        (
-            "dropped_migrating",
-            DROPPED_MIGRATING.load(Ordering::Relaxed) as i64,
-        ),
-        ("repins", REPINS.load(Ordering::Relaxed) as i64),
-        (
-            "repins_probe_detected",
-            REPINS_PROBE_DETECTED.load(Ordering::Relaxed) as i64,
-        ),
-        ("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64),
-        (
-            "last_error_time",
-            LAST_ERROR_TIME.load(Ordering::Relaxed) as i64,
-        ),
-    ];
-    let mut out = Vec::with_capacity(pairs.len() * 2);
-    for (name, value) in pairs {
+    // Driven by the shared `stats_snapshot` (issue #88) so the reply agrees with
+    // the INFO section field-for-field (SPEC.md section 8), including the one
+    // string field `cluster_pinned_tag`. RESP arrays may mix value types.
+    let snapshot = stats_snapshot();
+    let mut out = Vec::with_capacity(snapshot.len() * 2);
+    for (name, value) in snapshot {
         out.push(RedisValue::SimpleStringStatic(name));
-        out.push(RedisValue::Integer(value));
+        out.push(match value {
+            StatValue::Int(i) => RedisValue::Integer(i),
+            StatValue::Text(s) => RedisValue::BulkString(s),
+        });
     }
     Ok(RedisValue::Array(out))
 }

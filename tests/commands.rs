@@ -5,29 +5,7 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::collections::HashMap;
 use std::time::Duration;
-
-/// Parse the flat `[name, value, ...]` reply of EVENTSTREAM.STATS into a map.
-fn stats(conn: &mut redis::Connection) -> HashMap<String, i64> {
-    let flat: Vec<redis::Value> = redis::cmd("EVENTSTREAM.STATS").query(conn).expect("STATS");
-    let mut m = HashMap::new();
-    let mut i = 0;
-    while i + 1 < flat.len() {
-        let name = match &flat[i] {
-            redis::Value::SimpleString(s) => s.clone(),
-            redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
-            other => panic!("unexpected stats name: {other:?}"),
-        };
-        let val = match &flat[i + 1] {
-            redis::Value::Int(n) => *n,
-            other => panic!("unexpected stats value: {other:?}"),
-        };
-        m.insert(name, val);
-        i += 2;
-    }
-    m
-}
 
 fn streams(conn: &mut redis::Connection) -> Vec<String> {
     let mut v: Vec<String> = redis::cmd("EVENTSTREAM.STREAMS")
@@ -43,28 +21,24 @@ fn stats_agrees_with_info() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "one forwarded", || {
+    wait_until(Duration::from_secs(10), "one forwarded", || {
         info_field(&mut c, "forwarded") == 1
     });
 
-    let st = stats(&mut c);
-    for f in [
-        "enabled",
-        "forwarded",
-        "firehose_forwarded",
-        "dropped",
-        "skipped_self",
-        "active_streams",
-        "control_markers",
-    ] {
-        assert_eq!(
-            st[f],
-            info_field(&mut c, f),
-            "STATS.{f} must equal INFO.{f}"
-        );
-    }
-    assert_eq!(st["forwarded"], 1);
-    assert_eq!(st["dropped"], 0);
+    // Every field, both directions, exact set + values + count (issue #88).
+    // The two surfaces are built from one shared snapshot, so this guards
+    // against either being re-hand-rolled out of agreement, and covers the one
+    // string field, cluster_pinned_tag, that STATS carries as a BulkString and
+    // that the old integer-only comparison could not see.
+    assert_eq!(
+        stats_map(&mut c),
+        info_map(&mut c),
+        "EVENTSTREAM.STATS must agree with the INFO section field-for-field"
+    );
+    // Sanity on the values themselves, not just cross-surface agreement.
+    let st = stats_map(&mut c);
+    assert_eq!(st["forwarded"], "1");
+    assert_eq!(st["dropped"], "0");
 }
 
 #[test]
