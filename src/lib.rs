@@ -42,7 +42,7 @@ use std::sync::atomic::Ordering;
 use crate::commands::{cmd_prune, cmd_stats, cmd_streams};
 #[cfg(not(test))]
 use redis_module::{
-    configuration::ConfigurationFlags, raw, redis_module, AclCategory, NotifyEvent, RedisString,
+    configuration::ConfigurationFlags, raw, redis_module, NotifyEvent, RedisString,
 };
 /// Integer module version registered with `RedisModule_Init` and reported as
 /// `ver` by `MODULE LIST` (SPEC.md section 14): `CARGO_PKG_VERSION` encoded as
@@ -99,6 +99,67 @@ const fn encode_semver(v: &str) -> i32 {
 /// section 14).
 fn version_supported(major: i32, minor: i32) -> bool {
     (major, minor) >= (7, 2)
+}
+
+/// Register the `@eventstream` ACL category (issues #69, #107) and tag the
+/// module's commands into it. Done here rather than through the redis_module!
+/// macro's `acl_categories` field because the macro makes an RM_AddACLCategory
+/// failure fatal, and that call fails on every in-process reload: Redis keeps a
+/// module's ACL categories across MODULE UNLOAD, so the category survives and
+/// re-adding it errors. The category name is a compile-time constant, so the
+/// only possible error is "already exists" (a reload) — benign — and the
+/// commands re-tag into the surviving category, so an in-place upgrade loads
+/// cleanly. On 7.2/7.3 the API pointer is null: log once and leave the commands
+/// individually grantable (SPEC.md section 8). GetCommand + SetCommandACLCategories
+/// mirror exactly what the macro would have done, so first-load behavior is
+/// unchanged.
+#[cfg(not(test))]
+fn setup_acl_category(ctx: &Context) {
+    let Some(add_category) = (unsafe { raw::RedisModule_AddACLCategory }) else {
+        ctx.log_notice(
+            "eventstream: this server predates RM_AddACLCategory (Redis 7.4+); the \
+             @eventstream ACL category is unavailable, so grant the module's commands \
+             individually (+eventstream.stats +eventstream.streams +eventstream.prune)",
+        );
+        return;
+    };
+    let category = c"eventstream";
+    if unsafe { add_category(ctx.ctx, category.as_ptr()) } != raw::REDISMODULE_OK as i32 {
+        // The name is a constant, so this can only be "already registered" from
+        // a prior load in this process (an in-place reload); the category is
+        // present either way, so tag into it below.
+        ctx.log_notice(
+            "eventstream: @eventstream ACL category already present (module reloaded \
+             in-process); reusing it",
+        );
+    }
+    let (Some(get_command), Some(set_categories)) =
+        (unsafe { raw::RedisModule_GetCommand }, unsafe {
+            raw::RedisModule_SetCommandACLCategories
+        })
+    else {
+        return;
+    };
+    for name in [
+        c"eventstream.stats",
+        c"eventstream.streams",
+        c"eventstream.prune",
+    ] {
+        let command = unsafe { get_command(ctx.ctx, name.as_ptr()) };
+        if command.is_null() {
+            ctx.log_warning(&format!(
+                "eventstream: could not resolve {} to tag it @eventstream",
+                name.to_string_lossy()
+            ));
+            continue;
+        }
+        if unsafe { set_categories(command, category.as_ptr()) } != raw::REDISMODULE_OK as i32 {
+            ctx.log_warning(&format!(
+                "eventstream: failed to tag {} into @eventstream",
+                name.to_string_lossy()
+            ));
+        }
+    }
 }
 
 /// Module init: version and topology gates (SPEC.md sections 10 and 14), the
@@ -190,21 +251,15 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     }
     SUBSCRIBED_EXTRA.store(extra.bits() as i64, Ordering::Relaxed);
 
-    // @eventstream ACL category (issue #69). The redis_module! macro has already
-    // run by the time init fires: on 7.4+ it registered the category via
-    // RM_AddACLCategory and tagged both commands into it; on 7.2/7.3 the API
-    // pointer is null, so the macro skipped it and the commands carry only their
-    // flag-derived categories (@read, @fast). Surface which path this server took
-    // once, at notice, so an operator writing a least-privilege ACL knows whether
-    // +@eventstream is available or must grant the commands individually (SPEC.md
-    // section 8). Reading the raw API pointer mirrors the canonical-name gate.
-    if unsafe { raw::RedisModule_AddACLCategory }.is_none() {
-        ctx.log_notice(
-            "eventstream: this server predates RM_AddACLCategory (Redis 7.4+); the \
-             @eventstream ACL category is unavailable, so grant the module's commands \
-             individually (+eventstream.stats +eventstream.streams)",
-        );
-    }
+    // @eventstream ACL category (issues #69, #107). Registered here, not through
+    // the redis_module! macro's `acl_categories` field: the macro treats an
+    // RM_AddACLCategory failure as fatal, and that call fails on every in-process
+    // reload. Redis does not remove a module's ACL categories on MODULE UNLOAD,
+    // so the category from the previous load survives and re-adding it errors —
+    // which would abort an in-place upgrade (UNLOAD then LOAD). Doing it here
+    // lets the load tolerate the already-exists error and re-tag the commands
+    // into the surviving category.
+    setup_acl_category(ctx);
 
     // Subscribe to the flush and SWAPDB server events through the raw
     // `RedisModule_SubscribeToServerEvent` binding rather than the wrapper's
@@ -358,14 +413,12 @@ redis_module! {
     version: MODULE_VERSION,
     allocator: (redis_module::alloc::RedisAlloc, redis_module::alloc::RedisAlloc),
     data_types: [],
-    // Custom @eventstream ACL category (issue #69). RM_AddACLCategory is Redis
-    // 7.4+, so the macro registers this only where the API pointer is non-null;
-    // on 7.2/7.3 it logs and skips (the null-pointer gate, same class as #45).
-    // Declaring the category here (not mandatory on the commands below) keeps
-    // registration additive: an absent API never fails the load.
-    acl_categories: [
-        "eventstream",
-    ],
+    // The @eventstream ACL category (issue #69) is NOT declared here. The macro
+    // makes RM_AddACLCategory fatal, which breaks in-place reload (issue #107):
+    // Redis keeps module ACL categories across MODULE UNLOAD, so re-adding the
+    // category on a second load aborts. `init` registers it manually instead
+    // (see setup_acl_category), tolerating the already-exists error and tagging
+    // the commands into the category itself.
     init: init,
     deinit: deinit,
     // Keyless commands (SPEC.md sections 5, 8). STATS is O(1) and `readonly
@@ -374,15 +427,15 @@ redis_module! {
     // writes, so discovery must keep working on replicas (issue #81). PRUNE is
     // the separate opt-in cleanup: it mutates the registry with a replicated
     // `SREM`, so it — and only it — is registered `write` (routed to the
-    // primary), keeping STREAMS off the write path. The 8th tuple field is the
-    // *optional* @eventstream ACL category: attached on 7.4+ but skipped
-    // without error where RM_SetCommandACLCategories is null (7.2/7.3), so the
-    // commands stay individually grantable everywhere; the 7th (mandatory)
-    // field stays empty so no server fails the load over ACL wiring (issue #69).
+    // primary), keeping STREAMS off the write path. The @eventstream ACL
+    // category is attached in `init` (setup_acl_category), not via the macro's
+    // optional 8th tuple field, so an in-place reload survives (issue #107); the
+    // 7th (mandatory) field stays empty so no server fails the load over ACL
+    // wiring (issue #69).
     commands: [
-        ["eventstream.stats", cmd_stats, "readonly fast", 0, 0, 0, "", "eventstream"],
-        ["eventstream.streams", cmd_streams, "readonly", 0, 0, 0, "", "eventstream"],
-        ["eventstream.prune", cmd_prune, "write", 0, 0, 0, "", "eventstream"],
+        ["eventstream.stats", cmd_stats, "readonly fast", 0, 0, 0, ""],
+        ["eventstream.streams", cmd_streams, "readonly", 0, 0, 0, ""],
+        ["eventstream.prune", cmd_prune, "write", 0, 0, 0, ""],
     ],
     // No event_handlers: the module subscribes to keyspace events itself in
     // init, via a raw callback, so it can request MISSED and NEW (which the
