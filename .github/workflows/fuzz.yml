@@ -34,8 +34,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
+      # Pin the fuzz target to the host GNU triple. cargo-fuzz otherwise defaults
+      # to the triple it was itself built for; the installed binary is
+      # musl-static, and a musl target is not installed and is incompatible with
+      # the ASan sanitizer (statically linked libc).
       - name: Build fuzz targets
-        run: cargo +nightly fuzz build
+        run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
   # Weekly deep run. Skipped on pull_request (build above is the PR gate).
   fuzz:
@@ -63,7 +67,7 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz ${{ matrix.target }}
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+        run: cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
