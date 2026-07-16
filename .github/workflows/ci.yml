@@ -52,6 +52,34 @@ jobs:
       - name: Shellcheck
         run: git ls-files '*.sh' | xargs shellcheck -S style
 
+  # Lint the contrib/monitoring artifacts (issue #105): the Prometheus rules
+  # with promtool, and the Grafana dashboard for JSON validity. jq is
+  # preinstalled on ubuntu runners; promtool is downloaded from a pinned
+  # Prometheus release (no third-party action, matching the shellcheck job's
+  # minimal-dependency posture).
+  monitoring:
+    runs-on: ubuntu-latest
+    env:
+      PROM_VERSION: 3.13.1
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install promtool
+        run: |
+          set -euo pipefail
+          url="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          curl -fsSL "$url" | tar xz --strip-components=1 "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+          sudo install -m755 promtool /usr/local/bin/promtool
+          promtool --version
+      - name: Check Prometheus rules
+        run: promtool check rules contrib/monitoring/prometheus/eventstream.rules.yml
+      - name: Validate Grafana dashboard JSON
+        run: |
+          set -euo pipefail
+          jq empty contrib/monitoring/grafana/eventstream-dashboard.json
+          # Sanity: the dashboard must carry panels and a title.
+          test "$(jq '.panels | length' contrib/monitoring/grafana/eventstream-dashboard.json)" -gt 0
+          jq -e '.title' contrib/monitoring/grafana/eventstream-dashboard.json >/dev/null
+
   integration:
     runs-on: ubuntu-latest
     strategy:

@@ -1,0 +1,117 @@
+# Local monitoring stack for redis-event-stream-module — a working reference
+# and validation harness for the artifacts in this directory. Brings up:
+#
+#   redis              the module preloaded (built from the repo Dockerfile)
+#   eventstream_sidecar runs exporter/eventstream-textfile.sh in a loop,
+#                       writing eventstream.prom into a shared textfile volume
+#   node_exporter      exposes that textfile as eventstream_* metrics
+#   redis_exporter     redis_* metrics + events:* stream length/lag + module_info
+#   prometheus         scrapes both, loads eventstream.rules.yml
+#   grafana            auto-provisioned datasource + dashboard
+#
+# Start:   docker compose -f contrib/monitoring/docker-compose.yml up
+# Grafana: http://localhost:3000  (anonymous, dashboard "Redis Event Stream Module")
+# Prom:    http://localhost:9090  (Status > Rules to see the alerts)
+#
+# Generate some traffic to watch it move:
+#   redis-cli -p 6379 debug jmap  # no-op; use SET ... PX to drive expirations:
+#   for i in $(seq 1 500); do redis-cli -p 6379 set k$i v PX 200 >/dev/null; done
+
+services:
+  redis:
+    # Built from the repo Dockerfile (module + server from source) so this stack
+    # runs from a fresh checkout with no external image. Once the published image
+    # is available you can replace this build: block with
+    #   image: ghcr.io/joshrotenberg/redis-event-stream-module:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command:
+      - redis-server
+      - --loadmodule
+      - /usr/local/lib/redis/modules/libredis_event_stream_module.so
+      - events
+      - "expired,evicted,generic,string,set,list,hash"
+      - maxlen
+      - "100000"
+      - --save
+      - ""
+      # Local demo stack only: the other containers reach Redis over the compose
+      # network (non-loopback), so protected mode must be off. Do NOT copy this
+      # into a real deployment — use auth or a bound network there.
+      - --protected-mode
+      - "no"
+    ports:
+      - "6379:6379"
+
+  eventstream_sidecar:
+    image: redis:8-alpine
+    depends_on:
+      - redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./exporter/eventstream-textfile.sh:/scripts/eventstream-textfile.sh:ro
+      - textfile:/textfile
+    # Regenerate the exposition file every 15s with an atomic rename so
+    # node_exporter never reads a half-written file.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          /scripts/eventstream-textfile.sh > /textfile/eventstream.prom.tmp \
+            && mv /textfile/eventstream.prom.tmp /textfile/eventstream.prom
+          sleep 15
+        done
+
+  node_exporter:
+    image: prom/node-exporter:latest
+    depends_on:
+      - eventstream_sidecar
+    command:
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - textfile:/textfile:ro
+    ports:
+      - "9100:9100"
+
+  redis_exporter:
+    image: oliver006/redis_exporter:latest
+    depends_on:
+      - redis
+    command:
+      - --redis.addr=redis://redis:6379
+      - --include-modules-metrics
+      - --check-streams=events:*
+    ports:
+      - "9121:9121"
+
+  prometheus:
+    image: prom/prometheus:latest
+    depends_on:
+      - node_exporter
+      - redis_exporter
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/eventstream.rules.yml:/etc/prometheus/eventstream.rules.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/eventstream-dashboard.json:/var/lib/grafana/dashboards/eventstream-dashboard.json:ro
+    ports:
+      - "3000:3000"
+
+volumes:
+  textfile:
