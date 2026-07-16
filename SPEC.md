@@ -201,6 +201,7 @@ An entry that cannot be encoded is dropped and counted in `dropped_encode_error`
 
 The module name is `eventstream`; Redis registers module configs as `<module-name>.<key>`, so all keys read `eventstream.<key>`. This is the single authoritative table; every name and default elsewhere in this document matches it.
 
+<!-- ANCHOR: config-table -->
 | Key | Type | Default | Live-settable | Validation |
 |---|---|---|---|---|
 | `eventstream.enabled` | bool | `yes` | yes | `yes` / `no` |
@@ -218,6 +219,7 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | `eventstream.entry-format` | enum | `fixed` | yes | `fixed`, `minimal`, `verbose`, or `json` (section 6). The module's first enum config |
 | `eventstream.entry-seq` | bool | `no` | no (IMMUTABLE) | `yes` / `no`; appends the global `seq` field to every entry (section 6) |
 | `eventstream.auto-group` | string | `` (empty) | yes | empty (disabled, the default) or a consumer-group name the module creates on each destination stream; at most 128 bytes over `A-Z a-z 0-9 : . _ -` (empty tokens and whitespace rejected). See section 9 |
+<!-- ANCHOR_END: config-table -->
 
 **`eventstream.enabled`.** Master kill switch. There is no unsubscribe API for keyspace notifications, so `no` is an early return at the top of the notification handler (one atomic load per event). Flipping back to `yes` does not replay events that occurred while disabled.
 
@@ -261,6 +263,7 @@ Example:
 8) "10000"
 ```
 
+<!-- ANCHOR: config-grammars -->
 ### Events filter grammar
 
 The subscription mask is fixed at load (there is no resubscribe API), so the filter is a module-side predicate evaluated per notification. Class tokens only select; they never change stream naming, which is always per event name.
@@ -335,6 +338,7 @@ cap              := non-negative decimal integer (0 disables trimming for that s
 | `expired=600000,set=1000` | `events:expired` and `events:set` sized independently; others global |
 | `audit=0` | `events:audit` never trims (like global `maxlen 0`); others global |
 | `#control=50` | the control stream trims at 50; data streams use the global cap |
+<!-- ANCHOR_END: config-grammars -->
 
 ### Validation mechanics
 
@@ -345,11 +349,13 @@ The wrapper's stock `ConfigurationValue` impls never reject beyond UTF-8 convers
 (error) ERR CONFIG SET failed - unknown event class '@hsah'
 ```
 
+<!-- ANCHOR: config-precedence -->
 ### Load-time args
 
 Precedence at load, lowest first: compiled default; unprefixed module args (`loadmodule .../libredis_event_stream_module.so events "expired,evicted" maxlen 50000`, enabled by `module_args_as_configuration: true`); prefixed standard config sources (`eventstream.events` directive in redis.conf, or `MODULE LOADEX ... CONFIG eventstream.events ...`, applied by `RedisModule_LoadConfigs` after registration); then `CONFIG SET` at runtime for mutable keys. `CONFIG REWRITE` persists current values.
 
 Operator quirks to document: bool module args are true only for the literal string `yes` (anything else silently parses as false, `get_bool_default_config_value`), and a malformed module-arg value aborts module load with a logged error. Implementation note: with `module_args_as_configuration: true` the macro expansion requires all four config-type lists to be present (verified against v2.1.3; omitting one fails to compile, section 17 question 4), so the module registers an empty `enum: []` block, with a code comment, since it has no enum configs in v0.1. The macro's optional `module_config_get`/`module_config_set` convenience commands are not registered; `CONFIG GET/SET eventstream.*` covers the need.
+<!-- ANCHOR_END: config-precedence -->
 
 ### Interplay with notify-keyspace-events
 
@@ -360,6 +366,7 @@ Module delivery does not depend on `notify-keyspace-events`. Verified against Re
 - The only load-time intersection the wrapper performs is capability, not configuration: `redis_event_handler!` intersects the requested mask with `RedisModule_GetKeyspaceNotificationFlagsAll()` (classes this server build supports) and logs a notice for anything unsupported.
 - An integration test pins this behavior on the minimum supported server (section 15): with `notify-keyspace-events ""`, an expiring key must still produce an entry in `events:expired`.
 
+<!-- ANCHOR: config-live-change -->
 ### Live-change semantics
 
 | Key changed | Next event | Jobs enqueued before the change |
@@ -376,9 +383,11 @@ Module delivery does not depend on `notify-keyspace-events`. Verified against Re
 | `max-streams` | new cap on new-stream creation | still execute; a stream already registered keeps writing even if the cap was lowered below the current count |
 
 Since post-notification jobs run atomically within the triggering command and `CONFIG SET` is a separate serialized command, the enqueue-to-execute window never spans a config change in a way that needs special handling. The prefix cannot change at runtime, so the feedback guard always matches the single current prefix.
+<!-- ANCHOR_END: config-live-change -->
 
 ## 8. Commands
 
+<!-- ANCHOR: commands -->
 Behavior changes go through `CONFIG SET`; nothing observable requires a module command, since the INFO section (section 13) and standard stream commands (`XLEN`, `XRANGE`, `XINFO STREAM`, `XINFO GROUPS`) cover it. v0.1 shipped with no commands on that basis.
 
 Three keyless commands were added after v0.1 — two read-only introspection commands and one opt-in cleanup:
@@ -401,6 +410,7 @@ The bare `EVENTSTREAM.STREAMS` reply is the flat array of stream names, unchange
 `EVENTSTREAM.PRUNE` (issue #81) reconciles the registry against the live keyspace: it removes the registered names whose destination key is **absent** (`EXISTS 0`: deleted) via a replicated `SREM` and returns the integer count removed. Absence read via `EXISTS` is the sole trigger — a present key that is empty, or a foreign non-stream key parked at the name, is not absent and is left registered, so deadness is never inferred from an `XLEN` error. The `SREM` keeps the registration `SADD`'s replication (`!`) and errors-as-replies (`E`) so replicas and the AOF/RDB converge, but drops the verify-oom (`M`) flag: pruning frees memory, so refusing it under `maxmemory` would be wrong. It is the only command that mutates the registry and is never automatic. Each pruned name's in-process dedupe entry is invalidated in the same operation, so a later write re-registers it (the since-load `active_streams` counter is not decremented — it is a lifetime count — while the currently-registered count backing `max-streams` is). The existence check and the `SREM` run within one command execution, so a stream recreated between the two is left registered on the non-cluster node.
 
 In per-node cluster mode `EVENTSTREAM.STREAMS` covers the local node's registry and this process's counters only, and `EVENTSTREAM.PRUNE` reconciles only that node's registry (section 10; cluster-wide fan-out is client-side, issue #47).
+<!-- ANCHOR_END: commands -->
 
 ## 9. Delivery semantics
 
@@ -445,6 +455,7 @@ Semantic caveat inherited from Redis: `expired` fires when Redis actually remove
 
 ### Gap markers
 
+<!-- ANCHOR: gap-markers -->
 Capture gaps are made machine-readable through a control stream at `<stream-prefix>#control` (default `events:#control`). The `#` character is outside the sanitizer alphabet (section 5), so no event name can collide with it. The module writes a marker entry at each capture-boundary lifecycle point:
 
 | Trigger | `action` value |
@@ -463,6 +474,7 @@ The flush and `SWAPDB` events are captured through raw `RedisModule_SubscribeToS
 Delivery mechanics. Direct writes are impossible or unsafe at most of these lifecycle points, so markers are deferred, not hedged: at v2.1.3 the config on-changed callback receives only a `ConfigurationContext`, a deliberately restricted type with no command-call capability, and a direct write in `init` is a startup hazard (with `loadmodule` at startup the module initializes before the dataset loads; creating the control stream in the empty keyspace makes the subsequent RDB load hit a duplicate key and abort the server). A direct write at flush time would itself be flushed (for `FLUSHALL` or `FLUSHDB` in db 0, which delete the control stream). The `loaded`, `disabled`, `enabled`, `flushed`, and `swapdb` markers therefore go through a pending-marker mechanism: the lifecycle point records the pending action (a `Vec`, so overlapping points accumulate rather than clobber each other), and the notification callback, which keeps running while disabled, checks it ahead of the enabled gate and enqueues a post-notification job that writes the pending markers before that event's mirrored entry. The marker's entry ID consequently timestamps the first event at the boundary, which is exactly the boundary that matters: the first lost event after a disable, the first captured event after an enable, load, flush, or swap. If no notification fires, the pending marker is never written, and nothing was mirrored into the void in that window either (for a flush that deleted the streams the pre-flush contents are still gone). The only direct write is `unloading` in `deinit`, which runs inside the `MODULE UNLOAD` command on a live server, where writes are safe and no future notification exists to defer to.
 
 Consumers delimit gap windows by reading marker pairs: the window between a `disabled` or `unloading` marker and the next `enabled` or `loaded` marker is a capture gap, and reconciliation can be bounded to it instead of sweeping the keyspace. A `flushed` marker opens a gap that a full reconcile of the flushed database closes (the pre-flush stream contents are gone); a `swapdb` marker means entries before it may now live in another database (read the swapped database to recover db 0 history). In cluster per-node mode a `repinned` marker (section 10) appears on a node's new control stream when its pinned slot migrated away, delimiting the point where that node's stream name changed and any migration-window events were lost. Two limitations, both documented: crashes write no closing marker, and clean server shutdowns cannot write one — a shutdown marker is structurally impossible (investigated and rejected in #67). `finishShutdown` in server.c (verified at Redis 7.2.0 and 8.0.0) orders the final AOF flush, then the final RDB save, then the Shutdown module event, then the replica output-buffer flush, so a write from the event handler never reaches the persisted dataset; replicating that write instead trips `propagateNow`'s shutdown-pause assertion when replicas are attached and not fully acked (`prepareForShutdown` pauses client writes and `finishShutdown` never unpauses), aborting the server. Clean restarts and crashes are therefore indistinguishable, permanently: both appear as a `loaded` marker with no preceding `unloading` or `disabled`, bounded below by the last entry ID across the mirrored streams.
+<!-- ANCHOR_END: gap-markers -->
 
 ### Slow-consumer contract
 
@@ -631,6 +643,7 @@ The module's own writes run server-side with module privileges and are not subje
 
 One module INFO section via the wrapper's `InfoContext` builder (`#[info_command_handler]`). Redis prefixes module sections and fields with the module name. All counters are `AtomicU64` statics: process-lifetime, monotonic, reset on load, never persisted or replicated; `skipped_*` counters are incremented inside the notification callback (safe; only keyspace writes are not); `forwarded`, `control_markers`, and `dropped_*` at the write sites (the post-notification job for mirrored entries and pending markers, `deinit` for the unloading marker).
 
+<!-- ANCHOR: counters-info -->
 ```
 # eventstream_stats
 eventstream_enabled:1
@@ -661,13 +674,17 @@ eventstream_cluster_per_node:0
 eventstream_cluster_pinned_tag:
 eventstream_last_error_time:1752071011
 ```
+<!-- ANCHOR_END: counters-info -->
 
+<!-- ANCHOR: counters-explanation -->
 `dropped` is the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, `dropped_migrating`, `dropped_max_streams`, and `dropped_encode_error`. `dropped_max_streams` counts events dropped because creating their destination stream would exceed `eventstream.max-streams` (section 7); the stream was never created and existing streams are unaffected. `dropped_encode_error` counts entries dropped because the configured `entry-format` could not encode the event (section 6); with the shipped formats only `json` can fail, on a non-UTF-8 event name, and it is first-failure-logged once per process like the other no-destination drop reasons. `skipped_key_filtered` and `skipped_db` count events dropped in the notification callback by the key-name glob filter and the source-db filter respectively (section 7), kept separate from `skipped_filtered` (the event-name/class filter) so a "forwarded flat while `expired_keys` rises" diagnosis can tell which filter is too narrow. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `autogroup_created` and `autogroup_failed` are the consumer-group auto-provisioning counters (`eventstream.auto-group`, sections 7 and 9): `autogroup_created` counts genuine `XGROUP CREATE` successes (a `BUSYGROUP` reply — the group already existed — is idempotent success and not counted), and `autogroup_failed` counts failures other than `BUSYGROUP`. Neither is part of the `dropped` sum: the triggering event was still captured, only the group side-effect failed. `autogroup_failed` follows the first-failure-log policy of the no-destination drop reasons, and the failed creation is retried on the stream's next write. `active_streams` counts stream registrations since load, excluding the control stream: normally the number of distinct destination streams written, but the counter never resets — a flush clears the in-process registry cache, so a stream re-registered after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. `eviction_risk` is a derived 0/1 flag (issue #106): 1 when `maxmemory-policy` is an `allkeys-*` policy, which can evict the destination streams themselves and silently destroy captured history (section 11). It is recomputed at load and on every config-change server event, so it follows a live `CONFIG SET maxmemory-policy`; the offending policy name is logged, not surfaced in INFO. `volatile-*` policies are not flagged — they evict only keys carrying a TTL, and the streams carry none. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO. Per-stream forwarded/dropped counters live in the `EVENTSTREAM.STREAMS WITHSTATS` reply (section 8), never in INFO: one field set per event type ever seen is unbounded cardinality, hostile to INFO scrapers.
+<!-- ANCHOR_END: counters-explanation -->
 
 Documentation must state plainly: module sections do not appear in default `INFO` or `INFO all`; use `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. This is otherwise a recurring support question.
 
 Alerting guidance:
 
+<!-- ANCHOR: alerting-table -->
 | Signal | Source | Condition |
 |---|---|---|
 | `eventstream_dropped` | INFO | any increase |
@@ -680,6 +697,7 @@ Alerting guidance:
 | `eventstream_autogroup_failed` | INFO | any increase: `eventstream.auto-group` could not create the group (section 9); check the group name and the server's `XGROUP` support |
 | Stream size | `XLEN` on `events:*` | unbounded growth (`maxlen` 0 or too high) |
 | Consumer lag | `XINFO GROUPS` `lag` | over threshold |
+<!-- ANCHOR_END: alerting-table -->
 
 ### Logging policy
 
