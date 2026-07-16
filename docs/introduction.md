@@ -7,14 +7,17 @@ the keyspace change, so events are durable, replayable, and consumable with
 `XREAD` or consumer groups. It runs on Redis 7.2+, standalone, with replicas,
 or in a cluster with opt-in per-node capture.
 
-This site is the reference documentation. For a quick overview, install steps,
-and a runnable demo, start with the
-[README](https://github.com/joshrotenberg/redis-event-stream-module#readme).
+This site is the reference documentation. New here? Start with the
+[Quickstart](./quickstart.md) — install, load, and capture your first event.
 
 ## What is here
 
-- **[Docker image](./docker.md)** - the preloaded GHCR image: `docker run`
-  one-liner, passing module arguments, tags and variants.
+- **[Quickstart](./quickstart.md)** - install from a release artifact or source,
+  load the module, and read a mirrored event back.
+- **[Demo and preflight](./demo.md)** - the scripted end-to-end demo and the
+  deployment health check.
+- **[Docker image](./docker.md)** - the preloaded image: `docker run` one-liner,
+  passing module arguments, tags and variants.
 - **[Redis Enterprise](./enterprise.md)** - the RAMP bundle: uploading to a
   self-managed Enterprise cluster, the Cloud exclusion, and multi-shard
   (per-shard-stream) semantics.
@@ -26,9 +29,13 @@ and a runnable demo, start with the
   full keyspace scan.
 - **[Cluster support](./cluster-design.md)** - the slot-pinned per-node design:
   hash-tag selection, re-pinning after a reshard, failover, and discovery.
-- **[Specification](./specification.md)** - the authoritative design:
-  architecture, event routing, entry schema, configuration, delivery semantics,
-  failure modes, and observability.
+- **[Monitoring](./monitoring.md)** - Prometheus rules, a Grafana dashboard, and
+  a metrics collector for the INFO counters.
+- **Reference** - lookup-ordered pages for
+  [configuration](./configuration.md), [commands](./commands.md),
+  [counters](./counters.md), [gap markers](./gap-markers.md), the
+  [example client](./example-client.md), and [benchmarks](./benchmarks.md),
+  plus the full authoritative [specification](./specification.md).
 
 The module writes only streams; everything on the read side is ordinary Redis
 Streams, so any Streams-capable client works.
