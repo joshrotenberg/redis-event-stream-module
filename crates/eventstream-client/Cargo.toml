@@ -1,6 +1,6 @@
 [package]
 name = "eventstream-client"
-version = "0.2.0"
+version = "0.3.0"
 # Edition 2021 and MSRV 1.88 match the module crate (SPEC.md section 14, #97):
 # one toolchain floor across the workspace so the msrv CI leg's
 # `cargo check --all-targets` covers both members on the same version.
