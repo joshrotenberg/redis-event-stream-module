@@ -8,6 +8,10 @@
 # name for the .so/.dylib and builds the client binary alongside it.
 [workspace]
 members = ["crates/eventstream-client"]
+# The cargo-fuzz crate (issue #131) is its own detached workspace: it needs
+# nightly + libFuzzer and links this crate as an rlib, so it must stay out of
+# the stable root workspace that CI builds/lints/tests.
+exclude = ["fuzz"]
 # Both members are default, so a bare root command (cargo build/clippy/test)
 # spans the module (".") and the client. Without this, a root package that is
 # also the workspace root makes cargo default to the root package alone, which
@@ -37,7 +41,12 @@ categories = ["database"]
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+# `cdylib` is the shipped module artifact; `rlib` is added so the cargo-fuzz
+# crate (issue #131) can link the library and reach the pure parser/sanitizer
+# functions. The `rlib` is a separate output and does not change the `cdylib`
+# the release-artifacts workflow and Dockerfile build and ship (verified: the
+# `.so`/`.dylib` is byte-for-byte the same size with and without it).
+crate-type = ["cdylib", "rlib"]
 
 # Companion test module (issue #91): a second cdylib the integration suite
 # loads next to the main module to fire RM_NotifyKeyspaceEvent with arbitrary
@@ -46,6 +55,12 @@ crate-type = ["cdylib"]
 [[example]]
 name = "notifytest"
 crate-type = ["cdylib"]
+
+# Enabled only by the cargo-fuzz crate (issue #131): compiles the `pub`
+# `fuzz_targets` module that exposes thin wrappers over the internal parser and
+# sanitizer functions. Off by default, so the shipped cdylib is unchanged.
+[features]
+fuzzing = []
 
 [dependencies]
 # crates.io releases of redis-module lag the repo badly; Redis's own modules
@@ -74,3 +89,11 @@ tempfile = "3"
 
 [profile.release]
 lto = true
+# A single codegen unit lets fat LTO fold the whole crate. It also neutralizes
+# the size cost of the `rlib` output added for cargo-fuzz (issue #131): building
+# `cdylib` + `rlib` together weakens per-unit LTO with the default 16 units and
+# grew the shipped `.so` ~20%, but at `codegen-units = 1` that penalty drops to
+# ~3% and the shipped artifact is in fact smaller than it was before (LTO now
+# folds more). The trade is a slower release build, acceptable for a shipped
+# module. See the `[lib]` note above.
+codegen-units = 1

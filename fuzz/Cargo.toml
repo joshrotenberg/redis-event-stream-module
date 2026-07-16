@@ -1,0 +1,46 @@
+# cargo-fuzz crate (issue #131), coverage-guided (libFuzzer) fuzzing of the pure
+# parser/sanitizer functions that ingest untrusted input. Detached from the root
+# workspace ([workspace] below + `exclude` in ../Cargo.toml) because it needs
+# nightly + libFuzzer, which the stable root workspace must not build.
+[package]
+name = "redis-event-stream-module-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# The `fuzzing` feature exposes the `fuzz_targets` module and compiles out the
+# redis_module! macro (and its global allocator), so this links as an ordinary
+# rlib into the libFuzzer binary.
+[dependencies.redis-event-stream-module]
+path = ".."
+features = ["fuzzing"]
+
+[[bin]]
+name = "parse_filter"
+path = "fuzz_targets/parse_filter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_prefix"
+path = "fuzz_targets/validate_prefix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize"
+path = "fuzz_targets/sanitize.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace: cargo-fuzz crates are nightly-only.
+[workspace]
