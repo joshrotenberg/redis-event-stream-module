@@ -12,6 +12,7 @@
 - [Consumer patterns](./consumer-patterns.md)
 - [Loss windows and reconciliation](./loss-windows.md)
 - [Cluster support](./cluster-design.md)
+- [Monitoring](./monitoring.md)
 
 # Reference
 

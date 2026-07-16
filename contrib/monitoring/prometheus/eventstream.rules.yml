@@ -1,0 +1,230 @@
+# Prometheus recording and alert rules for redis-event-stream-module.
+#
+# This is the SPEC.md section 13 alerting-guidance table made executable. Every
+# alert maps to a row of that table (or to a counter the spec calls out as
+# always-should-be-zero). Load it into Prometheus with:
+#
+#   rule_files:
+#     - /etc/prometheus/eventstream.rules.yml
+#
+# Metric sources (see contrib/monitoring/README.md):
+#   - eventstream_*        the sidecar collector (contrib/monitoring/exporter),
+#                          because redis_exporter cannot export module INFO
+#                          counters (only module_info).
+#   - redis_*              a standard redis_exporter scraping the same instance
+#                          (redis_expired_keys_total, redis_stream_length,
+#                          redis_stream_group_lag).
+#
+# Counters are process-lifetime and reset to 0 on module reload (SPEC.md
+# section 13). Every rule that reads a counter uses rate()/increase(), which
+# tolerate counter resets; no rule reads an absolute counter value.
+#
+# The EventstreamFilterMisconfigured rule correlates a sidecar metric with a
+# redis_exporter metric, so both scrape jobs must carry a shared label
+# identifying the Redis instance they observe. The provided prometheus.yml sets
+# `redis_instance` on both jobs; the vector match is `on(redis_instance)`. If
+# that label is absent or differs, the rule simply never matches (no false
+# positive). Adjust the label name to match your scrape config if needed.
+#
+# Thresholds (EventstreamStreamGrowth, EventstreamConsumerLag) are deployment
+# specific; the defaults below assume the module's default maxlen of 10000.
+# Tune them to your `eventstream.maxlen` / consumer SLA.
+
+groups:
+  - name: eventstream.recording
+    rules:
+      # Convenience series for dashboards: per-instance event throughput and
+      # total drop rate. Counter resets handled by rate().
+      - record: eventstream:forwarded:rate5m
+        expr: sum by (redis_instance) (rate(eventstream_forwarded[5m]))
+      - record: eventstream:dropped:rate5m
+        expr: sum by (redis_instance) (rate(eventstream_dropped[5m]))
+      - record: eventstream:skipped:rate5m
+        expr: sum by (redis_instance) (rate(eventstream_skipped_filtered[5m]))
+
+  - name: eventstream.alerts
+    rules:
+      # SPEC.md section 13: "eventstream_dropped — any increase." A drop is
+      # unmirrored history; the per-reason counters below localize the cause.
+      - alert: EventstreamDropped
+        expr: increase(eventstream_dropped[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream is dropping events on {{ $labels.redis_instance }}"
+          description: >-
+            eventstream_dropped increased in the last 5m
+            ({{ $value | printf "%.0f" }} events). Each drop is an event that was
+            not mirrored. Break down by reason with the eventstream_dropped_*
+            counters (xadd_error, oom, defer_error, max_streams, encode_error,
+            migrating). See SPEC.md section 13.
+
+      # SPEC.md section 13: "eventstream_dropped_max_streams — any increase: the
+      # max-streams cap is refusing new streams." Distinct remediation, so its
+      # own alert.
+      - alert: EventstreamMaxStreamsRefusing
+        expr: increase(eventstream_dropped_max_streams[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream max-streams cap is refusing new streams on {{ $labels.redis_instance }}"
+          description: >-
+            eventstream.max-streams is refusing to create new destination
+            streams. Raise the cap, narrow the filter, or investigate the event
+            name source (SPEC.md sections 7 and 13).
+
+      # SPEC.md section 13: "eventstream_enabled — 0 when expected 1." The module
+      # is loaded but capture is disabled.
+      - alert: EventstreamDisabled
+        expr: eventstream_enabled == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream capture is disabled on {{ $labels.redis_instance }}"
+          description: >-
+            eventstream_enabled is 0. The module is loaded but not capturing.
+            Re-enable with CONFIG SET eventstream.enabled yes if unintended.
+
+      # SPEC.md section 13 (issue #106): "eventstream_eviction_risk — 1." An
+      # allkeys-* maxmemory policy can evict the destination streams themselves,
+      # silently destroying captured history.
+      - alert: EventstreamEvictionRisk
+        expr: eventstream_eviction_risk == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "maxmemory-policy can evict eventstream streams on {{ $labels.redis_instance }}"
+          description: >-
+            maxmemory-policy is an allkeys-* policy, which can evict the
+            events:* destination streams and destroy captured history. Set
+            noeviction or a volatile-* policy (SPEC.md section 11).
+
+      # SPEC.md section 13: handler_panics "should always be 0, and any nonzero
+      # value is a bug in this module." Not a row in the table, but the spec
+      # flags it explicitly as always-zero.
+      - alert: EventstreamHandlerPanic
+        expr: eventstream_handler_panics > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "eventstream caught a handler panic on {{ $labels.redis_instance }}"
+          description: >-
+            eventstream_handler_panics is nonzero. This should never happen and
+            indicates a bug in the module; capture a bug report with the server
+            log around the panic.
+
+      # SPEC.md section 13: "eventstream_forwarded — flat while expired_keys in
+      # INFO stats rises (filter misconfigured)." Correlates the sidecar metric
+      # with redis_exporter's redis_expired_keys_total; see the on(redis_instance)
+      # note in the file header.
+      - alert: EventstreamFilterMisconfigured
+        expr: |
+          rate(eventstream_forwarded[10m]) == 0
+            and on(redis_instance) rate(redis_expired_keys_total[10m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream is forwarding nothing while keys expire on {{ $labels.redis_instance }}"
+          description: >-
+            Keys are expiring (redis_expired_keys_total rising) but
+            eventstream_forwarded is flat. The event/class or key filter is
+            likely too narrow, or keyspace notifications are not configured for
+            the events being captured. Check eventstream.events and
+            notify-keyspace-events (SPEC.md section 13).
+
+      # SPEC.md section 13 alerting table: unbounded XLEN growth on events:*
+      # (maxlen 0 or set too high). redis_exporter --check-streams provides
+      # redis_stream_length. Default threshold assumes maxlen 10000.
+      - alert: EventstreamStreamGrowth
+        expr: redis_stream_length{stream=~"events:.*"} > 100000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream stream {{ $labels.stream }} is growing unbounded"
+          description: >-
+            {{ $labels.stream }} holds {{ $value | printf "%.0f" }} entries, well
+            past the default maxlen of 10000. Either maxlen is 0/too high or a
+            consumer has stalled. Set eventstream.maxlen (or retention-ms) for
+            the slowest consumer (SPEC.md sections 8 and 13).
+
+      # SPEC.md section 13 alerting table: consumer group lag over threshold.
+      # redis_exporter --check-streams provides redis_stream_group_lag.
+      - alert: EventstreamConsumerLag
+        expr: redis_stream_group_lag{stream=~"events:.*"} > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream consumer group {{ $labels.group }} is lagging on {{ $labels.stream }}"
+          description: >-
+            Group {{ $labels.group }} on {{ $labels.stream }} is
+            {{ $value | printf "%.0f" }} entries behind. A consumer is falling
+            behind the write rate; scale consumers or raise retention so entries
+            are not trimmed before they are read (SPEC.md section 12).
+
+      # SPEC.md section 13: "eventstream_dropped_migrating — any increase outside
+      # a planned reshard." PromQL cannot know about a planned reshard; silence
+      # this alert for the duration of one.
+      - alert: EventstreamMigratingDrops
+        expr: increase(eventstream_dropped_migrating[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream dropped events in a slot-migration window on {{ $labels.redis_instance }}"
+          description: >-
+            Events were dropped because their slot was migrating even after the
+            re-pin retry (SPEC.md section 10). Expected briefly during a planned
+            reshard — silence this alert for the reshard. Unexpected otherwise.
+
+      # SPEC.md section 13: "eventstream_repins_probe_detected — nonzero: the
+      # re-pin error-string match stopped working." A module-internal early
+      # warning, worth an alert because it degrades silently.
+      - alert: EventstreamRepinProbeFallback
+        expr: eventstream_repins_probe_detected > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream re-pin error-string match may have broken on {{ $labels.redis_instance }}"
+          description: >-
+            Re-pins were detected by the ownership-probe fallback rather than the
+            recognized migration error text. The server's error string may have
+            changed across a version; verify cluster capture still works and file
+            an issue (SPEC.md section 10).
+
+      # SPEC.md section 13: "eventstream_autogroup_failed — any increase:
+      # eventstream.auto-group could not create the group."
+      - alert: EventstreamAutogroupFailing
+        expr: increase(eventstream_autogroup_failed[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream auto-group creation is failing on {{ $labels.redis_instance }}"
+          description: >-
+            eventstream.auto-group could not create a consumer group (a reason
+            other than BUSYGROUP). Check the configured group name and the
+            server's XGROUP support (SPEC.md sections 7 and 9).
+
+      # Collector health: the sidecar sets eventstream_up 0 when INFO eventstream
+      # cannot be scraped (server down, or the module is not loaded). Distinct
+      # from Prometheus `up`, which only reports target reachability.
+      - alert: EventstreamCollectorDown
+        expr: eventstream_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream metrics collector cannot reach the module on {{ $labels.redis_instance }}"
+          description: >-
+            The eventstream textfile collector could not read INFO eventstream:
+            the server is down or the module is not loaded. Module counters are
+            stale until this recovers.
