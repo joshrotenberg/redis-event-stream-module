@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- In-place module upgrade (`MODULE UNLOAD` then `MODULE LOAD` in the same
+  process) no longer fails on the second load. Redis keeps a module's
+  `@eventstream` ACL category across unload, so re-adding it aborted the reload;
+  the category is now registered tolerantly at init. Documented in the new
+  [upgrading](docs/upgrading.md) runbook and pinned by an integration test
+  (#107).
+
 ## [0.2.0] - 2026-07-11
 
 Cluster support and a load-testing example client. Standalone behavior is

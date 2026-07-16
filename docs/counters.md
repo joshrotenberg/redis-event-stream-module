@@ -5,7 +5,7 @@ available as a flat array from `EVENTSTREAM.STATS` and are logged at unload. All
 counters are process-lifetime: monotonic, reset to zero on load, never
 persisted or replicated — so monitoring must alert on *increases*
 (`rate()`/`increase()`), not absolute values, and tolerate a reset to zero
-across a module reload or in-place upgrade.
+across a module reload or [in-place upgrade](./upgrading.md).
 
 > **Module INFO sections do not appear in default `INFO` or `INFO all`.** Use
 > `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. A stock

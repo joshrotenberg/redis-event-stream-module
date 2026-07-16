@@ -18,6 +18,7 @@
 - [Loss windows and reconciliation](./loss-windows.md)
 - [Cluster support](./cluster-design.md)
 - [Monitoring](./monitoring.md)
+- [Upgrading](./upgrading.md)
 
 # Reference
 
