@@ -11,6 +11,19 @@ Streams, so any Streams-capable client works and nothing here is
 module-specific. See [SPEC.md](../SPEC.md) section 9 for the delivery semantics
 these patterns rely on.
 
+Runnable versions of the patterns below — live tail, the consumer-group work
+queue with stuck-work recovery, and gap-marker reconciliation — ship as small
+per-language programs under
+[`examples/`](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/examples):
+[Python](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/examples/python)
+(redis-py),
+[Go](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/examples/go)
+(go-redis), and
+[Node.js](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/examples/node)
+(ioredis), each demonstrating binary-safe `key` handling for its client. The
+Rust [`eventstream-client`](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/crates/eventstream-client)
+crate additionally covers cluster fan-out.
+
 ## Entry shape
 
 Each entry has three fields and an ID:

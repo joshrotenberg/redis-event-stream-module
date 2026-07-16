@@ -80,6 +80,20 @@ jobs:
           test "$(jq '.panels | length' contrib/monitoring/grafana/eventstream-dashboard.json)" -gt 0
           jq -e '.title' contrib/monitoring/grafana/eventstream-dashboard.json >/dev/null
 
+  # Lint the non-Rust consumer examples (issue #110). Compile/vet only — no live
+  # server — using the go/node/python toolchains preinstalled on ubuntu runners,
+  # matching the shellcheck/monitoring jobs' minimal-dependency posture.
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Python (py_compile)
+        run: python3 -m py_compile examples/python/consumer.py
+      - name: Node (--check)
+        run: node --check examples/node/consumer.js
+      - name: Go (vet)
+        run: cd examples/go && go vet ./...
+
   integration:
     runs-on: ubuntu-latest
     strategy:
