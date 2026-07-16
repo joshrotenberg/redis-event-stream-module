@@ -1,10 +1,10 @@
 # Docker image
 
 A preloaded image is published to
-`ghcr.io/joshrotenberg/redis-event-stream-module` on each release. It is an
-official Redis (or Valkey) image with the module `.so` copied to a fixed path
-and `loadmodule` wired into the default command, so a bare `docker run` starts
-a server with the module already loaded.
+`ghcr.io/joshrotenberg/redis-event-stream-module` on each release. It bundles a
+Redis server with the module `.so` copied to a fixed path and `loadmodule`
+wired into the default command, so a bare `docker run` starts a server with the
+module already loaded.
 
 ## Quick start
 
@@ -45,24 +45,21 @@ way (for example `--appendonly yes` for AOF persistence).
 | Tag | Server | Notes |
 |-----|--------|-------|
 | `<version>`, `latest` | Redis 8.8.0 | e.g. `0.2.0` |
-| `<version>-valkey8`, `latest-valkey8` | Valkey 8.1.6 | Valkey variant |
 
-The server is built from source inside the image (the CI-pinned versions),
-rather than layered onto an upstream `redis`/`valkey` image: the module builds
-and loads on every vanilla Redis 7.2+/Valkey 8+ the CI matrix covers, but the
-official Redis Ltd `redis:8` image ships a build that rejects the module's
-config initialization at load, where vanilla 8.8.0-from-source and the official
-Valkey image both accept the identical `.so`. Building from source makes the
-image provably match a server the module loads on.
+The server is built from source inside the image (the CI-pinned version),
+rather than layered onto an upstream `redis` image: the official Redis Ltd
+`redis:8` image ships a build that rejects the module's config initialization
+at load, where a vanilla 8.8.0 built from source accepts the identical `.so`.
+Building from source makes the image provably match a server the module loads
+on.
 
 Images are multi-arch manifests for `linux/amd64` and `linux/arm64`, matching
 the linux-x86_64/linux-aarch64 release binaries; there is no macOS image (the
 `.dylib` is out of scope for containers). Pin by digest for reproducible
 deployments (`docker pull ...@sha256:...`).
 
-Only Redis 7.2+/Valkey 8.x servers are published. On pre-7.2 servers the module
-load is a process abort at startup, not a clean refusal (SPEC.md section 14),
-so lower versions are never built.
+On pre-7.2 servers the module load is a process abort at startup, not a clean
+refusal (SPEC.md section 14), so lower versions are never built.
 
 ## Building locally
 
@@ -71,7 +68,6 @@ slim runtime). `SERVER_KIND` and `SERVER_VERSION` select and pin the server:
 
 ```sh
 make docker                                       # Redis 8.8.0
-make docker-valkey                                # Valkey 8.1.6
 # or directly:
 docker build --build-arg SERVER_KIND=redis \
   --build-arg SERVER_VERSION=8.8.0 -t eventstream:local .

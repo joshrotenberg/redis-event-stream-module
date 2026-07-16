@@ -4,13 +4,13 @@
 [![Chaos](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/chaos.yml/badge.svg)](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/chaos.yml)
 [![Release](https://img.shields.io/github/v/release/joshrotenberg/redis-event-stream-module)](https://github.com/joshrotenberg/redis-event-stream-module/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
-![Redis 7.2+ | Valkey 8.x/9.x](https://img.shields.io/badge/Redis_7.2%2B_%7C_Valkey_8.x%2F9.x-informational)
+![Redis 7.2+](https://img.shields.io/badge/Redis_7.2%2B-informational)
 
 A Redis module that mirrors keyspace notifications into per-event Redis
 Streams. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
 stream entry, written atomically with the keyspace change, so events are
 durable, replayable, and consumable with `XREAD` or consumer groups. Runs on
-Redis 7.2+ and Valkey 8.x/9.x, standalone or with replicas.
+Redis 7.2+, standalone or with replicas.
 
 Status: early release. The code implements the [SPEC.md](SPEC.md) design, the
 authoritative reference: the v0.1 capture and introspection surface, plus v0.2
@@ -69,12 +69,11 @@ docker run --rm -p 6379:6379 ghcr.io/joshrotenberg/redis-event-stream-module:lat
 docker exec <container> redis-cli XREAD COUNT 10 STREAMS events:expired 0
 ```
 
-Tags: `<version>` and `latest` for the Redis server, plus a `-valkey8` suffix
-for the Valkey variant (e.g. `0.2.0-valkey8`); images are multi-arch
-(`linux/amd64`, `linux/arm64`). The server is built from source in the image
-(the CI-pinned Redis/Valkey versions) rather than layered onto an upstream
-image; see [docs/docker.md](docs/docker.md) for why and for build details. Only
-Redis 7.2+/Valkey 8.x are published (SPEC.md section 14).
+Tags: `<version>` and `latest`; images are multi-arch (`linux/amd64`,
+`linux/arm64`). The server is built from source in the image (the CI-pinned
+Redis version) rather than layered onto an upstream image; see
+[docs/docker.md](docs/docker.md) for why and for build details. Only Redis 7.2+
+is published (SPEC.md section 14).
 
 Or load a prebuilt/locally built `.so` into an existing server:
 
@@ -215,16 +214,14 @@ reconcile over them.
 
 ## Supported servers
 
-Requires `RM_AddPostNotificationJob` (Redis 7.2, Valkey 8.x/9.x lineages). CI
-runs the full integration suite against each pinned version:
+Requires `RM_AddPostNotificationJob` (Redis 7.2+). CI runs the full integration
+suite against each pinned version:
 
 | Server | Version in CI |
 |--------|---------------|
 | Redis 7.2 | 7.2.8 (minimum supported) |
 | Redis 7.4 | 7.4.5 |
 | Redis 8.x | 8.8.0 |
-| Valkey 8.x | 8.1.6 |
-| Valkey 9.x | 9.1.0 |
 
 Servers below 7.2 fail to load the module (SPEC.md section 14 describes the
 failure mode).
@@ -296,7 +293,7 @@ Method: median of 3 runs, `redis-benchmark -t set -n 1000000 -c 50 --threads 4
 against Redis 8.8.0. Numbers vary with hardware and workload; run
 `bench/run.sh` on your own host to reproduce. SPEC.md section 11 specifies
 `memtier_benchmark`; the script uses `redis-benchmark` because it ships with
-every Redis and Valkey.
+every Redis.
 
 Mass expiry is the heaviest case: each expiration becomes an `XADD` on the
 main thread, paced by the server's expire-cycle throttling. The integration

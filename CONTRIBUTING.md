@@ -9,7 +9,7 @@ pull request. If a change needs a design decision first, open a decision issue
 
 Requirements: Rust 1.88 or newer (the MSRV, declared as `rust-version` in
 `Cargo.toml` and gated by the `msrv` leg in CI), and `redis-server`/`redis-cli`
-7.2 or newer on PATH (Valkey 8.x works too). The integration tests spawn real
+7.2 or newer on PATH. The integration tests spawn real
 servers; nothing is mocked. MSRV raises are deliberate, reviewed commits
 triggered by a CI failure on the `msrv` leg, and are treated as minor-version
 events.
@@ -29,9 +29,8 @@ TEST_REDIS_CLI_BIN=/path/to/redis-cli \
 cargo test --release --tests
 ```
 
-CI runs the full suite against pinned Redis 7.2, 7.4, 8.x, Valkey 8.x, and
-Valkey 9.x, so a change must hold across that matrix, not just your local
-server.
+CI runs the full suite against pinned Redis 7.2, 7.4, and 8.x, so a change must
+hold across that matrix, not just your local server.
 
 The unit tests include property tests (proptest) over the events filter
 grammar, the event-name sanitizer, and the prefix validator; `cargo test
