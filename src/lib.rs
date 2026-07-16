@@ -22,7 +22,9 @@
 
 // In test builds the redis_module! macro is compiled out (its global allocator
 // requires a live Redis), which leaves the handlers unreferenced.
-#![cfg_attr(test, allow(dead_code))]
+// `fuzzing` builds, like test builds, compile out the redis_module! macro, so
+// the init/deinit/command handlers it would reference become unused.
+#![cfg_attr(any(test, feature = "fuzzing"), allow(dead_code, unused_imports))]
 mod capture;
 mod cluster;
 #[cfg(not(test))]
@@ -37,6 +39,29 @@ mod stats;
 use crate::{capture::*, cluster::*, config::*, markers::*, stats::*};
 use redis_module::{Context, ContextFlags, Status};
 use std::sync::atomic::Ordering;
+
+/// Public entry points for the coverage-guided fuzz harness (issue #131),
+/// compiled only under the `fuzzing` feature the `fuzz/` crate enables — off by
+/// default, so the shipped cdylib is unchanged. Each wrapper drives one pure
+/// function that ingests untrusted input (`CONFIG SET` values, possibly-hostile
+/// co-loaded-module event names) and discards the result: the fuzzer is looking
+/// for panics, not return values. Wrapping keeps the internal functions and
+/// their return types `pub(crate)` — only these `()` -returning shims are `pub`.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_targets {
+    /// Drive `parse_filter` (the `eventstream.events` grammar, SPEC.md §7).
+    pub fn parse_filter(input: &str) {
+        let _ = crate::config::parse_filter(input);
+    }
+    /// Drive `validate_prefix` (the `eventstream.stream-prefix` check, SPEC.md §7).
+    pub fn validate_prefix(input: &str) {
+        let _ = crate::config::validate_prefix(input);
+    }
+    /// Drive `sanitize` (the event-name-to-stream-suffix mapping, SPEC.md §5).
+    pub fn sanitize(input: &str) {
+        let _ = crate::capture::sanitize(input);
+    }
+}
 
 #[cfg(not(test))]
 use crate::commands::{cmd_prune, cmd_stats, cmd_streams};
@@ -407,7 +432,13 @@ fn deinit(ctx: &Context) -> Status {
 
 // The macro installs the Redis allocator as the global allocator, which aborts
 // outside a running Redis; compile it out of unit-test builds.
-#[cfg(not(test))]
+// Excluded from `fuzzing` builds as well as `test` builds: the macro installs
+// a #[global_allocator] (RedisAlloc) that delegates to the RedisModule_Alloc
+// pointer, which is null outside a live server — a libFuzzer binary would abort
+// on its first allocation. The rest of the module compiles as inert dead code
+// in the fuzz rlib; the fuzz targets call only the pure parser/sanitizer
+// functions (issue #131).
+#[cfg(not(any(test, feature = "fuzzing")))]
 redis_module! {
     name: "eventstream",
     version: MODULE_VERSION,

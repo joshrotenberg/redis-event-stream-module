@@ -1,0 +1,78 @@
+name: Fuzz
+
+# Coverage-guided (libFuzzer) fuzzing of the parser/sanitizer (issue #131).
+# - On PRs touching the fuzz targets or the fuzzed code: compile-only smoke, so
+#   breakage is caught even though the weekly run does not fire on PRs.
+# - Weekly (and on demand): run each target for a bounded time with a cached
+#   corpus, uploading any crash reproducer.
+
+on:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "src/**"
+      - "Cargo.toml"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast PR gate: the fuzz targets must still build against the current code.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      # Pin the fuzz target to the host GNU triple. cargo-fuzz otherwise defaults
+      # to the triple it was itself built for; the installed binary is
+      # musl-static, and a musl target is not installed and is incompatible with
+      # the ASan sanitizer (statically linked libc).
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+
+  # Weekly deep run. Skipped on pull_request (build above is the PR gate).
+  fuzz:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_filter, validate_prefix, sanitize]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      # Persist the corpus across runs so coverage accumulates over time.
+      - name: Restore corpus
+        uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
