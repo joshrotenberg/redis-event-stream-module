@@ -1,10 +1,11 @@
 name: Chaos
 
 # Scheduled run of the cluster chaos/load suite (chaos/run.sh, SPEC.md section
-# 10, issue #99). The suite stands up multi-node clusters and drives tens of
-# thousands of events through real reshards, failovers, and mass expirations to
-# assert the data-safety properties. It is too slow and the failover scenario
-# too timing-sensitive to gate PRs (see chaos/README.md), so it runs weekly
+# 10, issue #99). The suite stands up multi-node clusters (and a Sentinel HA
+# pair) and drives tens of thousands of events through real reshards, failovers,
+# Sentinel-driven promotions, and mass expirations to assert the data-safety
+# properties. It is too slow and the failover/sentinel scenarios too
+# timing-sensitive to gate PRs (see chaos/README.md), so it runs weekly
 # instead: enough to catch a regression within a week of it landing on main,
 # which matches how this module ships (manual releases).
 #
@@ -27,6 +28,7 @@ on:
           - failover
           - massexpiry
           - repeated
+          - sentinel
 
 env:
   CARGO_TERM_COLOR: always
@@ -114,6 +116,18 @@ jobs:
             echo "failover flaked once; retrying after a short pause"
             sleep 5
             chaos/run.sh failover
+          }
+
+      # Sentinel is timing-sensitive too (quorum down-detection then automatic
+      # promotion), so it gets the same retry-once treatment as failover.
+      - name: Sentinel scenario (retried once)
+        if: env.SCENARIO == 'all' || env.SCENARIO == 'sentinel'
+        run: |
+          set -uo pipefail
+          chaos/run.sh sentinel || {
+            echo "sentinel flaked once; retrying after a short pause"
+            sleep 5
+            chaos/run.sh sentinel
           }
 
       # Open (or comment on) a bug issue only for scheduled failures; a manual

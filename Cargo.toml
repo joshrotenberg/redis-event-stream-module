@@ -43,9 +43,10 @@ publish = false
 [lib]
 # `cdylib` is the shipped module artifact; `rlib` is added so the cargo-fuzz
 # crate (issue #131) can link the library and reach the pure parser/sanitizer
-# functions. The `rlib` is a separate output and does not change the `cdylib`
-# the release-artifacts workflow and Dockerfile build and ship (verified: the
-# `.so`/`.dylib` is byte-for-byte the same size with and without it).
+# functions. Adding `rlib` weakens LTO for the `cdylib` at the default 16
+# codegen units (it grew the shipped `.so` ~20%); `codegen-units = 1` in
+# `[profile.release]` below offsets that, leaving the shipped artifact slightly
+# smaller than before. See the profile note.
 crate-type = ["cdylib", "rlib"]
 
 # Companion test module (issue #91): a second cdylib the integration suite
