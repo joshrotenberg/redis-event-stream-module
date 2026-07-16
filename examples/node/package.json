@@ -1,0 +1,19 @@
+{
+  "name": "eventstream-consumer-example",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Consumer examples for redis-event-stream-module (issue #110)",
+  "type": "commonjs",
+  "bin": {
+    "eventstream-consumer": "consumer.js"
+  },
+  "scripts": {
+    "tail": "node consumer.js tail",
+    "work": "node consumer.js work",
+    "reconcile": "node consumer.js reconcile",
+    "discover": "node consumer.js discover"
+  },
+  "dependencies": {
+    "ioredis": "^5"
+  }
+}
