@@ -186,14 +186,7 @@ fn per_node_single_shard_captures() {
     assert_eq!(info_field(&mut c, "dropped_no_owned_slot"), 0);
     assert_eq!(info_field(&mut c, "cluster_per_node"), 1);
     // The one node owns every slot, so it captures into a tagged stream.
-    let tag: String = {
-        let raw: String = redis::cmd("INFO").arg("eventstream").query(&mut c).unwrap();
-        raw.lines()
-            .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
-            .unwrap()
-            .trim()
-            .to_string()
-    };
+    let tag = pinned_tag(&mut c);
     assert!(!tag.is_empty(), "single node must pin a tag");
     assert!(xlen(&mut c, &format!("events:{{{tag}}}set")) > 0);
     // The firehose composes with the tag segment exactly like the per-event
@@ -481,16 +474,7 @@ fn per_node_captures_on_a_node_owning_a_single_slot() {
 
     // The pinned tag hashes to the node's only slot and the tagged stream has
     // the entry.
-    let raw: String = redis::cmd("INFO")
-        .arg("eventstream")
-        .query(&mut cb)
-        .expect("INFO");
-    let tag = raw
-        .lines()
-        .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
-        .expect("pinned tag field")
-        .trim()
-        .to_string();
+    let tag = pinned_tag(&mut cb);
     assert!(!tag.is_empty(), "the single-slot node must pin a tag");
     let tag_slot: i64 = redis::cmd("CLUSTER")
         .arg("KEYSLOT")
@@ -612,17 +596,7 @@ fn per_node_drops_on_a_zero_slot_node_and_resumes_once_it_gains_one() {
     assert_eq!(info_field(&mut cb, "dropped_migrating"), 0);
     assert_eq!(info_field(&mut cb, "repins"), 0);
     assert_eq!(info_field(&mut cb, "cluster_per_node"), 1);
-    let pinned_while_slotless: String = {
-        let raw: String = redis::cmd("INFO")
-            .arg("eventstream")
-            .query(&mut cb)
-            .expect("INFO");
-        raw.lines()
-            .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
-            .expect("pinned tag field")
-            .trim()
-            .to_string()
-    };
+    let pinned_while_slotless = pinned_tag(&mut cb);
     assert!(
         pinned_while_slotless.is_empty(),
         "no tag may be pinned while the node owns no slot"
@@ -691,16 +665,7 @@ fn per_node_drops_on_a_zero_slot_node_and_resumes_once_it_gains_one() {
     // not a re-pin, so nothing writes the control stream retroactively.
     assert_eq!(info_field(&mut cb, "control_markers"), 0);
     assert_eq!(info_field(&mut cb, "dropped_xadd_error"), 0);
-    let raw: String = redis::cmd("INFO")
-        .arg("eventstream")
-        .query(&mut cb)
-        .expect("INFO");
-    let tag = raw
-        .lines()
-        .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
-        .expect("pinned tag field")
-        .trim()
-        .to_string();
+    let tag = pinned_tag(&mut cb);
     assert!(!tag.is_empty(), "the node pins a tag once it owns a slot");
     let tag_slot: i64 = redis::cmd("CLUSTER")
         .arg("KEYSLOT")

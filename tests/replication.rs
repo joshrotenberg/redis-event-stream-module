@@ -9,8 +9,6 @@ use common::*;
 use redis::Commands;
 use std::time::Duration;
 
-const CONTROL: &str = "events:#control";
-
 fn entry_ids(conn: &mut redis::Connection, key: &str) -> Vec<String> {
     let reply: redis::streams::StreamRangeReply = conn.xrange_all(key).expect("XRANGE");
     reply.ids.iter().map(|e| e.id.clone()).collect()

@@ -699,6 +699,35 @@ pub fn stream_field_strings(conn: &mut redis::Connection, key: &str, field: &str
         .collect()
 }
 
+/// The `#control` stream name (SPEC.md section 9): a module contract, not a
+/// per-test convention, so every test binary that reads gap markers shares
+/// this constant rather than re-declaring it.
+pub const CONTROL: &str = "events:#control";
+
+/// The `action` field of every entry on the control stream, in order.
+pub fn marker_actions(conn: &mut redis::Connection) -> Vec<String> {
+    stream_field_strings(conn, CONTROL, "action")
+}
+
+/// The pinned hash tag reported in `INFO eventstream` (SPEC.md section 10) for
+/// a plain (non-cluster-handle) connection, empty when the node has not
+/// pinned one. Panics if the field itself is absent from the INFO output (a
+/// module-contract violation, distinct from an empty tag) - matching the
+/// behavior of the inline copies this replaces. See `TestCluster::node_pinned_tag`
+/// for the node-handle equivalent, which defaults to empty on a missing field
+/// instead.
+pub fn pinned_tag(conn: &mut redis::Connection) -> String {
+    let raw: String = redis::cmd("INFO")
+        .arg("eventstream")
+        .query(conn)
+        .expect("INFO eventstream");
+    raw.lines()
+        .find_map(|l| l.strip_prefix("eventstream_cluster_pinned_tag:"))
+        .expect("pinned tag field")
+        .trim()
+        .to_string()
+}
+
 /// Whether the server knows `cmd`: `COMMAND INFO` returns a non-nil row for
 /// it. A capability probe, not a version-string gate — hash-field TTLs are
 /// absent from Redis 7.2 and Valkey 8 for different reasons, and a probe

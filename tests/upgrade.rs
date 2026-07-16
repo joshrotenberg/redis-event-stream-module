@@ -11,12 +11,6 @@ use common::*;
 use redis::Commands;
 use std::time::Duration;
 
-const CONTROL: &str = "events:#control";
-
-fn marker_actions(conn: &mut redis::Connection) -> Vec<String> {
-    stream_field_strings(conn, CONTROL, "action")
-}
-
 #[test]
 fn in_place_unload_load_swap() {
     let s = TestServer::start(&["events", "set"]);
