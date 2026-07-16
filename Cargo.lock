@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "eventstream-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "redis",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "redis-event-stream-module"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "lazy_static",
  "linkme",

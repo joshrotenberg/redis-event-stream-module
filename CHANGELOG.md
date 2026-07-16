@@ -6,14 +6,77 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-16
+
+Packaging and operability release: a preloaded container image, a Redis
+Enterprise RAMP bundle, a shipped consumer client, signed release artifacts, and
+a monitoring stack, plus new capture filters, retention controls, and an ACL
+category. Standalone and cluster capture behavior from 0.2.0 is unchanged; the
+new surface is opt-in.
+
+### Added
+
+- Preloaded Docker image published to
+  `ghcr.io/joshrotenberg/redis-event-stream-module` on each release: a Redis
+  server built from source with the module `.so` loaded, so a bare `docker run`
+  starts a server that is already capturing. Multi-arch (`linux/amd64` and
+  `linux/arm64`), with a Valkey 8 variant. See [docs/docker.md](docs/docker.md).
+- Redis Enterprise RAMP bundle (`ramp pack`) so the module installs through the
+  Enterprise `POST /v1/modules` API rather than a bare `.so`.
+- Shipped consumer client (`eventstream-client`), promoted from the example to a
+  workspace crate: a standalone binary with `info`, `produce`, `consume`,
+  `watch`, and `soak` subcommands that discovers streams, fans out and merges
+  reads across cluster masters, and doubles as a soak driver. Attached to
+  releases for Linux and macOS.
+- Opt-in firehose stream that mirrors every captured event into a single ordered
+  stream for consumers that want one feed instead of per-event streams.
+- Capture filters applied at load time: key-name glob, source-db, and
+  max-streams limits to scope what is mirrored.
+- Retention controls: per-event `maxlen`, time-based retention, and an optional
+  `verify-oom` guard.
+- Configurable entry format (an entry-format enum) and a global monotonic `seq`
+  field on mirrored entries.
+- `@eventstream` ACL category (with a 7.2/7.3 fallback) so operators can grant
+  the module's commands as a unit.
+- Optional consumer-group auto-provisioning via `eventstream.auto-group`.
+- Gap markers on `FLUSHALL`/`FLUSHDB`, and pinned `SWAPDB` db0 behavior, so
+  consumers see an explicit discontinuity instead of silent loss.
+- Introspection: `EVENTSTREAM.STREAMS` liveness (`VERBOSE`) with per-stream
+  counters, a separate `EVENTSTREAM.PRUNE` command that removes registered
+  stream names whose key no longer exists, the crate version reported through
+  `MODULE LIST`, and per-stream failure logging.
+- Monitoring stack: Prometheus recording/alerting rules, a Grafana dashboard,
+  and a metrics collector (see [contrib/monitoring](contrib/monitoring)).
+- Startup warning when `maxmemory-policy` is `allkeys-*` (`eviction_risk`),
+  since eviction can drop keys before they are captured.
+- Defense-in-depth pre-7.2 load gates that pin the SPEC section 15 refusal.
+- Signed, attested release artifacts: keyless Sigstore build-provenance
+  attestations, an automated tag-to-release workflow, and a macOS x86_64
+  artifact.
+
+### Changed
+
+- `INFO`, `EVENTSTREAM.STATS`, and the deinit log are now driven by a single
+  counter table, so the three views stay consistent.
+- `src/lib.rs` split into `config`, `capture`, `cluster`, `markers`, `stats`,
+  and `commands` modules (no behavior change).
+- Documentation reorganized around Redis, with a new mdBook site (quickstart,
+  reference, and tooling pages) and an as-built cluster-design document.
+
 ### Fixed
 
+- Exhaustive slot-tag mapping for the Redis 7.2 cluster fallback.
+- Cluster migration-window refusals are now classified and handled with a
+  probe-based re-pin fallback instead of dropping the triggering event.
 - In-place module upgrade (`MODULE UNLOAD` then `MODULE LOAD` in the same
   process) no longer fails on the second load. Redis keeps a module's
   `@eventstream` ACL category across unload, so re-adding it aborted the reload;
   the category is now registered tolerantly at init. Documented in the new
-  [upgrading](docs/upgrading.md) runbook and pinned by an integration test
-  (#107).
+  [upgrading](docs/upgrading.md) runbook and pinned by an integration test.
+- The release workflow now publishes the container image and RAMP bundle on the
+  automated tag-push release path. The docker and ramp jobs were gated on a
+  `release` event that a `GITHUB_TOKEN`-created release never emits, so they are
+  now gated on the workflow-call path the same way the binary upload already is.
 
 ## [0.2.0] - 2026-07-11
 
