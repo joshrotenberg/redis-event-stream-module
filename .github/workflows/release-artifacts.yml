@@ -225,8 +225,13 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           SUFFIX="${{ matrix.suffix }}"
           TAGS="${IMAGE}:${VERSION}${SUFFIX}"
-          # `latest` (and the bare `-valkey8` moving tag) only on release.
-          if [ "${{ github.event_name }}" = "release" ]; then
+          # `latest` (and the bare `-valkey8` moving tag) on any publishing
+          # run: a UI `release: published` event or the automated tag-push
+          # path (release.yml calls this via workflow_call, where
+          # github.event_name is the caller's `push`; a GITHUB_TOKEN-created
+          # release emits no `release: published`, see #85). Never on the PR
+          # self-validation build.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
             if [ -n "$SUFFIX" ]; then
               TAGS="${TAGS},${IMAGE}:latest${SUFFIX}"
             else
@@ -240,7 +245,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name == 'release'
+        # Any non-PR run publishes: the UI `release: published` event or the
+        # automated path (release.yml -> workflow_call, where
+        # github.event_name is the caller's `push` and a GITHUB_TOKEN-created
+        # release emits no `release: published`, see #85). PR self-validation
+        # never logs in or pushes.
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -250,7 +260,7 @@ jobs:
       # PR validation: single-arch build loaded into the local daemon so the
       # smoke test can run it. buildx --load supports one platform only.
       - name: Build image (PR validation, load locally)
-        if: github.event_name != 'release'
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -262,7 +272,7 @@ jobs:
           tags: eventstream-ci:${{ matrix.name }}
 
       - name: Smoke test the image loads the module
-        if: github.event_name != 'release'
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           # On any failure below, dump the server's own output before the
@@ -280,9 +290,11 @@ jobs:
           docker exec es-smoke redis-cli MODULE LIST | grep -q eventstream
           echo "image loads the module cleanly"
 
-      # Release: multi-arch manifest pushed to GHCR.
+      # Release: multi-arch manifest pushed to GHCR on any non-PR run (see the
+      # login step above for why this is `!= 'pull_request'` and not
+      # `== 'release'`: the automated tag-push path never has event `release`).
       - name: Build and push image (release)
-        if: github.event_name == 'release'
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -351,17 +363,22 @@ jobs:
           echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to the release
-        if: github.event_name == 'release'
+        # Mirror the .so upload: fire on any non-PR run and take the tag from
+        # inputs.tag (workflow_call / automated path) or the release event, so
+        # the automated tag-push path uploads too -- github.event.release is
+        # empty there (see #85).
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "$TAG" \
             "dist/${{ steps.pkg.outputs.zip }}" \
             "dist/${{ steps.pkg.outputs.zip }}.sha256" \
             --clobber
 
       - name: Upload as workflow artifact (PR validation runs)
-        if: github.event_name != 'release'
+        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.zip }}
