@@ -102,6 +102,16 @@ pub(crate) static CURRENT_STREAMS: AtomicI64 = AtomicI64::new(0);
 /// Unix seconds of the most recent drop, 0 if none (SPEC.md section 13).
 pub(crate) static LAST_ERROR_TIME: AtomicU64 = AtomicU64::new(0);
 
+/// Whether the server's `maxmemory-policy` is an `allkeys-*` policy (issue
+/// #106). Such a policy can evict the destination streams themselves, silently
+/// destroying captured history — a different failure from the `M`-flag write
+/// refusal counted in `dropped_oom`. Computed from the server config at load
+/// and on each config change (capture.rs), surfaced as the derived 0/1
+/// `eviction_risk` INFO field; the policy name itself stays in the log, not
+/// INFO (SPEC.md section 13). `volatile-*` is not flagged: it evicts only keys
+/// with a TTL, and the destination streams carry none.
+pub(crate) static EVICTION_RISK: AtomicBool = AtomicBool::new(false);
+
 // First-failure log latches for drop reasons with no destination stream in
 // hand (SPEC.md section 13 logging policy). Stream-scoped failures (an XADD
 // refused by a named destination) log through the per-stream rate-limited
@@ -296,6 +306,10 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
         + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
     vec![
         ("enabled", Int(ENABLED.load(Ordering::Relaxed) as i64)),
+        (
+            "eviction_risk",
+            Int(EVICTION_RISK.load(Ordering::Relaxed) as i64),
+        ),
         ("forwarded", load(&FORWARDED)),
         ("firehose_forwarded", load(&FIREHOSE_FORWARDED)),
         ("autogroup_created", load(&AUTOGROUP_CREATED)),

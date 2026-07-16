@@ -20,6 +20,7 @@ fn info_section_has_all_fields() {
     // whenever the surface changes, so a removed field fails CI.
     let expected = [
         "enabled",
+        "eviction_risk",
         "forwarded",
         "firehose_forwarded",
         "autogroup_created",
@@ -251,4 +252,47 @@ fn oom_refusal_is_a_counted_drop() {
     wait_until(Duration::from_secs(5), "capture recovers after OOM", || {
         info_field(&mut c, "forwarded") > forwarded_before
     });
+}
+
+#[test]
+fn eviction_risk_tracks_maxmemory_policy() {
+    // Issue #106: the derived `eviction_risk` flag flips with `maxmemory-policy`.
+    // An `allkeys-*` policy can evict the destination streams themselves,
+    // silently destroying captured history; the module surfaces a 0/1 risk flag
+    // (the policy name stays in the log, not INFO, per SPEC.md section 13). The
+    // config-change server event recomputes it, so the flag follows CONFIG SET
+    // at runtime. `volatile-*` is not flagged: it evicts only keys with a TTL,
+    // and the streams carry none.
+    let s = TestServer::start(&[]);
+    let mut c = s.conn();
+
+    let set_policy = |c: &mut redis::Connection, policy: &str| {
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory-policy")
+            .arg(policy)
+            .query(c)
+            .unwrap_or_else(|e| panic!("CONFIG SET maxmemory-policy {policy}: {e}"));
+    };
+
+    set_policy(&mut c, "noeviction");
+    wait_until(
+        Duration::from_secs(10),
+        "eviction_risk 0 under noeviction",
+        || info_field(&mut c, "eviction_risk") == 0,
+    );
+
+    set_policy(&mut c, "allkeys-lru");
+    wait_until(
+        Duration::from_secs(10),
+        "eviction_risk 1 under allkeys-lru",
+        || info_field(&mut c, "eviction_risk") == 1,
+    );
+
+    set_policy(&mut c, "volatile-lru");
+    wait_until(
+        Duration::from_secs(10),
+        "eviction_risk 0 under volatile-lru",
+        || info_field(&mut c, "eviction_risk") == 0,
+    );
 }
