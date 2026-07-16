@@ -529,6 +529,49 @@ pub fn info_field(conn: &mut redis::Connection, field: &str) -> i64 {
         .expect("numeric INFO field")
 }
 
+/// Every field in the `INFO eventstream` section as `name -> value` strings
+/// (issue #88). Values stay strings so the one string field
+/// (`cluster_pinned_tag`) round-trips exactly like the integer counters, which
+/// lets INFO and `EVENTSTREAM.STATS` be compared as a whole. The `# eventstream`
+/// section header line has no `eventstream_<field>:` shape and is skipped.
+pub fn info_map(conn: &mut redis::Connection) -> std::collections::BTreeMap<String, String> {
+    let raw: String = redis::cmd("INFO")
+        .arg("eventstream")
+        .query(conn)
+        .expect("INFO eventstream");
+    raw.lines()
+        .filter_map(|l| l.strip_prefix("eventstream_"))
+        .filter_map(|kv| kv.split_once(':'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+/// `EVENTSTREAM.STATS` as `name -> value` strings (issue #88), the counterpart
+/// to `info_map`: integer values are stringified and the one `BulkString` value
+/// (`cluster_pinned_tag`) is decoded, so the two maps compare directly. A drift
+/// between the two surfaces shows up as a plain map inequality.
+pub fn stats_map(conn: &mut redis::Connection) -> std::collections::BTreeMap<String, String> {
+    let flat: Vec<redis::Value> = redis::cmd("EVENTSTREAM.STATS").query(conn).expect("STATS");
+    let mut m = std::collections::BTreeMap::new();
+    let mut i = 0;
+    while i + 1 < flat.len() {
+        let name = match &flat[i] {
+            redis::Value::SimpleString(s) => s.clone(),
+            redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+            other => panic!("unexpected stats name: {other:?}"),
+        };
+        let val = match &flat[i + 1] {
+            redis::Value::Int(n) => n.to_string(),
+            redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+            redis::Value::SimpleString(s) => s.clone(),
+            other => panic!("unexpected stats value: {other:?}"),
+        };
+        m.insert(name, val);
+        i += 2;
+    }
+    m
+}
+
 /// Parse `EVENTSTREAM.STREAMS WITHSTATS` (issue #71) into
 /// name -> (forwarded, dropped). Each element is
 /// `[name, "forwarded", <n>, "dropped", <n>]`.

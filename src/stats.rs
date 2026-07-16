@@ -10,14 +10,15 @@ use redis_module::{Context, RedisGILGuard};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-#[cfg(not(test))]
+// Counters owned by sibling modules that the shared `stats_snapshot` reads.
+// Un-gated (unlike the INFO-only imports below) because `stats_snapshot` feeds
+// the deinit log too, which compiles in test builds (issue #88).
 use crate::cluster::{
     DROPPED_MIGRATING, DROPPED_NO_OWNED_SLOT, NODE_TAG, PER_NODE, REPINS, REPINS_PROBE_DETECTED,
 };
-#[cfg(not(test))]
 use crate::config::ENABLED;
-#[cfg(not(test))]
 use crate::markers::CONTROL_MARKERS;
+// INFO-section-only: `info_stats` is `#[cfg(not(test))]`, so these stay gated.
 #[cfg(not(test))]
 use redis_module::{InfoContext, RedisResult};
 #[cfg(not(test))]
@@ -269,6 +270,66 @@ pub(crate) fn count_stream_drop(ctx: &Context, stream: &str, counter: &AtomicU64
     }
 }
 
+/// One field on the counter surface. `Int` covers every counter and the two
+/// 0/1 gauges (`enabled`, `cluster_per_node`); `Text` is the sole string field,
+/// `cluster_pinned_tag` (empty until a slot is pinned). Kept small so the three
+/// emitters below can each render it their own way.
+pub(crate) enum StatValue {
+    Int(i64),
+    Text(String),
+}
+
+/// The complete, ordered counter surface, read once. This is the single source
+/// of truth for all three emitters — the `INFO eventstream` section, the
+/// `EVENTSTREAM.STATS` reply, and the deinit final-counters log — so they cannot
+/// drift out of agreement (issue #88; SPEC.md sections 8 and 13). The order here
+/// is the wire order of both the INFO section and the STATS reply. `dropped` is
+/// the sum of the `dropped_*` reasons, matching SPEC.md section 13.
+pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
+    use StatValue::{Int, Text};
+    let load = |c: &AtomicU64| Int(c.load(Ordering::Relaxed) as i64);
+    let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
+        + DROPPED_OOM.load(Ordering::Relaxed)
+        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
+        + DROPPED_MIGRATING.load(Ordering::Relaxed)
+        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
+        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
+    vec![
+        ("enabled", Int(ENABLED.load(Ordering::Relaxed) as i64)),
+        ("forwarded", load(&FORWARDED)),
+        ("firehose_forwarded", load(&FIREHOSE_FORWARDED)),
+        ("autogroup_created", load(&AUTOGROUP_CREATED)),
+        ("autogroup_failed", load(&AUTOGROUP_FAILED)),
+        ("dropped", Int(dropped as i64)),
+        ("dropped_xadd_error", load(&DROPPED_XADD_ERROR)),
+        ("dropped_oom", load(&DROPPED_OOM)),
+        ("dropped_defer_error", load(&DROPPED_DEFER_ERROR)),
+        ("dropped_max_streams", load(&DROPPED_MAX_STREAMS)),
+        ("dropped_encode_error", load(&DROPPED_ENCODE_ERROR)),
+        ("skipped_self", load(&SKIPPED_SELF)),
+        ("skipped_filtered", load(&SKIPPED_FILTERED)),
+        ("skipped_key_filtered", load(&SKIPPED_KEY_FILTERED)),
+        ("skipped_db", load(&SKIPPED_DB)),
+        ("skipped_invalid", load(&SKIPPED_INVALID)),
+        ("active_streams", load(&ACTIVE_STREAMS)),
+        ("control_markers", load(&CONTROL_MARKERS)),
+        ("handler_panics", load(&HANDLER_PANICS)),
+        ("dropped_no_owned_slot", load(&DROPPED_NO_OWNED_SLOT)),
+        ("dropped_migrating", load(&DROPPED_MIGRATING)),
+        ("repins", load(&REPINS)),
+        ("repins_probe_detected", load(&REPINS_PROBE_DETECTED)),
+        (
+            "cluster_per_node",
+            Int(PER_NODE.load(Ordering::Relaxed) as i64),
+        ),
+        (
+            "cluster_pinned_tag",
+            Text(NODE_TAG.lock().unwrap().clone().unwrap_or_default()),
+        ),
+        ("last_error_time", load(&LAST_ERROR_TIME)),
+    ]
+}
+
 /// Module INFO section (SPEC.md section 13). Redis prefixes the section and
 /// every field with the module name: `INFO eventstream` shows
 /// `# eventstream_stats` with `eventstream_forwarded` etc. Module sections do
@@ -276,75 +337,14 @@ pub(crate) fn count_stream_drop(ctx: &Context, stream: &str, counter: &AtomicU64
 #[cfg(not(test))]
 #[info_command_handler]
 pub(crate) fn info_stats(ctx: &InfoContext, _for_crash_report: bool) -> RedisResult<()> {
-    let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
-        + DROPPED_OOM.load(Ordering::Relaxed)
-        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-        + DROPPED_MIGRATING.load(Ordering::Relaxed)
-        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
-        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
-    ctx.builder()
-        .add_section("stats")
-        .field("enabled", ENABLED.load(Ordering::Relaxed) as i64)?
-        .field("forwarded", FORWARDED.load(Ordering::Relaxed))?
-        .field(
-            "firehose_forwarded",
-            FIREHOSE_FORWARDED.load(Ordering::Relaxed),
-        )?
-        .field(
-            "autogroup_created",
-            AUTOGROUP_CREATED.load(Ordering::Relaxed),
-        )?
-        .field("autogroup_failed", AUTOGROUP_FAILED.load(Ordering::Relaxed))?
-        .field("dropped", dropped)?
-        .field(
-            "dropped_xadd_error",
-            DROPPED_XADD_ERROR.load(Ordering::Relaxed),
-        )?
-        .field("dropped_oom", DROPPED_OOM.load(Ordering::Relaxed))?
-        .field(
-            "dropped_defer_error",
-            DROPPED_DEFER_ERROR.load(Ordering::Relaxed),
-        )?
-        .field(
-            "dropped_max_streams",
-            DROPPED_MAX_STREAMS.load(Ordering::Relaxed),
-        )?
-        .field(
-            "dropped_encode_error",
-            DROPPED_ENCODE_ERROR.load(Ordering::Relaxed),
-        )?
-        .field("skipped_self", SKIPPED_SELF.load(Ordering::Relaxed))?
-        .field("skipped_filtered", SKIPPED_FILTERED.load(Ordering::Relaxed))?
-        .field(
-            "skipped_key_filtered",
-            SKIPPED_KEY_FILTERED.load(Ordering::Relaxed),
-        )?
-        .field("skipped_db", SKIPPED_DB.load(Ordering::Relaxed))?
-        .field("skipped_invalid", SKIPPED_INVALID.load(Ordering::Relaxed))?
-        .field("active_streams", ACTIVE_STREAMS.load(Ordering::Relaxed))?
-        .field("control_markers", CONTROL_MARKERS.load(Ordering::Relaxed))?
-        .field("handler_panics", HANDLER_PANICS.load(Ordering::Relaxed))?
-        .field(
-            "dropped_no_owned_slot",
-            DROPPED_NO_OWNED_SLOT.load(Ordering::Relaxed),
-        )?
-        .field(
-            "dropped_migrating",
-            DROPPED_MIGRATING.load(Ordering::Relaxed),
-        )?
-        .field("repins", REPINS.load(Ordering::Relaxed))?
-        .field(
-            "repins_probe_detected",
-            REPINS_PROBE_DETECTED.load(Ordering::Relaxed),
-        )?
-        .field("cluster_per_node", PER_NODE.load(Ordering::Relaxed) as i64)?
-        .field(
-            "cluster_pinned_tag",
-            NODE_TAG.lock().unwrap().clone().unwrap_or_default(),
-        )?
-        .field("last_error_time", LAST_ERROR_TIME.load(Ordering::Relaxed))?
-        .build_section()?
-        .build_info()?;
+    let mut section = ctx.builder().add_section("stats");
+    for (name, value) in stats_snapshot() {
+        section = match value {
+            StatValue::Int(i) => section.field(name, i)?,
+            StatValue::Text(s) => section.field(name, s)?,
+        };
+    }
+    section.build_section()?.build_info()?;
     Ok(())
 }
 lazy_static! {

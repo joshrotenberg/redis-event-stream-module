@@ -319,26 +319,20 @@ fn deinit(ctx: &Context) -> Status {
             write_marker(ctx, &control_stream, "unloading", None, control_ret);
         }
     }
-    ctx.log_notice(&format!(
-        "eventstream unloading: forwarded={} firehose_forwarded={} dropped={} skipped_self={} \
-         skipped_filtered={} skipped_key_filtered={} skipped_db={} skipped_invalid={} \
-         control_markers={} active_streams={}",
-        FORWARDED.load(Ordering::Relaxed),
-        FIREHOSE_FORWARDED.load(Ordering::Relaxed),
-        DROPPED_XADD_ERROR.load(Ordering::Relaxed)
-            + DROPPED_OOM.load(Ordering::Relaxed)
-            + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-            + DROPPED_MIGRATING.load(Ordering::Relaxed)
-            + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
-            + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed),
-        SKIPPED_SELF.load(Ordering::Relaxed),
-        SKIPPED_FILTERED.load(Ordering::Relaxed),
-        SKIPPED_KEY_FILTERED.load(Ordering::Relaxed),
-        SKIPPED_DB.load(Ordering::Relaxed),
-        SKIPPED_INVALID.load(Ordering::Relaxed),
-        CONTROL_MARKERS.load(Ordering::Relaxed),
-        ACTIVE_STREAMS.load(Ordering::Relaxed),
-    ));
+    // The final counters as one complete snapshot, from the same shared source
+    // as the INFO section and EVENTSTREAM.STATS (issue #88), so the unload line
+    // never drifts from them and carries every diagnostic counter — notably
+    // handler_panics, whose nonzero value means a bug in this module (SPEC.md
+    // section 13), and the cluster per-node counters.
+    let counters = stats_snapshot()
+        .into_iter()
+        .map(|(name, value)| match value {
+            StatValue::Int(i) => format!("{name}={i}"),
+            StatValue::Text(s) => format!("{name}={s}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    ctx.log_notice(&format!("eventstream unloading: {counters}"));
     Status::Ok
 }
 

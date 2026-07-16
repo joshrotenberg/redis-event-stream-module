@@ -12,7 +12,13 @@ fn info_section_has_all_fields() {
     let s = TestServer::start(&[]);
     let mut c = s.conn();
 
-    for f in [
+    // The complete counter surface (issue #88). This is the INDEPENDENT guard:
+    // INFO, EVENTSTREAM.STATS, and the deinit log all derive from one shared
+    // snapshot, so they cannot drift from each other — but a field dropped from
+    // that snapshot would silently vanish from all three at once. This explicit
+    // list, with the exact-count assertion, forces a conscious test update
+    // whenever the surface changes, so a removed field fails CI.
+    let expected = [
         "enabled",
         "forwarded",
         "firehose_forwarded",
@@ -24,8 +30,6 @@ fn info_section_has_all_fields() {
         "dropped_defer_error",
         "dropped_max_streams",
         "dropped_encode_error",
-        "dropped_migrating",
-        "repins_probe_detected",
         "skipped_self",
         "skipped_filtered",
         "skipped_key_filtered",
@@ -33,10 +37,26 @@ fn info_section_has_all_fields() {
         "skipped_invalid",
         "active_streams",
         "control_markers",
+        "handler_panics",
+        "dropped_no_owned_slot",
+        "dropped_migrating",
+        "repins",
+        "repins_probe_detected",
+        "cluster_per_node",
+        "cluster_pinned_tag",
         "last_error_time",
-    ] {
-        let _ = info_field(&mut c, f); // panics if missing
+    ];
+    let info = info_map(&mut c);
+    for f in expected {
+        assert!(info.contains_key(f), "INFO eventstream missing field {f}");
     }
+    assert_eq!(
+        info.len(),
+        expected.len(),
+        "INFO field count changed; update the expected list and the SPEC \
+         section 13 example (INFO fields: {:?})",
+        info.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]
