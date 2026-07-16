@@ -60,7 +60,10 @@ durability is entirely the server's:
 | None | Everything, on restart |
 
 Eviction warning: `allkeys-*` maxmemory policies can evict the event streams
-themselves. Run this module with `noeviction` or a `volatile-*` policy.
+themselves. Run this module with `noeviction` or a `volatile-*` policy. The
+module makes this visible: the `eventstream_eviction_risk` INFO field reads `1`
+under any `allkeys-*` policy (recomputed live on config changes), and a warning
+naming the policy is logged. Alert on the field flipping to 1.
 
 ## Detecting loss
 

@@ -234,6 +234,20 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
              corresponding gap markers will not be written",
         );
     }
+    // Eviction-risk tracking (issue #106): subscribe to config changes so the
+    // flag follows runtime `CONFIG SET maxmemory-policy`, then read it once now
+    // for the load-time state (which also emits the warning if already risky). A
+    // subscription failure only stops runtime tracking; the load-time read below
+    // still runs.
+    if subscribe_server_event(raw::REDISMODULE_EVENT_CONFIG, Some(raw_config_event))
+        != raw::REDISMODULE_OK as i32
+    {
+        ctx.log_warning(
+            "eventstream: failed to subscribe to the config-change server event; \
+             eviction_risk will not update on runtime maxmemory-policy changes",
+        );
+    }
+    recheck_eviction_risk(ctx);
 
     let prefix = PREFIX.value.lock(ctx).clone();
     let filter = FILTER.raw.lock(ctx).clone();

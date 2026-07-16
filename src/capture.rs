@@ -15,7 +15,7 @@ use redis_module::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(not(test))]
-use redis_module::RedisString;
+use redis_module::{RedisString, RedisValue};
 #[cfg(not(test))]
 use std::ffi::CStr;
 #[cfg(not(test))]
@@ -1026,6 +1026,62 @@ pub(crate) extern "C" fn raw_swapdb_event(
         }
         let info = unsafe { &*(data as *const raw::RedisModuleSwapDbInfoV1) };
         on_swapdb(&Context::new(ctx), info.dbnum_first, info.dbnum_second);
+    });
+}
+
+/// Re-read `maxmemory-policy` and update `EVICTION_RISK` (issue #106). An
+/// `allkeys-*` policy can evict the destination streams themselves, destroying
+/// captured history with no counter, log, or other INFO signal — a different
+/// failure from the `M`-flag write refusal counted in `dropped_oom`. Pure read:
+/// refuses nothing and changes no behavior. Logs a warning on a transition into
+/// risk (including the first read at load, when the flag starts `false`) and a
+/// notice on a transition out, naming the policy; silent on non-transitions
+/// (SPEC.md section 13 logging policy). Called from `init` and on each
+/// config-change server event.
+#[cfg(not(test))]
+pub(crate) fn recheck_eviction_risk(ctx: &Context) {
+    // CONFIG GET returns `[name, value]`; take the value. A read failure or an
+    // unexpected shape leaves the flag unchanged rather than guessing.
+    let policy: String = match ctx.call("CONFIG", &["GET", "maxmemory-policy"][..]) {
+        Ok(RedisValue::Array(items)) => match items.into_iter().nth(1) {
+            Some(v) => v.try_into().unwrap_or_default(),
+            None => return,
+        },
+        _ => return,
+    };
+    let risky = policy.starts_with("allkeys-");
+    let was = EVICTION_RISK.swap(risky, Ordering::Relaxed);
+    if risky && !was {
+        ctx.log_warning(&format!(
+            "eventstream: maxmemory-policy is {policy}: destination streams (under \
+             the configured prefix) can be evicted, destroying captured history; \
+             recommend noeviction or volatile-*"
+        ));
+    } else if !risky && was {
+        ctx.log_notice(&format!(
+            "eventstream: maxmemory-policy is now {policy}: destination streams are \
+             no longer at risk of eviction"
+        ));
+    }
+}
+
+/// Raw config-change server-event callback (`REDISMODULE_EVENT_CONFIG`, issue
+/// #106), same raw-binding rationale and panic boundary as the flush/swapdb
+/// callbacks above. Recomputes eviction risk on any config change rather than
+/// parsing the changed-names payload: the recompute is a single `CONFIG GET`,
+/// and the transition-only logging in `recheck_eviction_risk` keeps it quiet.
+#[cfg(not(test))]
+pub(crate) extern "C" fn raw_config_event(
+    ctx: *mut raw::RedisModuleCtx,
+    _eid: raw::RedisModuleEvent,
+    subevent: u64,
+    _data: *mut c_void,
+) {
+    guard_server_event(|| {
+        if subevent != raw::REDISMODULE_SUBEVENT_CONFIG_CHANGE {
+            return;
+        }
+        recheck_eviction_risk(&Context::new(ctx));
     });
 }
 #[cfg(test)]
