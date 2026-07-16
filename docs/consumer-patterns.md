@@ -200,8 +200,7 @@ Entries land in `events:hexpired` with `key` set to the hash key; the expired
 field name is not part of the keyspace notification, so consumers that need it
 must track field membership themselves (SPEC.md section 6). When the last
 field expires the emptied hash is deleted and a separate `del` event fires.
-Servers without hash-field TTLs (Redis 7.2, Valkey 8.x) never fire
-`hexpired`.
+Servers without hash-field TTLs (Redis before 7.4) never fire `hexpired`.
 
 ## One stream for everything (firehose)
 
@@ -544,8 +543,8 @@ ACL category, which carries both as a group:
 ACL SETUSER events-consumer on >secret ~events:* +@read +xreadgroup +xack +xautoclaim +xinfo +@eventstream
 ```
 
-The `@eventstream` category needs `RM_AddACLCategory` (Redis 7.4+, and Valkey
-builds that expose it); run `ACL CAT` to confirm it exists on your server. On
+The `@eventstream` category needs `RM_AddACLCategory` (Redis 7.4+); run
+`ACL CAT` to confirm it exists on your server. On
 Redis 7.2/7.3 the category is unavailable — the module loads without it and you
 grant the commands by name instead (`+eventstream.stats +eventstream.streams`).
 See SPEC.md section 8.
