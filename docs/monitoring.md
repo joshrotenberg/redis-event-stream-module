@@ -1,7 +1,8 @@
 # Monitoring
 
 The module exposes its counters through the `eventstream_stats` INFO section
-(see the [Specification](./specification.md), section 13). Deployable Prometheus
+(field meanings in [Counters](./counters.md); normative definitions in the
+[Specification](./specification.md), section 13). Deployable Prometheus
 alert rules, a Grafana dashboard, a metrics collector, and a ready-to-run
 `docker-compose` stack live in
 [`contrib/monitoring/`](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/contrib/monitoring).

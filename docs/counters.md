@@ -7,10 +7,9 @@ persisted or replicated — so monitoring must alert on *increases*
 (`rate()`/`increase()`), not absolute values, and tolerate a reset to zero
 across a module reload or [in-place upgrade](./upgrading.md).
 
-> **Module INFO sections do not appear in default `INFO` or `INFO all`.** Use
-> `INFO everything`, `INFO eventstream`, or `INFO eventstream_stats`. A stock
-> `INFO` scrape sees none of these fields — this is the most common monitoring
-> surprise with the module. See also [Monitoring](./monitoring.md).
+> **Module INFO sections do not appear in default `INFO` or `INFO all`.** The
+> accepted forms and the full caveat are in
+> [Monitoring](./monitoring.md#the-info-everything-caveat).
 
 ## Fields
 
