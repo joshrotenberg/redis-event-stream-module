@@ -1,9 +1,27 @@
 name: CI
 
+# Docs-only changes (the surface docs.yml owns, plus repo prose) skip this
+# workflow entirely; docs.yml still builds the book for them. Nothing in the
+# crate reads markdown at build or test time, and main has no required status
+# checks, so a skipped run cannot strand a PR on an expected check. A PR
+# touching both docs and code still runs: paths-ignore skips only when every
+# changed file matches.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+      - "LICENSE*"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+      - "LICENSE*"
 
 env:
   CARGO_TERM_COLOR: always
