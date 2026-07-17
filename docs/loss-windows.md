@@ -85,36 +85,17 @@ naming the policy is logged. Alert on the field flipping to 1.
 - Trimming loss, per stream: compare your consumer's resume ID against
   `XINFO STREAM events:expired` `first-entry`. If your resume point is older
   than the first retained entry, entries were trimmed before you read them. See
-  [consumer-patterns.md](consumer-patterns.md) for lag alerting.
+  [sizing.md](sizing.md) for lag alerting.
 
 ## Gap markers
 
 Capture-gap boundaries are machine-readable through the control stream
-`events:#control` (`<stream-prefix>#control`). The module writes a marker entry
-at each capture-boundary lifecycle point:
-
-| Trigger | `action` |
-|---|---|
-| Module load | `loaded` |
-| `eventstream.enabled` set `yes` to `no` | `disabled` |
-| `eventstream.enabled` set `no` to `yes` | `enabled` |
-| `FLUSHALL`, or `FLUSHDB` in any db | `flushed` |
-| `SWAPDB` involving db 0 | `swapdb` |
-| `MODULE UNLOAD` | `unloading` |
-
-Each marker carries `action` and `module-version`; the `flushed` marker also
-carries a `db` field, the decimal flushed database number (`-1` for
-`FLUSHALL`), so you can bound the reconcile to that database. Markers replicate,
-respect `maxmemory`, and persist like any other entry, and only a master writes
-them (replicas receive them via replication).
-
-The `flushed` marker lands on the recreated control stream after a
-`FLUSHALL`/`FLUSHDB` in db 0 deletes it, or on the surviving db 0 control stream
-after a `FLUSHDB` in another database; either way it precedes the first
-post-flush mirrored entry. The `swapdb` marker lands on the fresh db 0 control
-stream after a `SWAPDB` moved the old one to another database, and tells you
-that entries before it may now live in that database. A `SWAPDB` not involving
-db 0 leaves the streams' database untouched and writes no marker.
+`events:#control` (`<stream-prefix>#control`): the module writes a marker
+entry at each capture-boundary lifecycle point (load, disable/enable, flush,
+swap, unload, and cluster re-pins). The trigger table, marker fields, delivery
+mechanics, and limitations are documented once, in
+[Gap markers](./gap-markers.md); this section covers only what reconciliation
+adds on top.
 
 A marker's `module-version` reflects marker-write time, not necessarily the
 module currently loaded. To audit which release a running server has loaded,
@@ -136,27 +117,13 @@ marker's ID is the first event dropped after the disable, an `enabled` or
 `loaded` marker's ID is the first event captured after capture resumed. That is
 exactly the edge of the gap, so the two marker IDs bound the window in time.
 
-### Two limitations
-
-- Crashes write no closing marker: nothing runs the server's shutdown path.
-- Clean server shutdowns cannot write one either, by construction: the server
-  fires the Shutdown module event only after the final AOF flush and RDB save,
-  so nothing written there persists, and replicating the write from the
-  shutdown path aborts the server (investigated in issue #67; SPEC.md
-  section 9).
-
-So a clean restart and a crash are permanently indistinguishable: both appear
-as a `loaded` marker with no preceding `unloading` or `disabled`. Treat any
-such `loaded` as the end of a gap that opened at the last entry across your
-streams before it.
-
-### Zero-traffic caveat
-
-The `loaded`, `disabled`, `enabled`, `flushed`, and `swapdb` markers are written
-lazily by the next captured notification, not at the instant of the lifecycle
-event. If no event ever fires in a window, no marker appears, but nothing was
-mirrored in that window either, so the absence is correct (for a flush that
-deleted the streams, the pre-flush contents are still gone regardless).
+Two caveats when pairing markers, both documented in
+[Gap markers](./gap-markers.md): crashes and clean shutdowns write no closing
+marker, so treat a `loaded` marker with no preceding `unloading` or `disabled`
+as the end of a gap that opened at the last entry across your streams before
+it; and markers are written lazily by the next captured notification, so a
+window in which no event ever fired carries no marker (nothing was mirrored in
+that window either, so the absence is correct).
 
 ## Reconciling a gap without a full scan
 

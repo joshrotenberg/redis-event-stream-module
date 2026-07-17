@@ -199,7 +199,7 @@ pub struct StreamInfo {
 /// Every destination stream across the cluster with per-node attribution: the
 /// union of each master's local `EVENTSTREAM.STREAMS`. A module command runs
 /// node-locally, so cluster-wide discovery is this client-side fan-out (see
-/// docs/consumer-patterns.md). A node that cannot be reached is skipped rather
+/// docs/cluster-consumers.md). A node that cannot be reached is skipped rather
 /// than failing the whole discovery, matching the chaos suite's expectation
 /// that a just-killed master does not abort a consumer.
 pub fn discover(target: &Target) -> Vec<StreamInfo> {

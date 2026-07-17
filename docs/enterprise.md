@@ -20,7 +20,7 @@ Redis's own modules use).
   capture path (SPEC.md section 10) does not apply. Each shard mirrors its own
   events into shard-local streams, so a multi-shard database exposes per-shard
   streams behind one endpoint. A consumer must fan out across shards to see
-  every event (the [consumer patterns](./consumer-patterns.md) fan-out-and-merge
+  every event (the [cluster consumers](./cluster-consumers.md) fan-out-and-merge
   approach applies). Databases created with the OSS Cluster API enabled are a
   separate case and are not yet validated.
 - **Minimum Redis 7.2.** The manifest declares `min_redis_version: 7.2`

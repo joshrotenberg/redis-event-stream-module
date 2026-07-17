@@ -114,7 +114,7 @@ The expired event for `foo` is now a stream entry.
   pair), `consume` (discover streams cluster-wide and tail them merged by entry
   ID), `watch` (a live counters-and-lengths dashboard), and `soak` (sustained
   produce, then verify capture). It doubles as a consumer reference for the
-  cluster fan-out; see [docs/consumer-patterns.md](docs/consumer-patterns.md).
+  cluster fan-out; see [docs/cluster-consumers.md](docs/cluster-consumers.md).
 
 ## Configuration
 
@@ -266,8 +266,9 @@ below:
   slot, the node re-pins to a slot it still owns and resumes capture on a new
   tag (the old entries move with the slot to its new owner); events refused
   during the brief migration window are counted drops delimited by gap markers
-  (SPEC.md section 10; design in
-  [docs/cluster-design.md](docs/cluster-design.md)).
+  (SPEC.md section 10; mechanism in
+  [docs/cluster-support.md](docs/cluster-support.md), design history in
+  [docs/cluster-design-history.md](docs/cluster-design-history.md)).
 
 ## Performance
 
@@ -311,13 +312,17 @@ in [bench/gate.sh](bench/gate.sh), so changing one is a reviewed change.
 
 - [SPEC.md](SPEC.md): the authoritative design (architecture, routing, entry
   schema, configuration, delivery semantics, failure modes).
-- [docs/consumer-patterns.md](docs/consumer-patterns.md): live tail, durable
-  work queue with consumer groups, replay, discovery, and `maxlen` sizing.
+- [docs/consumer-patterns.md](docs/consumer-patterns.md): live tail, replay,
+  and event selection, with companion pages for
+  [work queues](docs/work-queues.md), [entry shapes and the
+  firehose](docs/entry-shapes.md), and
+  [cluster consumers](docs/cluster-consumers.md); operator-side retention
+  sizing is [docs/sizing.md](docs/sizing.md).
 - [docs/loss-windows.md](docs/loss-windows.md): every way an event can be
   lost, how to detect it, and how to reconcile a gap window without a full
   scan.
-- [docs/cluster-design.md](docs/cluster-design.md): the cluster per-node design
-  (refuse-by-default, slot-pinned per-node tags, re-pinning on reshard).
+- [docs/cluster-support.md](docs/cluster-support.md): the cluster per-node
+  design (refuse-by-default, slot-pinned per-node tags, re-pinning on reshard).
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License

@@ -1,8 +1,9 @@
 # Node.js consumer example
 
 An [ioredis](https://github.com/redis/ioredis) consumer for
-`redis-event-stream-module`, covering the three patterns from
-[docs/consumer-patterns.md](../../docs/consumer-patterns.md).
+`redis-event-stream-module`, covering the core patterns from
+[docs/consumer-patterns.md](../../docs/consumer-patterns.md) and its companion
+pages.
 
 ```sh
 npm install
@@ -16,12 +17,12 @@ node consumer.js discover    # list destination streams
 Connection defaults to `127.0.0.1:6379`; override with `REDIS_HOST` /
 `REDIS_PORT` (and `CONSUMER` for the work-queue consumer name).
 
-| Subcommand | consumer-patterns.md section |
+| Subcommand | Documentation section |
 |---|---|
-| `tail` | Live tail (pub/sub replacement) |
-| `work` | Durable work queue (consumer groups) + Recovering stuck work |
+| `tail` | Live tail ([consumer-patterns.md](../../docs/consumer-patterns.md)) |
+| `work` | Durable work queue + Recovering stuck work ([work-queues.md](../../docs/work-queues.md)) |
 | `reconcile` | Handling gaps (→ [loss-windows.md](../../docs/loss-windows.md)) |
-| `discover` | Discovery |
+| `discover` | Discovery ([cluster-consumers.md](../../docs/cluster-consumers.md)) |
 
 ## Why ioredis, and binary-safe keys
 
