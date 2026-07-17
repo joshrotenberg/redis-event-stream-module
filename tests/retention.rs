@@ -156,7 +156,7 @@ fn retention_ms_trims_entries_by_age() {
     for i in 0..250 {
         let _: () = c.set(format!("old{i}"), "v").expect("SET old");
     }
-    wait_until(Duration::from_secs(10), "old batch mirrored", || {
+    wait_until(CAPTURE_WAIT, "old batch mirrored", || {
         info_field(&mut c, "forwarded") >= 250
     });
 
@@ -170,7 +170,7 @@ fn retention_ms_trims_entries_by_age() {
     for i in 0..250 {
         let _: () = c.set(format!("new{i}"), "v").expect("SET new");
     }
-    wait_until(Duration::from_secs(10), "new batch mirrored", || {
+    wait_until(CAPTURE_WAIT, "new batch mirrored", || {
         info_field(&mut c, "forwarded") >= 500
     });
 
@@ -226,7 +226,7 @@ fn verify_oom_no_admits_writes_that_yes_refuses() {
     // Default verify-oom yes: the del event's mirror XADD is refused and
     // counted, not written.
     let _: () = c.del("fill0").expect("DEL under OOM");
-    wait_until(Duration::from_secs(5), "oom drop counted", || {
+    wait_until(CAPTURE_WAIT, "oom drop counted", || {
         info_field(&mut c, "dropped_oom") >= 1
     });
     let dropped_oom_before = info_field(&mut c, "dropped_oom");
@@ -242,11 +242,9 @@ fn verify_oom_no_admits_writes_that_yes_refuses() {
         .query(&mut c)
         .expect("CONFIG SET verify-oom no");
     let _: () = c.del("fill1").expect("DEL with verify-oom no");
-    wait_until(
-        Duration::from_secs(5),
-        "write admitted under pressure",
-        || info_field(&mut c, "forwarded") > forwarded_before,
-    );
+    wait_until(CAPTURE_WAIT, "write admitted under pressure", || {
+        info_field(&mut c, "forwarded") > forwarded_before
+    });
     assert!(
         info_field(&mut c, "firehose_forwarded") > firehose_before,
         "the firehose copy must also be admitted under verify-oom no"

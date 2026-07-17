@@ -704,6 +704,15 @@ pub fn stream_field_strings(conn: &mut redis::Connection, key: &str, field: &str
 /// this constant rather than re-declaring it.
 pub const CONTROL: &str = "events:#control";
 
+/// Budget for one capture to converge: trigger -> notification ->
+/// post-notification job -> XADD visible to a reader. A SET-to-XLEN round
+/// trip can exceed 5 seconds on the slowest CI leg (Redis 7.2.8 built from
+/// source), which is what flaked entry_format until PR #154 widened its
+/// waits to 10 seconds. One constant so the budget is defined in one place
+/// (issue #187). Waits on other mechanisms (replica link, cluster topology,
+/// wall-clock retention) keep their own budgets.
+pub const CAPTURE_WAIT: Duration = Duration::from_secs(10);
+
 /// The `action` field of every entry on the control stream, in order.
 pub fn marker_actions(conn: &mut redis::Connection) -> Vec<String> {
     stream_field_strings(conn, CONTROL, "action")
@@ -790,7 +799,7 @@ pub fn expire_key_and_wait(server: &TestServer, key: &str, stream: &str, prior_l
         .arg(80)
         .query(&mut c)
         .expect("SET PX");
-    wait_until(Duration::from_secs(10), "expired event mirrored", || {
+    wait_until(CAPTURE_WAIT, "expired event mirrored", || {
         // Touch the key so lazy expiration fires even if the active cycle
         // has not reached it yet.
         let _: Option<String> = c.get(key).ok().flatten();

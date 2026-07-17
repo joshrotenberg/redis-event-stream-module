@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::time::Duration;
 
 #[test]
 fn missed_class_captures_keymiss() {
@@ -14,7 +13,7 @@ fn missed_class_captures_keymiss() {
 
     // A read miss on a key that does not exist fires a keymiss notification.
     let _: Option<String> = c.get("no_such_key").expect("GET miss");
-    wait_until(Duration::from_secs(5), "keymiss captured", || {
+    wait_until(CAPTURE_WAIT, "keymiss captured", || {
         xlen(&mut c, "events:keymiss") > 0
     });
     let events = stream_field_strings(&mut c, "events:keymiss", "event");
@@ -30,7 +29,7 @@ fn new_class_captures_new_key() {
     let mut c = s.conn();
 
     let _: () = c.set("fresh", "1").expect("SET new key");
-    wait_until(Duration::from_secs(5), "new-key event captured", || {
+    wait_until(CAPTURE_WAIT, "new-key event captured", || {
         xlen(&mut c, "events:new") > 0
     });
     let events = stream_field_strings(&mut c, "events:new", "event");
@@ -96,7 +95,7 @@ fn star_adapts_at_runtime_without_extra_classes() {
         .expect("CONFIG SET events *");
 
     let _: () = c.set("k", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set captured under *", || {
+    wait_until(CAPTURE_WAIT, "set captured under *", || {
         xlen(&mut c, "events:set") > 0
     });
     // A read miss is not captured: MISSED was not subscribed at load.

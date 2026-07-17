@@ -7,7 +7,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 /// Capability gate, not a version gate: `COMMAND INFO HEXPIRE` covers both
 /// the 7.2 lane (predates 7.4) and the Valkey lane (has not shipped
@@ -46,7 +45,7 @@ fn expire_field_and_wait(
         .arg("f")
         .query(&mut *c)
         .expect("HPEXPIRE");
-    wait_until(Duration::from_secs(10), what, || done(c));
+    wait_until(CAPTURE_WAIT, what, || done(c));
 }
 
 #[test]
@@ -128,7 +127,7 @@ fn default_filter_does_not_capture_hexpired() {
             .expect("HEXISTS");
         n == 0
     });
-    wait_until(Duration::from_secs(10), "hexpired counted filtered", || {
+    wait_until(CAPTURE_WAIT, "hexpired counted filtered", || {
         info_field(&mut c, "skipped_filtered") >= 3
     });
 

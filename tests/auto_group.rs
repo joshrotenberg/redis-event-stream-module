@@ -59,7 +59,7 @@ fn auto_group_off_by_default() {
     assert_eq!(pair[1], "", "auto-group must default to empty (disabled)");
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(CAPTURE_WAIT, "set mirrored", || {
         info_field(&mut c, "forwarded") == 1
     });
     assert!(
@@ -78,7 +78,7 @@ fn auto_group_creates_group_on_each_written_stream() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "both events mirrored", || {
+    wait_until(CAPTURE_WAIT, "both events mirrored", || {
         info_field(&mut c, "forwarded") == 2
     });
 
@@ -118,7 +118,7 @@ fn auto_group_is_idempotent_across_writes() {
     for i in 0..50 {
         let _: () = c.set(format!("k{i}"), "v").expect("SET");
     }
-    wait_until(Duration::from_secs(10), "50 events mirrored", || {
+    wait_until(CAPTURE_WAIT, "50 events mirrored", || {
         info_field(&mut c, "forwarded") == 50
     });
 
@@ -139,7 +139,7 @@ fn auto_group_covers_the_firehose() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "firehose copy written", || {
+    wait_until(CAPTURE_WAIT, "firehose copy written", || {
         info_field(&mut c, "firehose_forwarded") == 1
     });
 
@@ -169,7 +169,7 @@ fn auto_group_excludes_the_control_stream() {
         .query(&mut c)
         .expect("re-enable");
     let _: () = c.set("b", "1").expect("SET flushes the pending markers");
-    wait_until(Duration::from_secs(5), "control markers written", || {
+    wait_until(CAPTURE_WAIT, "control markers written", || {
         xlen(&mut c, CONTROL) > 0
     });
 
@@ -189,7 +189,7 @@ fn auto_group_provisions_warm_streams_on_next_write_after_config_set() {
     let mut c = s.conn();
 
     let _: () = c.set("one", "v").expect("SET");
-    wait_until(Duration::from_secs(5), "first set mirrored", || {
+    wait_until(CAPTURE_WAIT, "first set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert!(
@@ -204,11 +204,9 @@ fn auto_group_provisions_warm_streams_on_next_write_after_config_set() {
         .query(&mut c)
         .expect("enable auto-group");
     let _: () = c.set("two", "v").expect("SET after enable");
-    wait_until(
-        Duration::from_secs(5),
-        "group provisioned on next write",
-        || group_names(&mut c, "events:set") == vec!["workers".to_string()],
-    );
+    wait_until(CAPTURE_WAIT, "group provisioned on next write", || {
+        group_names(&mut c, "events:set") == vec!["workers".to_string()]
+    });
     assert_eq!(info_field(&mut c, "autogroup_created"), 1);
 }
 
@@ -221,7 +219,7 @@ fn auto_group_recreates_group_after_flushall() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "group created", || {
+    wait_until(CAPTURE_WAIT, "group created", || {
         group_names(&mut c, "events:set") == vec!["workers".to_string()]
     });
 
@@ -229,7 +227,7 @@ fn auto_group_recreates_group_after_flushall() {
     assert!(group_names(&mut c, "events:set").is_empty());
 
     let _: () = c.set("b", "1").expect("SET after flush");
-    wait_until(Duration::from_secs(5), "group re-created", || {
+    wait_until(CAPTURE_WAIT, "group re-created", || {
         group_names(&mut c, "events:set") == vec!["workers".to_string()]
     });
     assert_eq!(
@@ -246,7 +244,7 @@ fn auto_group_replicates_to_replica() {
     let master = TestServer::start(&["events", "set", "auto-group", "workers"]);
     let mut mc = master.conn();
     let _: () = mc.set("a", "1").expect("SET on master");
-    wait_until(Duration::from_secs(5), "group on master", || {
+    wait_until(CAPTURE_WAIT, "group on master", || {
         group_names(&mut mc, "events:set") == vec!["workers".to_string()]
     });
 

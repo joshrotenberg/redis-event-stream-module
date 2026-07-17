@@ -7,7 +7,6 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::time::Duration;
 
 #[test]
 fn loaded_marker_flushes_on_first_event_not_before() {
@@ -18,7 +17,7 @@ fn loaded_marker_flushes_on_first_event_not_before() {
     assert_eq!(exists, 0, "no marker may be written before the first event");
 
     let _: () = c.set("x", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "loaded marker flushed", || {
+    wait_until(CAPTURE_WAIT, "loaded marker flushed", || {
         xlen(&mut c, CONTROL) > 0
     });
     assert_eq!(marker_actions(&mut c), vec!["loaded"]);
@@ -51,9 +50,7 @@ fn disabled_enabled_pair() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "loaded marker", || {
-        xlen(&mut c, CONTROL) == 1
-    });
+    wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
 
     let _: () = redis::cmd("CONFIG")
         .arg("SET")
@@ -62,7 +59,7 @@ fn disabled_enabled_pair() {
         .query(&mut c)
         .expect("disable");
     let _: () = c.set("b", "1").expect("SET while disabled");
-    wait_until(Duration::from_secs(5), "disabled marker flushed", || {
+    wait_until(CAPTURE_WAIT, "disabled marker flushed", || {
         xlen(&mut c, CONTROL) == 2
     });
 
@@ -73,7 +70,7 @@ fn disabled_enabled_pair() {
         .query(&mut c)
         .expect("enable");
     let _: () = c.set("c", "1").expect("SET after enable");
-    wait_until(Duration::from_secs(5), "enabled marker flushed", || {
+    wait_until(CAPTURE_WAIT, "enabled marker flushed", || {
         xlen(&mut c, CONTROL) == 3
     });
 
@@ -91,9 +88,7 @@ fn unloading_marker_on_module_unload() {
     let s = TestServer::start(&["events", "set"]);
     let mut c = s.conn();
     let _: () = c.set("x", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "loaded marker", || {
-        xlen(&mut c, CONTROL) == 1
-    });
+    wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
 
     let _: () = redis::cmd("MODULE")
         .arg("UNLOAD")
@@ -132,7 +127,7 @@ fn enabled_no_load_queues_loaded_then_disabled() {
     let mut c = s.conn();
 
     let _: () = c.set("x", "1").expect("SET while disabled");
-    wait_until(Duration::from_secs(5), "loaded+disabled flushed", || {
+    wait_until(CAPTURE_WAIT, "loaded+disabled flushed", || {
         xlen(&mut c, CONTROL) == 2
     });
     assert_eq!(
@@ -160,9 +155,7 @@ fn clean_shutdown_leaves_no_closing_marker_rdb() {
     {
         let mut c = s.conn();
         let _: () = c.set("x", "1").expect("SET");
-        wait_until(Duration::from_secs(5), "loaded marker", || {
-            xlen(&mut c, CONTROL) == 1
-        });
+        wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
         // SAVE forces the final RDB even with save points disabled, making
         // the persistence path deterministic.
         let _ = redis::cmd("SHUTDOWN").arg("SAVE").query::<()>(&mut c);
@@ -177,7 +170,7 @@ fn clean_shutdown_leaves_no_closing_marker_rdb() {
     );
 
     let _: () = c.set("y", "1").expect("SET after restart");
-    wait_until(Duration::from_secs(5), "second loaded marker", || {
+    wait_until(CAPTURE_WAIT, "second loaded marker", || {
         xlen(&mut c, CONTROL) == 2
     });
     assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
@@ -194,9 +187,7 @@ fn clean_shutdown_leaves_no_closing_marker_aof() {
     {
         let mut c = s.conn();
         let _: () = c.set("x", "1").expect("SET");
-        wait_until(Duration::from_secs(5), "loaded marker", || {
-            xlen(&mut c, CONTROL) == 1
-        });
+        wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
         // Plain SHUTDOWN: no save points and no SAVE flag, so durability is
         // the AOF's alone.
         let _ = redis::cmd("SHUTDOWN").query::<()>(&mut c);
@@ -211,7 +202,7 @@ fn clean_shutdown_leaves_no_closing_marker_aof() {
     );
 
     let _: () = c.set("y", "1").expect("SET after restart");
-    wait_until(Duration::from_secs(5), "second loaded marker", || {
+    wait_until(CAPTURE_WAIT, "second loaded marker", || {
         xlen(&mut c, CONTROL) == 2
     });
     assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
@@ -231,9 +222,7 @@ fn crash_leaves_no_closing_marker() {
         // Once XLEN observes the marker, a later event-loop iteration has
         // already written the AOF buffer to the page cache, which survives a
         // process kill (only an OS crash would need the fsync).
-        wait_until(Duration::from_secs(5), "loaded marker", || {
-            xlen(&mut c, CONTROL) == 1
-        });
+        wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
     }
     s.kill9();
 
@@ -246,7 +235,7 @@ fn crash_leaves_no_closing_marker() {
     );
 
     let _: () = c.set("y", "1").expect("SET after restart");
-    wait_until(Duration::from_secs(5), "second loaded marker", || {
+    wait_until(CAPTURE_WAIT, "second loaded marker", || {
         xlen(&mut c, CONTROL) == 2
     });
     assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
@@ -261,9 +250,7 @@ fn restart_reads_as_gap_and_persisted_control_stream_is_safe() {
     {
         let mut c = s.conn();
         let _: () = c.set("x", "1").expect("SET");
-        wait_until(Duration::from_secs(5), "loaded marker", || {
-            xlen(&mut c, CONTROL) == 1
-        });
+        wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
         let _: () = redis::cmd("SAVE").query(&mut c).expect("SAVE");
         // SHUTDOWN NOSAVE drops the connection; both clean shutdown and
         // crash write no marker, so this stands in for either.
@@ -281,7 +268,7 @@ fn restart_reads_as_gap_and_persisted_control_stream_is_safe() {
     );
 
     let _: () = c.set("y", "1").expect("SET after restart");
-    wait_until(Duration::from_secs(5), "second loaded marker", || {
+    wait_until(CAPTURE_WAIT, "second loaded marker", || {
         xlen(&mut c, CONTROL) == 2
     });
     let actions = marker_actions(&mut c);
@@ -314,9 +301,7 @@ fn flushall_writes_flushed_marker_db_all() {
     let mut c = s.conn();
 
     let _: () = c.set("x", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "loaded marker", || {
-        xlen(&mut c, CONTROL) == 1
-    });
+    wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
     assert_eq!(xlen(&mut c, "events:set"), 1);
 
     let _: () = redis::cmd("FLUSHALL").query(&mut c).expect("FLUSHALL");
@@ -331,7 +316,7 @@ fn flushall_writes_flushed_marker_db_all() {
     // The next captured event drains the pending flushed marker onto the
     // recreated control stream, ahead of the mirrored entry.
     let _: () = c.set("y", "1").expect("SET after FLUSHALL");
-    wait_until(Duration::from_secs(5), "flushed marker flushed", || {
+    wait_until(CAPTURE_WAIT, "flushed marker flushed", || {
         xlen(&mut c, CONTROL) == 1
     });
     assert_eq!(
@@ -361,7 +346,7 @@ fn flushdb_nonzero_writes_flushed_marker_with_db_and_streams_survive() {
     let mut c1 = s.conn_db(1);
 
     let _: () = c0.set("a", "1").expect("SET db0");
-    wait_until(Duration::from_secs(5), "loaded marker", || {
+    wait_until(CAPTURE_WAIT, "loaded marker", || {
         xlen(&mut c0, CONTROL) == 1
     });
     // A consumer group on the db 0 destination stream must survive the flush.
@@ -375,7 +360,7 @@ fn flushdb_nonzero_writes_flushed_marker_with_db_and_streams_survive() {
 
     // An event in db 1 is captured to the db 0 stream with db field "1".
     let _: () = c1.set("b", "1").expect("SET db1");
-    wait_until(Duration::from_secs(5), "db1 event mirrored", || {
+    wait_until(CAPTURE_WAIT, "db1 event mirrored", || {
         xlen(&mut c0, "events:set") == 2
     });
 
@@ -389,7 +374,7 @@ fn flushdb_nonzero_writes_flushed_marker_with_db_and_streams_survive() {
 
     // The next event drains the flushed marker onto the surviving control stream.
     let _: () = c0.set("c", "1").expect("SET db0 after FLUSHDB");
-    wait_until(Duration::from_secs(5), "flushed marker flushed", || {
+    wait_until(CAPTURE_WAIT, "flushed marker flushed", || {
         xlen(&mut c0, CONTROL) == 2
     });
     assert_eq!(marker_actions(&mut c0), vec!["loaded", "flushed"]);
@@ -408,7 +393,7 @@ fn swapdb_db0_writes_swapdb_marker_and_moves_streams() {
     let mut c0 = s.conn();
 
     let _: () = c0.set("a", "1").expect("SET db0");
-    wait_until(Duration::from_secs(5), "loaded marker", || {
+    wait_until(CAPTURE_WAIT, "loaded marker", || {
         xlen(&mut c0, CONTROL) == 1
     });
     assert_eq!(xlen(&mut c0, "events:set"), 1);
@@ -447,7 +432,7 @@ fn swapdb_db0_writes_swapdb_marker_and_moves_streams() {
         "db 0 control stream swapped away"
     );
     let _: () = c0.set("b", "1").expect("SET db0 after SWAPDB");
-    wait_until(Duration::from_secs(5), "swapdb marker flushed", || {
+    wait_until(CAPTURE_WAIT, "swapdb marker flushed", || {
         xlen(&mut c0, CONTROL) == 1
     });
     assert_eq!(marker_actions(&mut c0), vec!["swapdb"]);
@@ -469,7 +454,7 @@ fn swapdb_without_db0_writes_no_marker() {
     let mut c0 = s.conn();
 
     let _: () = c0.set("a", "1").expect("SET db0");
-    wait_until(Duration::from_secs(5), "loaded marker", || {
+    wait_until(CAPTURE_WAIT, "loaded marker", || {
         xlen(&mut c0, CONTROL) == 1
     });
 
@@ -481,7 +466,7 @@ fn swapdb_without_db0_writes_no_marker() {
 
     // A later db 0 event must not produce a swapdb marker.
     let _: () = c0.set("b", "1").expect("SET db0");
-    wait_until(Duration::from_secs(5), "db0 event mirrored", || {
+    wait_until(CAPTURE_WAIT, "db0 event mirrored", || {
         xlen(&mut c0, "events:set") == 2
     });
     assert_eq!(

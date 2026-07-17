@@ -6,7 +6,6 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::time::Duration;
 
 #[test]
 fn firehose_off_by_default() {
@@ -21,7 +20,7 @@ fn firehose_off_by_default() {
     assert_eq!(pair[1], "no", "firehose must default to no");
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "set mirrored", || {
+    wait_until(CAPTURE_WAIT, "set mirrored", || {
         info_field(&mut c, "forwarded") == 1
     });
     assert_eq!(
@@ -41,7 +40,7 @@ fn firehose_mirrors_every_event_with_identical_fields() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "both copies written", || {
+    wait_until(CAPTURE_WAIT, "both copies written", || {
         info_field(&mut c, "forwarded") == 2 && info_field(&mut c, "firehose_forwarded") == 2
     });
 
@@ -85,7 +84,7 @@ fn firehose_toggles_at_runtime() {
     let mut c = s.conn();
 
     let _: () = c.set("one", "v").expect("SET");
-    wait_until(Duration::from_secs(5), "first set mirrored", || {
+    wait_until(CAPTURE_WAIT, "first set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
     assert_eq!(xlen(&mut c, "events:#firehose"), 0);
@@ -97,7 +96,7 @@ fn firehose_toggles_at_runtime() {
         .query(&mut c)
         .expect("enable firehose");
     let _: () = c.set("two", "v").expect("SET while on");
-    wait_until(Duration::from_secs(5), "firehose copy written", || {
+    wait_until(CAPTURE_WAIT, "firehose copy written", || {
         xlen(&mut c, "events:#firehose") == 1
     });
     assert_eq!(
@@ -113,11 +112,9 @@ fn firehose_toggles_at_runtime() {
         .query(&mut c)
         .expect("disable firehose");
     let _: () = c.set("three", "v").expect("SET while off");
-    wait_until(
-        Duration::from_secs(5),
-        "per-event capture continues",
-        || xlen(&mut c, "events:set") == 3,
-    );
+    wait_until(CAPTURE_WAIT, "per-event capture continues", || {
+        xlen(&mut c, "events:set") == 3
+    });
     assert_eq!(
         xlen(&mut c, "events:#firehose"),
         1,
@@ -138,11 +135,9 @@ fn maxlen_bounds_firehose_growth() {
     for i in 0..500 {
         let _: () = c.set(format!("k{i}"), "v").expect("SET");
     }
-    wait_until(
-        Duration::from_secs(10),
-        "500 firehose copies written",
-        || info_field(&mut c, "firehose_forwarded") >= 500,
-    );
+    wait_until(CAPTURE_WAIT, "500 firehose copies written", || {
+        info_field(&mut c, "firehose_forwarded") >= 500
+    });
     let len = xlen(&mut c, "events:#firehose");
     assert!(
         len < 500,
@@ -160,11 +155,9 @@ fn maxlen_zero_disables_firehose_trimming() {
     for i in 0..500 {
         let _: () = c.set(format!("k{i}"), "v").expect("SET");
     }
-    wait_until(
-        Duration::from_secs(10),
-        "500 firehose copies written",
-        || info_field(&mut c, "firehose_forwarded") >= 500,
-    );
+    wait_until(CAPTURE_WAIT, "500 firehose copies written", || {
+        info_field(&mut c, "firehose_forwarded") >= 500
+    });
     assert_eq!(
         xlen(&mut c, "events:#firehose"),
         500,
@@ -194,7 +187,7 @@ fn event_name_with_hash_cannot_alias_the_firehose() {
         .expect("a name containing '#' is a valid bare filter token");
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "copy written", || {
+    wait_until(CAPTURE_WAIT, "copy written", || {
         info_field(&mut c, "firehose_forwarded") == 1
     });
     assert_eq!(
