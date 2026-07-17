@@ -76,9 +76,14 @@ jobs:
     name: Build and attach artifacts
     needs: create-release
     uses: ./.github/workflows/release-artifacts.yml
+    # Must grant everything the called workflow's top-level permissions
+    # request, or the workflow_call fails at startup with zero jobs
+    # (observed on the first v0.3.0 tag push): packages: write is what the
+    # docker job needs to push the preloaded image to GHCR (issue #102).
     permissions:
       contents: write
       id-token: write
       attestations: write
+      packages: write
     with:
       tag: ${{ github.ref_name }}
