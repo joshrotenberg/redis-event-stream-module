@@ -81,6 +81,45 @@ fn streams_reads_db0_from_any_client_db() {
 }
 
 #[test]
+fn prune_operates_on_db0_from_any_client_db() {
+    // The PRUNE analogue of streams_reads_db0_from_any_client_db: the
+    // registry lives in db 0, so PRUNE selects db 0 for its existence checks
+    // and reconciling SREMs and restores the caller's database on every path
+    // (SPEC.md section 8).
+    let s = TestServer::start(&["events", "set"]);
+    let mut c0 = s.conn();
+    let _: () = c0.set("a", "1").expect("SET");
+    wait_until(CAPTURE_WAIT, "stream registered", || {
+        !streams(&mut c0).is_empty()
+    });
+
+    // Delete the destination stream so the registry holds one dead name.
+    let _: () = redis::cmd("DEL")
+        .arg("events:set")
+        .query(&mut c0)
+        .expect("DEL stream");
+
+    // PRUNE issued from a client on db 3 reconciles the db-0 registry.
+    let mut c3 = s.conn_db(3);
+    let pruned: i64 = redis::cmd("EVENTSTREAM.PRUNE")
+        .query(&mut c3)
+        .expect("PRUNE from a db-3 client");
+    assert_eq!(pruned, 1, "the dead db-0 name is pruned from a db-3 client");
+    assert!(
+        streams(&mut c0).is_empty(),
+        "the db-0 registry is reconciled"
+    );
+
+    // The client's SELECTed database is restored after the write path too.
+    let _: () = c3.set("db3only", "x").expect("SET on db3");
+    let exists0: i64 = redis::cmd("EXISTS")
+        .arg("db3only")
+        .query(&mut s.conn())
+        .expect("EXISTS");
+    assert_eq!(exists0, 0, "PRUNE must restore the caller's database");
+}
+
+#[test]
 fn streams_withstats_reports_per_stream_counters() {
     let s = TestServer::start(&["events", "set,del"]);
     let mut c = s.conn();

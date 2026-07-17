@@ -1,8 +1,9 @@
 //! Custom `@eventstream` ACL category (issue #69). `RM_AddACLCategory` is
-//! Redis 7.4+; the module registers the category and tags both introspection
-//! commands into it where the API exists, and skips cleanly on 7.2/7.3 (the
-//! null-pointer gate, same class as #45) so the load never fails over ACL
-//! wiring. These tests derive the expected behavior empirically from the
+//! Redis 7.4+; the module registers the category and tags all three module
+//! commands into it (`EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`, and the
+//! write command `EVENTSTREAM.PRUNE`) where the API exists, and skips cleanly
+//! on 7.2/7.3 (the null-pointer gate, same class as #45) so the load never
+//! fails over ACL wiring. These tests derive the expected behavior empirically from the
 //! module's own load-time notice rather than parsing versions, so they cover
 //! every lane in the CI matrix (Redis 7.2/7.4/8, Valkey 8): whichever server
 //! exposes the API gets the category, the rest get the fallback.
@@ -42,7 +43,7 @@ fn eventstream_category_listed_when_supported() {
 }
 
 #[test]
-fn category_grants_both_commands_when_supported() {
+fn category_grants_all_commands_when_supported() {
     let s = TestServer::start(&[]);
     let mut c = s.conn();
     if !category_registered(&s) {
@@ -51,8 +52,8 @@ fn category_grants_both_commands_when_supported() {
     }
 
     // A user whose only grant is +@eventstream (from a clean -@all slate) can
-    // run both module commands: proof the category actually carries them, the
-    // group-level grant the issue is about.
+    // run all three module commands: proof the category actually carries
+    // them, the group-level grant the issue is about.
     let _: () = redis::cmd("ACL")
         .arg("SETUSER")
         .arg("es")
@@ -104,6 +105,12 @@ fn category_grants_both_commands_when_supported() {
     let _: redis::Value = redis::cmd("EVENTSTREAM.STREAMS")
         .query(&mut uc)
         .expect("EVENTSTREAM.STREAMS allowed via @eventstream");
+    // The category also carries the write command (SPEC.md section 8): a
+    // regression dropping PRUNE from the tagging would pass the two calls
+    // above but fail here.
+    let _: i64 = redis::cmd("EVENTSTREAM.PRUNE")
+        .query(&mut uc)
+        .expect("EVENTSTREAM.PRUNE allowed via @eventstream");
     let denied: Result<redis::Value, _> = redis::cmd("GET").arg("k").query(&mut uc);
     assert!(
         denied.is_err(),
@@ -114,9 +121,11 @@ fn category_grants_both_commands_when_supported() {
 #[test]
 fn loads_and_commands_individually_grantable_without_category() {
     // The fallback lane (Redis 7.2/7.3, or any server with a null API pointer):
-    // the module must load cleanly and both commands remain grantable by name,
-    // exactly as before the category existed. Skips where the category is
-    // present so the same test body runs meaningfully on every lane.
+    // the module must load cleanly and the commands remain grantable by name,
+    // exactly as before the category existed. The name grants mirror the
+    // category's full three-command equivalent (SPEC.md section 8 and the
+    // module's own load-time notice). Skips where the category is present so
+    // the same test body runs meaningfully on every lane.
     let s = TestServer::start(&[]);
     let mut c = s.conn();
     if category_registered(&s) {
@@ -146,6 +155,7 @@ fn loads_and_commands_individually_grantable_without_category() {
         .arg("-@all")
         .arg("+eventstream.stats")
         .arg("+eventstream.streams")
+        .arg("+eventstream.prune")
         .query(&mut c)
         .expect("SETUSER with explicit per-command grants");
     let mut uc = s.conn();
@@ -160,4 +170,7 @@ fn loads_and_commands_individually_grantable_without_category() {
     let _: redis::Value = redis::cmd("EVENTSTREAM.STREAMS")
         .query(&mut uc)
         .expect("EVENTSTREAM.STREAMS allowed via explicit grant");
+    let _: i64 = redis::cmd("EVENTSTREAM.PRUNE")
+        .query(&mut uc)
+        .expect("EVENTSTREAM.PRUNE allowed via explicit grant");
 }

@@ -258,3 +258,77 @@ fn enabled_toggle_drops_and_resumes() {
         xlen(&mut c, "events:set") == 2
     });
 }
+
+#[test]
+fn multi_exec_sees_pre_event_stream_state() {
+    // SPEC.md section 9: post-notification jobs run at the end of the
+    // execution unit, so a later command in the same MULTI/EXEC observes the
+    // keyspace change before the mirrored entry exists. Consumer-facing and
+    // easy to trip over from Lua/transactions, so pinned here; a change in
+    // post-notification-job timing must fail this test, not silently change
+    // semantics.
+    let s = TestServer::start(&["events", "set"]);
+    let mut c = s.conn();
+
+    // Prime one captured event so the stream exists with a known length.
+    let _: () = c.set("prime", "v").expect("SET prime");
+    wait_until(CAPTURE_WAIT, "prime mirrored", || {
+        xlen(&mut c, "events:set") == 1
+    });
+
+    // Inside one transaction: mutate, read the key, read the stream. The GET
+    // sees the keyspace change; the XLEN still reads the pre-event length.
+    let (got, len_inside): (String, i64) = redis::pipe()
+        .atomic()
+        .cmd("SET")
+        .arg("k")
+        .arg("v")
+        .ignore()
+        .cmd("GET")
+        .arg("k")
+        .cmd("XLEN")
+        .arg("events:set")
+        .query(&mut c)
+        .expect("MULTI/EXEC");
+    assert_eq!(got, "v", "the keyspace change is visible inside the MULTI");
+    assert_eq!(
+        len_inside, 1,
+        "the mirrored entry must not be visible inside the same MULTI/EXEC"
+    );
+
+    // The job runs at the end of the execution unit; the entry lands after
+    // EXEC.
+    wait_until(CAPTURE_WAIT, "entry lands after EXEC", || {
+        xlen(&mut c, "events:set") == 2
+    });
+}
+
+#[test]
+fn lua_script_sees_pre_event_stream_state() {
+    // The EVAL analogue of the MULTI/EXEC exception (SPEC.md section 9): a
+    // script that both mutates a key and reads the module's streams sees
+    // pre-event stream state; the entry lands after the script completes.
+    let s = TestServer::start(&["events", "set"]);
+    let mut c = s.conn();
+
+    let _: () = c.set("prime", "v").expect("SET prime");
+    wait_until(CAPTURE_WAIT, "prime mirrored", || {
+        xlen(&mut c, "events:set") == 1
+    });
+
+    let len_inside: i64 = redis::cmd("EVAL")
+        .arg("redis.call('SET', KEYS[1], 'v'); return redis.call('XLEN', KEYS[2])")
+        .arg(2)
+        .arg("k")
+        .arg("events:set")
+        .query(&mut c)
+        .expect("EVAL");
+    assert_eq!(
+        len_inside, 1,
+        "the mirrored entry must not be visible inside the script"
+    );
+
+    wait_until(CAPTURE_WAIT, "entry lands after the script", || {
+        xlen(&mut c, "events:set") == 2
+    });
+}
