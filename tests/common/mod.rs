@@ -168,6 +168,29 @@ impl TestCluster {
     /// source node's writes to keys in it get the local-refusal error, which is
     /// what the module re-pins on (issue #46).
     pub fn migrate_slot(&self, slot: u16, from: usize, to: usize) {
+        let to_id = self.node_id(to);
+        let slot_s = slot.to_string();
+
+        self.open_migration_window(slot, from, to);
+
+        // Assign the slot to the destination everywhere. Destination first so it
+        // claims the slot before the source relinquishes it; then the source;
+        // then the rest, though gossip would also spread it.
+        let mut order = vec![to, from];
+        order.extend((0..self.num_masters()).filter(|&i| i != to && i != from));
+        for i in order {
+            self.node_run(i, &["CLUSTER", "SETSLOT", &slot_s, "NODE", &to_id])
+                .expect("assign slot to destination");
+        }
+    }
+
+    /// The first phase of `migrate_slot`, left open: mark the slot
+    /// IMPORTING on the destination and MIGRATING on the source and move
+    /// every key across, but never assign the slot (`SETSLOT NODE`). The
+    /// source still owns the slot, so a write to one of the moved keys gets
+    /// the ASK/TRYAGAIN refusal rather than the completed-migration local
+    /// refusal — the early re-pin signal of issue #75 (SPEC.md section 10).
+    pub fn open_migration_window(&self, slot: u16, from: usize, to: usize) {
         let from_id = self.node_id(from);
         let to_id = self.node_id(to);
         let slot_s = slot.to_string();
@@ -195,16 +218,6 @@ impl TestCluster {
                 vec!["MIGRATE", "127.0.0.1", &to_port, "", "0", "5000", "KEYS"];
             args.extend(keys.iter().copied());
             self.node_run(from, &args).expect("migrate keys");
-        }
-
-        // Assign the slot to the destination everywhere. Destination first so it
-        // claims the slot before the source relinquishes it; then the source;
-        // then the rest, though gossip would also spread it.
-        let mut order = vec![to, from];
-        order.extend((0..self.num_masters()).filter(|&i| i != to && i != from));
-        for i in order {
-            self.node_run(i, &["CLUSTER", "SETSLOT", &slot_s, "NODE", &to_id])
-                .expect("assign slot to destination");
         }
     }
 }
@@ -712,7 +725,11 @@ pub fn xlen(conn: &mut redis::Connection, key: &str) -> i64 {
 }
 
 /// All values of `field` across a stream's entries, in order.
-pub fn stream_field_values(conn: &mut redis::Connection, key: &str, field: &str) -> Vec<Vec<u8>> {
+pub fn stream_field_values(
+    conn: &mut impl redis::ConnectionLike,
+    key: &str,
+    field: &str,
+) -> Vec<Vec<u8>> {
     let reply: redis::streams::StreamRangeReply = conn.xrange_all(key).expect("XRANGE");
     reply
         .ids
@@ -727,7 +744,11 @@ pub fn stream_field_values(conn: &mut redis::Connection, key: &str, field: &str)
 }
 
 /// Convenience: `stream_field_values` as lossy strings.
-pub fn stream_field_strings(conn: &mut redis::Connection, key: &str, field: &str) -> Vec<String> {
+pub fn stream_field_strings(
+    conn: &mut impl redis::ConnectionLike,
+    key: &str,
+    field: &str,
+) -> Vec<String> {
     stream_field_values(conn, key, field)
         .into_iter()
         .map(|b| String::from_utf8_lossy(&b).into_owned())

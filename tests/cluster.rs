@@ -312,14 +312,17 @@ fn per_node_repins_after_slot_migration() {
         .expect("new firehose len");
     assert!(firehose_len > 0, "firehose resumed on the new tag");
 
-    // The re-pin boundary is marked on the new control stream.
-    let control_len: i64 = redis::cmd("XLEN")
-        .arg(format!("events:{{{new_tag}}}#control"))
-        .query(&mut conn)
-        .unwrap_or(0);
+    // The re-pin boundary is marked on the new control stream, and the
+    // marker's action field reads the documented `repinned` (SPEC.md
+    // section 9) — not merely some entry of unchecked shape.
+    let actions = stream_field_strings(
+        &mut conn,
+        &format!("events:{{{new_tag}}}#control"),
+        "action",
+    );
     assert!(
-        control_len >= 1,
-        "a repinned gap marker delimits the window"
+        actions.iter().any(|a| a == "repinned"),
+        "a repinned gap marker delimits the window: {actions:?}"
     );
 
     // The old entries migrated with the slot and are still reachable by name
@@ -702,5 +705,209 @@ fn invalid_cluster_streams_value_aborts_load() {
     assert!(
         result.is_err(),
         "an invalid cluster-streams value must abort load"
+    );
+}
+
+/// `XINFO GROUPS <stream>` group names, over any connection (cluster
+/// connections route by the stream key's slot). RESP2 reply: an array of
+/// flat field/value arrays per group.
+fn group_names(conn: &mut impl redis::ConnectionLike, stream: &str) -> Vec<String> {
+    let reply: redis::Value = redis::cmd("XINFO")
+        .arg("GROUPS")
+        .arg(stream)
+        .query(conn)
+        .unwrap_or(redis::Value::Array(vec![]));
+    let redis::Value::Array(groups) = reply else {
+        return vec![];
+    };
+    let mut names = Vec::new();
+    for group in groups {
+        let redis::Value::Array(fields) = group else {
+            continue;
+        };
+        let flat: Vec<String> = fields
+            .iter()
+            .map(|v| match v {
+                redis::Value::SimpleString(s) => s.clone(),
+                redis::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        if let Some(idx) = flat.iter().position(|f| f == "name") {
+            if let Some(name) = flat.get(idx + 1) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
+}
+
+#[test]
+fn auto_group_provisions_on_tagged_streams_and_after_repin() {
+    // SPEC.md section 7: in per-node mode each node creates the configured
+    // group on its own tagged streams as it writes them, including streams
+    // created after a re-pin — the case where module-side creation at stream
+    // birth beats an external XGROUP CREATE sweep, because the per-node
+    // stream names change after resharding. Previously unpinned: no cluster
+    // test passed auto-group at all.
+    let cluster = TestCluster::try_start(
+        3,
+        Some(&[
+            "events",
+            "set",
+            "cluster-streams",
+            "per-node",
+            "auto-group",
+            "workers",
+        ]),
+    )
+    .expect("per-node cluster forms");
+    let n = cluster.num_masters();
+    let mut conn = cluster.cluster_conn();
+
+    // First batch: every capturing node's tagged stream carries the group.
+    for i in 0..120 {
+        let _: () = redis::cmd("SET")
+            .arg(format!("a:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET a");
+    }
+    wait_until(Duration::from_secs(15), "first batch captured", || {
+        (0..n)
+            .map(|i| cluster.node_info_field(i, "forwarded"))
+            .sum::<i64>()
+            == 120
+    });
+    for i in 0..n {
+        if cluster.node_info_field(i, "forwarded") == 0 {
+            continue;
+        }
+        let tag = cluster.node_pinned_tag(i);
+        let stream = format!("events:{{{tag}}}set");
+        assert!(
+            group_names(&mut conn, &stream).contains(&"workers".to_string()),
+            "auto-group provisions the group on node {i}'s tagged stream"
+        );
+        assert!(
+            cluster.node_info_field(i, "autogroup_created") >= 1,
+            "node {i} counted its group creation"
+        );
+        assert_eq!(cluster.node_info_field(i, "autogroup_failed"), 0);
+    }
+
+    // Migrate a capturing node's pinned slot away and drive a second batch:
+    // the node re-pins and the group must exist on the newly created stream.
+    let victim = (0..n)
+        .find(|&i| cluster.node_info_field(i, "forwarded") > 0)
+        .expect("some node captured");
+    let old_tag = cluster.node_pinned_tag(victim);
+    let old_slot = cluster.keyslot(&format!("{{{old_tag}}}"));
+    let other = (0..n).find(|&i| i != victim).unwrap();
+    cluster.migrate_slot(old_slot, victim, other);
+
+    for i in 0..200 {
+        let _: () = redis::cmd("SET")
+            .arg(format!("b:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET b");
+    }
+    wait_until(Duration::from_secs(20), "victim re-pins", || {
+        cluster.node_info_field(victim, "repins") >= 1
+    });
+    let new_tag = cluster.node_pinned_tag(victim);
+    assert_ne!(new_tag, old_tag, "victim re-pinned to a different tag");
+    let new_stream = format!("events:{{{new_tag}}}set");
+    wait_until(
+        Duration::from_secs(15),
+        "group on the post-re-pin stream",
+        || group_names(&mut conn, &new_stream).contains(&"workers".to_string()),
+    );
+}
+
+#[test]
+fn migration_window_triggers_early_repin() {
+    // SPEC.md section 10 / issue #75: a TRYAGAIN/ASK refusal while the
+    // pinned slot is mid-migration triggers the re-pin immediately, without
+    // waiting for the migration to complete. The window is held open on
+    // purpose (keys moved, slot never assigned), so the source still owns
+    // the slot and the completed-migration local refusal cannot fire: the
+    // only refusal a mirrored write to the moved stream key can receive is
+    // ASK/TRYAGAIN, which pins the early path specifically. The classifier
+    // recognizes it directly, so the probe fallback stays unused.
+    let cluster =
+        TestCluster::try_start(3, Some(&["events", "set", "cluster-streams", "per-node"]))
+            .expect("per-node cluster forms");
+    let n = cluster.num_masters();
+    let mut conn = cluster.cluster_conn();
+
+    for i in 0..120 {
+        let _: () = redis::cmd("SET")
+            .arg(format!("a:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET a");
+    }
+    wait_until(Duration::from_secs(15), "first batch captured", || {
+        (0..n)
+            .map(|i| cluster.node_info_field(i, "forwarded"))
+            .sum::<i64>()
+            == 120
+    });
+
+    let victim = (0..n)
+        .find(|&i| cluster.node_info_field(i, "forwarded") > 0)
+        .expect("some node captured");
+    let old_tag = cluster.node_pinned_tag(victim);
+    let old_slot = cluster.keyslot(&format!("{{{old_tag}}}"));
+    let other = (0..n).find(|&i| i != victim).unwrap();
+    let victim_forwarded = cluster.node_info_field(victim, "forwarded");
+
+    // Open the window and leave it open: no SETSLOT NODE ever runs.
+    cluster.open_migration_window(old_slot, victim, other);
+
+    for i in 0..200 {
+        let _: () = redis::cmd("SET")
+            .arg(format!("b:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET b");
+    }
+    wait_until(
+        Duration::from_secs(20),
+        "victim re-pins inside the open migration window",
+        || {
+            cluster.node_info_field(victim, "repins") >= 1
+                && cluster.node_info_field(victim, "forwarded") > victim_forwarded
+        },
+    );
+
+    // The recognized TRYAGAIN/ASK classifier fired, not the probe fallback,
+    // and no refusal leaked into the generic write-error counter.
+    assert_eq!(
+        cluster.node_info_field(victim, "repins_probe_detected"),
+        0,
+        "the early path is the recognized classifier, not the probe fallback"
+    );
+    assert_eq!(cluster.node_info_field(victim, "dropped_xadd_error"), 0);
+
+    // Capture resumed on a fresh tag (the probe skips the mid-migration
+    // slot), with the boundary marked by a repinned marker.
+    let new_tag = cluster.node_pinned_tag(victim);
+    assert_ne!(new_tag, old_tag, "victim re-pinned off the migrating slot");
+    let new_len: i64 = redis::cmd("XLEN")
+        .arg(format!("events:{{{new_tag}}}set"))
+        .query(&mut conn)
+        .expect("new stream len");
+    assert!(new_len > 0, "capture resumed on the new tag");
+    let actions = stream_field_strings(
+        &mut conn,
+        &format!("events:{{{new_tag}}}#control"),
+        "action",
+    );
+    assert!(
+        actions.iter().any(|a| a == "repinned"),
+        "a repinned gap marker delimits the early re-pin: {actions:?}"
     );
 }
