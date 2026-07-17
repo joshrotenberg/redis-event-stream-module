@@ -230,3 +230,97 @@ fn firehose_occupies_one_max_streams_slot() {
         || info_field(&mut c, "firehose_forwarded") > copies,
     );
 }
+
+#[test]
+fn firehose_failure_leaves_per_event_entry_intact() {
+    // SPEC.md section 5: the per-event write and the firehose copy succeed
+    // or fail independently; a failed copy counts in the dropped_* counters
+    // and is attributed to the firehose's own WITHSTATS row (section 8).
+    let s = TestServer::start(&["events", "set", "firehose", "yes"]);
+    let mut c = s.conn();
+
+    // One successful event registers both destinations.
+    let _: () = c.set("a", "1").expect("SET");
+    wait_until(CAPTURE_WAIT, "firehose registered", || {
+        info_field(&mut c, "firehose_forwarded") == 1
+    });
+
+    // Break only the firehose: WRONGTYPE occupant at its key. Writes to
+    // prefix keys are guarded, never mirrored, so this cannot loop.
+    let _: () = redis::cmd("DEL")
+        .arg("events:#firehose")
+        .query(&mut c)
+        .expect("DEL firehose");
+    let _: () = c.set("events:#firehose", "occupied").expect("SET occupant");
+
+    let _: () = c.set("b", "2").expect("SET with broken firehose");
+    wait_until(CAPTURE_WAIT, "failed copy counted", || {
+        info_field(&mut c, "dropped_xadd_error") >= 1
+    });
+
+    // Independence: the per-event entry landed; only the copy was dropped.
+    assert_eq!(xlen(&mut c, "events:set"), 2, "per-event write unaffected");
+    assert_eq!(
+        info_field(&mut c, "firehose_forwarded"),
+        1,
+        "no copy written while the firehose is occupied"
+    );
+    let st = streams_withstats(&mut c);
+    assert_eq!(
+        st["events:#firehose"],
+        (1, 1),
+        "the drop lands on the firehose's own row"
+    );
+    assert_eq!(
+        st["events:set"],
+        (2, 0),
+        "the per-event row records no drop"
+    );
+
+    // Clear the occupant: the copy path recovers on the next event.
+    let _: () = redis::cmd("DEL")
+        .arg("events:#firehose")
+        .query(&mut c)
+        .expect("DEL occupant");
+    let _: () = c.set("d", "3").expect("SET after fix");
+    wait_until(CAPTURE_WAIT, "copy path recovers", || {
+        info_field(&mut c, "firehose_forwarded") == 2
+    });
+    assert_eq!(xlen(&mut c, "events:set"), 3);
+}
+
+#[test]
+fn both_writes_refused_counts_two_drops() {
+    // SPEC.md section 5: drop accounting is per write, not per event — one
+    // event whose per-event entry and firehose copy are both refused counts
+    // two drops, one on each stream's WITHSTATS row.
+    let s = TestServer::start(&["events", "set", "firehose", "yes"]);
+    let mut c = s.conn();
+
+    let _: () = c.set("a", "1").expect("SET");
+    wait_until(CAPTURE_WAIT, "both destinations registered", || {
+        info_field(&mut c, "firehose_forwarded") == 1
+    });
+
+    // Occupy both destinations.
+    for key in ["events:set", "events:#firehose"] {
+        let _: () = redis::cmd("DEL").arg(key).query(&mut c).expect("DEL");
+        let _: () = c.set(key, "occupied").expect("SET occupant");
+    }
+
+    // One event, two refused writes, two drops.
+    let _: () = c.set("b", "2").expect("SET with both broken");
+    wait_until(CAPTURE_WAIT, "two drops counted for one event", || {
+        info_field(&mut c, "dropped_xadd_error") == 2
+    });
+    assert_eq!(info_field(&mut c, "forwarded"), 1, "no per-event write");
+    assert_eq!(info_field(&mut c, "firehose_forwarded"), 1, "no copy");
+    let st = streams_withstats(&mut c);
+    assert_eq!(st["events:set"], (1, 1));
+    assert_eq!(st["events:#firehose"], (1, 1));
+    assert_eq!(
+        info_field(&mut c, "dropped"),
+        2,
+        "the dropped sum sees both"
+    );
+}
