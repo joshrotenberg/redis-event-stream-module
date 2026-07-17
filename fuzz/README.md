@@ -8,6 +8,7 @@ untrusted input (issue #131), complementing the property tests from #94:
 | `parse_filter` | `eventstream.events` grammar parser | SPEC.md §7 |
 | `validate_prefix` | `eventstream.stream-prefix` validator | SPEC.md §7 |
 | `sanitize` | event-name → stream-suffix sanitizer | SPEC.md §5 |
+| `glob_match` | key-filter glob matcher (pattern + key byte pair) | SPEC.md §7 |
 
 Each must never panic — a parser fed hostile `CONFIG SET` values or a sanitizer
 fed a hostile co-loaded-module event name may only return `Err` or a safe

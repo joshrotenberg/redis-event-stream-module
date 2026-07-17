@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_filter, validate_prefix, sanitize]
+        target: [parse_filter, validate_prefix, sanitize, glob_match]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
