@@ -113,7 +113,7 @@ fn counters_track_capture_activity() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL"); // filtered out
-    wait_until(Duration::from_secs(5), "forwarded counts the set", || {
+    wait_until(CAPTURE_WAIT, "forwarded counts the set", || {
         info_field(&mut c, "forwarded") == 1
     });
     assert!(
@@ -170,7 +170,7 @@ fn wrongtype_destination_counts_per_stream_and_recovers() {
 
     // A first successful write registers events:set in the registry.
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "stream registered", || {
+    wait_until(CAPTURE_WAIT, "stream registered", || {
         info_field(&mut c, "forwarded") == 1
     });
 
@@ -184,7 +184,7 @@ fn wrongtype_destination_counts_per_stream_and_recovers() {
     let _: () = c.set("events:set", "occupied").expect("SET occupant");
 
     let _: () = c.set("b", "2").expect("SET into broken stream");
-    wait_until(Duration::from_secs(5), "wrongtype drop counted", || {
+    wait_until(CAPTURE_WAIT, "wrongtype drop counted", || {
         info_field(&mut c, "dropped_xadd_error") >= 1
     });
     let st = streams_withstats(&mut c);
@@ -201,7 +201,7 @@ fn wrongtype_destination_counts_per_stream_and_recovers() {
         .query(&mut c)
         .expect("DEL occupant");
     let _: () = c.set("d", "3").expect("SET after fix");
-    wait_until(Duration::from_secs(5), "capture recovers", || {
+    wait_until(CAPTURE_WAIT, "capture recovers", || {
         streams_withstats(&mut c)["events:set"] == (2, 1)
     });
     assert_eq!(info_field(&mut c, "dropped_xadd_error"), 1);
@@ -235,7 +235,7 @@ fn oom_refusal_is_a_counted_drop() {
     // DEL works under noeviction and fires an event; the mirror XADD must be
     // refused by verify_oom while used memory exceeds maxmemory.
     let _: () = c.del("fill0").expect("DEL under OOM");
-    wait_until(Duration::from_secs(5), "oom drop counted", || {
+    wait_until(CAPTURE_WAIT, "oom drop counted", || {
         info_field(&mut c, "dropped_oom") >= 1
     });
     assert!(info_field(&mut c, "last_error_time") > 0);
@@ -249,7 +249,7 @@ fn oom_refusal_is_a_counted_drop() {
         .expect("CONFIG SET maxmemory 0");
     let forwarded_before = info_field(&mut c, "forwarded");
     let _: () = c.del("fill1").expect("DEL after recovery");
-    wait_until(Duration::from_secs(5), "capture recovers after OOM", || {
+    wait_until(CAPTURE_WAIT, "capture recovers after OOM", || {
         info_field(&mut c, "forwarded") > forwarded_before
     });
 }

@@ -8,7 +8,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 #[test]
 fn non_utf8_event_name_is_captured_not_a_crash() {
@@ -22,7 +21,7 @@ fn non_utf8_event_name_is_captured_not_a_crash() {
         .arg("victim")
         .query(&mut c)
         .expect("FIRE with a non-UTF-8 event name");
-    wait_until(Duration::from_secs(5), "non-UTF-8 event mirrored", || {
+    wait_until(CAPTURE_WAIT, "non-UTF-8 event mirrored", || {
         xlen(&mut c, "events:js_on.set") > 0
     });
 
@@ -55,7 +54,7 @@ fn empty_event_name_increments_skipped_invalid() {
         .arg("victim")
         .query(&mut c)
         .expect("FIRE with an empty event name");
-    wait_until(Duration::from_secs(5), "empty name counted invalid", || {
+    wait_until(CAPTURE_WAIT, "empty name counted invalid", || {
         info_field(&mut c, "skipped_invalid") == 1
     });
 

@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::time::Duration;
 
 // --- Key-name glob filter (issue #61) ---
 
@@ -15,12 +14,12 @@ fn key_filter_captures_only_matching_keys() {
     let mut c = s.conn();
 
     let _: () = c.set("session:abc", "v").expect("SET matching");
-    wait_until(Duration::from_secs(5), "matching key mirrored", || {
+    wait_until(CAPTURE_WAIT, "matching key mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
 
     let _: () = c.set("cache:xyz", "v").expect("SET non-matching");
-    wait_until(Duration::from_secs(5), "non-matching key skipped", || {
+    wait_until(CAPTURE_WAIT, "non-matching key skipped", || {
         info_field(&mut c, "skipped_key_filtered") >= 1
     });
     // The non-matching write never produced an entry; only the matching one did.
@@ -38,7 +37,7 @@ fn key_filter_matches_binary_key_bytes() {
 
     let key: Vec<u8> = vec![b'k', b':', 0xff];
     let _: () = c.set(key.clone(), "v").expect("SET binary key");
-    wait_until(Duration::from_secs(5), "binary key matched", || {
+    wait_until(CAPTURE_WAIT, "binary key matched", || {
         xlen(&mut c, "events:set") == 1
     });
     let keys = stream_field_values(&mut c, "events:set", "key");
@@ -58,11 +57,11 @@ fn key_filter_live_change() {
         .expect("CONFIG SET key-filter");
 
     let _: () = c.set("drop:1", "v").expect("SET dropped");
-    wait_until(Duration::from_secs(5), "dropped key counted", || {
+    wait_until(CAPTURE_WAIT, "dropped key counted", || {
         info_field(&mut c, "skipped_key_filtered") >= 1
     });
     let _: () = c.set("keep:1", "v").expect("SET kept");
-    wait_until(Duration::from_secs(5), "kept key mirrored", || {
+    wait_until(CAPTURE_WAIT, "kept key mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
 }
@@ -97,13 +96,13 @@ fn source_db_captures_only_named_db() {
     let mut c2 = s.conn_db(2);
 
     let _: () = c0.set("in0", "v").expect("SET db0");
-    wait_until(Duration::from_secs(5), "db0 event skipped", || {
+    wait_until(CAPTURE_WAIT, "db0 event skipped", || {
         info_field(&mut c0, "skipped_db") >= 1
     });
     assert_eq!(xlen(&mut c0, "events:set"), 0, "db0 must be excluded");
 
     let _: () = c2.set("in2", "v").expect("SET db2");
-    wait_until(Duration::from_secs(5), "db2 event mirrored", || {
+    wait_until(CAPTURE_WAIT, "db2 event mirrored", || {
         xlen(&mut c0, "events:set") == 1
     });
     let dbs = stream_field_strings(&mut c0, "events:set", "db");
@@ -118,7 +117,7 @@ fn source_db_live_change() {
 
     // Default `*` captures db 0.
     let _: () = c0.set("a", "v").expect("SET db0 default");
-    wait_until(Duration::from_secs(5), "default captures db0", || {
+    wait_until(CAPTURE_WAIT, "default captures db0", || {
         xlen(&mut c0, "events:set") == 1
     });
 
@@ -130,13 +129,13 @@ fn source_db_live_change() {
         .expect("CONFIG SET source-dbs 2");
 
     let _: () = c0.set("b", "v").expect("SET db0 after change");
-    wait_until(Duration::from_secs(5), "db0 now skipped", || {
+    wait_until(CAPTURE_WAIT, "db0 now skipped", || {
         info_field(&mut c0, "skipped_db") >= 1
     });
     assert_eq!(xlen(&mut c0, "events:set"), 1, "db0 no longer captured");
 
     let _: () = c2.set("c", "v").expect("SET db2 after change");
-    wait_until(Duration::from_secs(5), "db2 captured after change", || {
+    wait_until(CAPTURE_WAIT, "db2 captured after change", || {
         xlen(&mut c0, "events:set") == 2
     });
 }
@@ -166,17 +165,17 @@ fn max_streams_caps_new_stream_creation() {
     let mut c = s.conn();
 
     let _: () = c.set("k1", "v").expect("SET");
-    wait_until(Duration::from_secs(5), "events:set registered", || {
+    wait_until(CAPTURE_WAIT, "events:set registered", || {
         info_field(&mut c, "active_streams") == 1
     });
     let _: () = c.del("k1").expect("DEL");
-    wait_until(Duration::from_secs(5), "events:del registered", || {
+    wait_until(CAPTURE_WAIT, "events:del registered", || {
         info_field(&mut c, "active_streams") == 2
     });
 
     // The third distinct name would create a third stream: dropped.
     let _: () = c.lpush("k2", "v").expect("LPUSH");
-    wait_until(Duration::from_secs(5), "third stream dropped", || {
+    wait_until(CAPTURE_WAIT, "third stream dropped", || {
         info_field(&mut c, "dropped_max_streams") >= 1
     });
     assert_eq!(xlen(&mut c, "events:lpush"), 0, "capped stream not created");
@@ -185,7 +184,7 @@ fn max_streams_caps_new_stream_creation() {
     // An already-registered stream keeps receiving events past the cap.
     let forwarded_before = info_field(&mut c, "forwarded");
     let _: () = c.set("k3", "v").expect("SET into existing stream");
-    wait_until(Duration::from_secs(5), "existing stream still fed", || {
+    wait_until(CAPTURE_WAIT, "existing stream still fed", || {
         info_field(&mut c, "forwarded") > forwarded_before
     });
     assert!(xlen(&mut c, "events:set") >= 2);
@@ -201,7 +200,7 @@ fn max_streams_zero_is_unlimited() {
     let _: () = c.set("k1", "v").expect("SET");
     let _: () = c.del("k1").expect("DEL");
     let _: () = c.lpush("k2", "v").expect("LPUSH");
-    wait_until(Duration::from_secs(5), "three streams created", || {
+    wait_until(CAPTURE_WAIT, "three streams created", || {
         info_field(&mut c, "active_streams") == 3
     });
     assert_eq!(info_field(&mut c, "dropped_max_streams"), 0);
@@ -215,7 +214,7 @@ fn max_streams_control_stream_exempt() {
     let mut c = s.conn();
 
     let _: () = c.set("k1", "v").expect("SET");
-    wait_until(Duration::from_secs(5), "cap filled by events:set", || {
+    wait_until(CAPTURE_WAIT, "cap filled by events:set", || {
         info_field(&mut c, "active_streams") == 1
     });
 
@@ -231,7 +230,7 @@ fn max_streams_control_stream_exempt() {
             .expect("toggle enabled");
         let _: () = c.set("k1", "v").expect("SET to flush marker");
     }
-    wait_until(Duration::from_secs(5), "markers written past cap", || {
+    wait_until(CAPTURE_WAIT, "markers written past cap", || {
         info_field(&mut c, "control_markers") > markers_before
     });
     // The control stream exists and is not counted against active_streams.

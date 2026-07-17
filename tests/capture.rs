@@ -89,7 +89,7 @@ fn filter_live_change_to_class() {
         .expect("CONFIG SET @hash");
 
     let _: () = c.hset("h", "f", "v").expect("HSET");
-    wait_until(Duration::from_secs(5), "hset mirrored", || {
+    wait_until(CAPTURE_WAIT, "hset mirrored", || {
         xlen(&mut c, "events:hset") > 0
     });
     let _: () = c.set("plain", "v").expect("SET");
@@ -103,7 +103,7 @@ fn filter_star_captures_multiple_event_types() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "set and del mirrored", || {
+    wait_until(CAPTURE_WAIT, "set and del mirrored", || {
         xlen(&mut c, "events:set") > 0 && xlen(&mut c, "events:del") > 0
     });
 }
@@ -125,7 +125,7 @@ fn prefix_module_arg_routes() {
     let s = TestServer::start(&["stream-prefix", "ks:", "events", "expired,set"]);
     let mut c = s.conn();
     let _: () = c.set("x", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "custom prefix routing", || {
+    wait_until(CAPTURE_WAIT, "custom prefix routing", || {
         xlen(&mut c, "ks:set") > 0
     });
     assert_eq!(xlen(&mut c, "events:set"), 0);
@@ -180,7 +180,7 @@ fn maxlen_zero_disables_trimming() {
     for i in 0..500 {
         let _: () = c.set(format!("k{i}"), "v").expect("SET");
     }
-    wait_until(Duration::from_secs(10), "500 sets mirrored", || {
+    wait_until(CAPTURE_WAIT, "500 sets mirrored", || {
         info_field(&mut c, "forwarded") >= 500
     });
     assert_eq!(
@@ -204,7 +204,7 @@ fn feedback_guard_never_mirrors_own_prefix() {
         .expect("XADD");
     // The manual write fires an xadd notification on a prefix key; give the
     // skipped_self counter time to move, then confirm no mirror happened.
-    wait_until(Duration::from_secs(5), "skipped_self counted", || {
+    wait_until(CAPTURE_WAIT, "skipped_self counted", || {
         info_field(&mut c, "skipped_self") > 0
     });
     assert_eq!(
@@ -220,7 +220,7 @@ fn binary_keys_round_trip() {
     let mut c = s.conn();
     let key: Vec<u8> = vec![0xff, 0x00, 0xfe, b'k'];
     let _: () = c.set(key.clone(), "v").expect("SET binary key");
-    wait_until(Duration::from_secs(5), "binary-key set mirrored", || {
+    wait_until(CAPTURE_WAIT, "binary-key set mirrored", || {
         xlen(&mut c, "events:set") > 0
     });
     let keys = stream_field_values(&mut c, "events:set", "key");
@@ -233,7 +233,7 @@ fn enabled_toggle_drops_and_resumes() {
     let mut c = s.conn();
 
     let _: () = c.set("one", "v").expect("SET");
-    wait_until(Duration::from_secs(5), "first set mirrored", || {
+    wait_until(CAPTURE_WAIT, "first set mirrored", || {
         xlen(&mut c, "events:set") == 1
     });
 
@@ -254,7 +254,7 @@ fn enabled_toggle_drops_and_resumes() {
         .query(&mut c)
         .expect("enable");
     let _: () = c.set("three", "v").expect("SET after enable");
-    wait_until(Duration::from_secs(5), "capture resumes", || {
+    wait_until(CAPTURE_WAIT, "capture resumes", || {
         xlen(&mut c, "events:set") == 2
     });
 }

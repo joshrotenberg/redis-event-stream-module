@@ -9,7 +9,6 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::time::Duration;
 
 #[test]
 fn in_place_unload_load_swap() {
@@ -18,7 +17,7 @@ fn in_place_unload_load_swap() {
 
     // --- Before the swap: capture some history and register a stream. ---
     let _: () = c.set("before", "1").expect("SET before");
-    wait_until(Duration::from_secs(5), "pre-upgrade capture", || {
+    wait_until(CAPTURE_WAIT, "pre-upgrade capture", || {
         info_field(&mut c, "forwarded") == 1
     });
     assert_eq!(marker_actions(&mut c), vec!["loaded"]);
@@ -81,11 +80,9 @@ fn in_place_unload_load_swap() {
 
     // --- After the swap: capture resumes. ---
     let _: () = c.set("after", "1").expect("SET after");
-    wait_until(
-        Duration::from_secs(5),
-        "post-upgrade capture resumes",
-        || info_field(&mut c, "forwarded") > forwarded_after_load,
-    );
+    wait_until(CAPTURE_WAIT, "post-upgrade capture resumes", || {
+        info_field(&mut c, "forwarded") > forwarded_after_load
+    });
 
     // The control stream now shows the full pair: the pre-upgrade loaded, the
     // unloading, and the post-upgrade loaded — the machine-readable window.

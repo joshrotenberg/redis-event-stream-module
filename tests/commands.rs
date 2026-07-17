@@ -21,7 +21,7 @@ fn stats_agrees_with_info() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(10), "one forwarded", || {
+    wait_until(CAPTURE_WAIT, "one forwarded", || {
         info_field(&mut c, "forwarded") == 1
     });
 
@@ -48,7 +48,7 @@ fn streams_lists_registered_streams() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "two streams registered", || {
+    wait_until(CAPTURE_WAIT, "two streams registered", || {
         streams(&mut c).len() == 2
     });
     assert_eq!(streams(&mut c), vec!["events:del", "events:set"]);
@@ -63,7 +63,7 @@ fn streams_reads_db0_from_any_client_db() {
     let s = TestServer::start(&["events", "set"]);
     let mut c0 = s.conn();
     let _: () = c0.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "stream registered", || {
+    wait_until(CAPTURE_WAIT, "stream registered", || {
         !streams(&mut c0).is_empty()
     });
 
@@ -88,7 +88,7 @@ fn streams_withstats_reports_per_stream_counters() {
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.set("a", "2").expect("SET again");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "three forwarded", || {
+    wait_until(CAPTURE_WAIT, "three forwarded", || {
         info_field(&mut c, "forwarded") == 3
     });
 
@@ -113,7 +113,7 @@ fn streams_withstats_counts_firehose_copies_per_stream() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "firehose copy written", || {
+    wait_until(CAPTURE_WAIT, "firehose copy written", || {
         info_field(&mut c, "firehose_forwarded") == 1
     });
 
@@ -199,7 +199,7 @@ fn streams_verbose_flags_dead_streams() {
 
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "two streams registered", || {
+    wait_until(CAPTURE_WAIT, "two streams registered", || {
         streams(&mut c).len() == 2
     });
 
@@ -249,7 +249,7 @@ fn prune_removes_dead_and_replicates() {
     let mut mc = master.conn();
     let _: () = mc.set("a", "1").expect("SET");
     let _: () = mc.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "two streams registered", || {
+    wait_until(CAPTURE_WAIT, "two streams registered", || {
         streams(&mut mc).len() == 2
     });
 
@@ -311,7 +311,7 @@ fn prune_lets_a_pruned_stream_reregister() {
     let mut c = s.conn();
     let _: () = c.set("a", "1").expect("SET");
     let _: () = c.del("a").expect("DEL");
-    wait_until(Duration::from_secs(5), "two streams registered", || {
+    wait_until(CAPTURE_WAIT, "two streams registered", || {
         streams(&mut c).len() == 2
     });
     // active_streams is the since-load distinct-stream count.
@@ -330,7 +330,7 @@ fn prune_lets_a_pruned_stream_reregister() {
     // suppressed by a stale "already registered" cache entry.
     let _: () = c.set("x", "1").expect("SET");
     let _: () = c.del("x").expect("DEL");
-    wait_until(Duration::from_secs(5), "events:del re-registered", || {
+    wait_until(CAPTURE_WAIT, "events:del re-registered", || {
         streams(&mut c) == vec!["events:del", "events:set"]
     });
 
@@ -348,7 +348,7 @@ fn prune_keeps_a_wrong_type_key_registered() {
     let s = TestServer::start(&["events", "set"]);
     let mut c = s.conn();
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "one stream registered", || {
+    wait_until(CAPTURE_WAIT, "one stream registered", || {
         streams(&mut c) == vec!["events:set"]
     });
 
@@ -390,9 +390,7 @@ fn prune_persists_across_restart_under_aof() {
         let mut c = s.conn();
         let _: () = c.set("a", "1").expect("SET");
         let _: () = c.del("a").expect("DEL");
-        wait_until(Duration::from_secs(5), "two streams", || {
-            streams(&mut c).len() == 2
-        });
+        wait_until(CAPTURE_WAIT, "two streams", || streams(&mut c).len() == 2);
         let _: () = redis::cmd("DEL")
             .arg("events:del")
             .query(&mut c)
@@ -420,9 +418,7 @@ fn registry_survives_restart_under_aof() {
         let mut c = s.conn();
         let _: () = c.set("a", "1").expect("SET");
         let _: () = c.del("a").expect("DEL");
-        wait_until(Duration::from_secs(5), "two streams", || {
-            streams(&mut c).len() == 2
-        });
+        wait_until(CAPTURE_WAIT, "two streams", || streams(&mut c).len() == 2);
         let _ = redis::cmd("SHUTDOWN").arg("NOSAVE").query::<()>(&mut c);
     }
 
@@ -441,9 +437,7 @@ fn registry_rebuilds_after_flushall() {
     let mut c = s.conn();
 
     let _: () = c.set("a", "1").expect("SET");
-    wait_until(Duration::from_secs(5), "registered", || {
-        !streams(&mut c).is_empty()
-    });
+    wait_until(CAPTURE_WAIT, "registered", || !streams(&mut c).is_empty());
 
     let _: () = redis::cmd("FLUSHALL").query(&mut c).expect("FLUSHALL");
     assert!(
@@ -454,7 +448,7 @@ fn registry_rebuilds_after_flushall() {
     // The flush handler cleared the dedupe cache, so the next capture
     // re-registers its stream.
     let _: () = c.set("b", "2").expect("SET after flush");
-    wait_until(Duration::from_secs(5), "registry rebuilt", || {
+    wait_until(CAPTURE_WAIT, "registry rebuilt", || {
         streams(&mut c) == vec!["events:set"]
     });
 
