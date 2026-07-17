@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use redis::Commands;
-use std::time::Duration;
 
 #[test]
 fn default_filter_captures_expired_only() {
@@ -35,14 +34,10 @@ fn cross_db_event_lands_in_db0_with_origin_field() {
         .arg(80)
         .query(&mut c3)
         .expect("SET in db 3");
-    wait_until(
-        Duration::from_secs(10),
-        "db3 expiry mirrored to db0",
-        || {
-            let _: Option<String> = c3.get("dbkey").ok().flatten();
-            xlen(&mut c0, "events:expired") > 0
-        },
-    );
+    wait_until(CAPTURE_WAIT, "db3 expiry mirrored to db0", || {
+        let _: Option<String> = c3.get("dbkey").ok().flatten();
+        xlen(&mut c0, "events:expired") > 0
+    });
 
     let dbs = stream_field_strings(&mut c0, "events:expired", "db");
     assert_eq!(dbs, vec!["3"], "db field records origin database");
@@ -147,11 +142,9 @@ fn maxlen_bounds_stream_growth() {
     for i in 0..500 {
         let _: () = c.set(format!("k{i}"), "v").expect("SET");
     }
-    wait_until(
-        Duration::from_secs(10),
-        "500 sets mirrored or trimmed",
-        || info_field(&mut c, "forwarded") >= 500,
-    );
+    wait_until(CAPTURE_WAIT, "500 sets mirrored or trimmed", || {
+        info_field(&mut c, "forwarded") >= 500
+    });
     let len = xlen(&mut c, "events:set");
     assert!(
         len < 500,
@@ -331,4 +324,18 @@ fn lua_script_sees_pre_event_stream_state() {
     wait_until(CAPTURE_WAIT, "entry lands after the script", || {
         xlen(&mut c, "events:set") == 2
     });
+}
+
+#[test]
+fn glob_stream_prefix_module_arg_aborts_load() {
+    // The prefix validator (SPEC.md section 7) rejects glob metacharacters;
+    // this pins the wiring through the loadmodule arg line, analogous to
+    // negative_maxlen_module_arg_aborts_load. The empty-prefix rejection
+    // stays unit-only: an empty token does not survive the loadmodule line.
+    for bad in ["ev*:", "ev?:", "ev[:"] {
+        assert!(
+            TestServer::try_start(&["stream-prefix", bad]).is_err(),
+            "loadmodule with stream-prefix {bad:?} must abort the server start"
+        );
+    }
 }

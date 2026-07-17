@@ -255,3 +255,62 @@ fn verify_oom_no_admits_writes_that_yes_refuses() {
         "no further OOM drops once verify-oom is off"
     );
 }
+
+#[test]
+fn retention_ms_runtime_set_and_rejection() {
+    // SPEC.md section 7: retention-ms is live-settable; the runtime set()
+    // path re-validates and rejects negatives (distinct code from the
+    // module-arg path, which the load-abort test covers).
+    let s = TestServer::start(&[]);
+    let mut c = s.conn();
+
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.retention-ms")
+        .arg(86_400_000i64)
+        .query(&mut c)
+        .expect("CONFIG SET retention-ms accepts a positive window");
+    let pair: Vec<String> = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("eventstream.retention-ms")
+        .query(&mut c)
+        .expect("CONFIG GET");
+    assert_eq!(pair[1], "86400000");
+
+    let res: Result<(), _> = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.retention-ms")
+        .arg(-1)
+        .query(&mut c);
+    assert!(
+        res.is_err(),
+        "negative retention-ms must be rejected at runtime"
+    );
+}
+
+#[test]
+fn retention_ms_takes_precedence_over_maxlen() {
+    // SPEC.md section 7: when retention-ms > 0 the stream trims by age and
+    // maxlen (and any per-event override) is ignored. A small count cap plus
+    // a long window must retain every entry, where maxlen alone would trim.
+    let s = TestServer::start(&["events", "set", "maxlen", "10"]);
+    let mut c = s.conn();
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.retention-ms")
+        .arg(86_400_000i64)
+        .query(&mut c)
+        .expect("CONFIG SET retention-ms");
+
+    for i in 0..100 {
+        let _: () = c.set(format!("k{i}"), "v").expect("SET");
+    }
+    wait_until(CAPTURE_WAIT, "100 sets mirrored", || {
+        info_field(&mut c, "forwarded") >= 100
+    });
+    let len = xlen(&mut c, "events:set");
+    assert_eq!(
+        len, 100,
+        "a 24h MINID window must override maxlen 10 and retain everything"
+    );
+}

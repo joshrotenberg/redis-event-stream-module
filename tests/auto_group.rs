@@ -254,3 +254,41 @@ fn auto_group_replicates_to_replica() {
         group_names(&mut rc, "events:set") == vec!["workers".to_string()]
     });
 }
+
+#[test]
+fn auto_group_rejects_invalid_names_at_runtime() {
+    // The validator (SPEC.md section 7): at most 128 bytes over
+    // `A-Z a-z 0-9 : . _ -`. The unit tests pin the function; this pins the
+    // CONFIG SET wiring, like the suite's other rejection tests.
+    let s = TestServer::start(&[]);
+    let mut c = s.conn();
+
+    for bad in ["bad name", "bad!name", "{braces}"] {
+        let res: Result<(), _> = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("eventstream.auto-group")
+            .arg(bad)
+            .query(&mut c);
+        assert!(res.is_err(), "CONFIG SET auto-group must reject {bad:?}");
+    }
+
+    let oversize = "g".repeat(129);
+    let res: Result<(), _> = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.auto-group")
+        .arg(&oversize)
+        .query(&mut c);
+    assert!(
+        res.is_err(),
+        "CONFIG SET auto-group must reject a 129-byte name"
+    );
+
+    // The 128-byte boundary itself is accepted.
+    let max = "g".repeat(128);
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.auto-group")
+        .arg(&max)
+        .query(&mut c)
+        .expect("a 128-byte auto-group name is accepted");
+}

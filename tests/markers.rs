@@ -475,3 +475,67 @@ fn swapdb_without_db0_writes_no_marker() {
         "a swap not involving db 0 writes no marker"
     );
 }
+
+#[test]
+fn control_override_trims_the_control_stream() {
+    // SPEC.md sections 7 and 9: `#control` is addressable in
+    // maxlen-overrides, and the control stream follows the same trim
+    // strategy as data streams. The module trims with `MAXLEN ~`, which acts
+    // at listpack-node boundaries, so stream-node-max-entries drops to 1 to
+    // make a cap of 1 observable with a handful of markers. Covers both
+    // write paths: the deferred pending-marker flush and the direct
+    // `unloading` write in deinit.
+    let s = TestServer::start(&["events", "set", "maxlen-overrides", "#control=1"]);
+    let mut c = s.conn();
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("stream-node-max-entries")
+        .arg(1)
+        .query(&mut c)
+        .expect("CONFIG SET stream-node-max-entries");
+
+    // Three disabled/enabled toggles, each pair (plus the initial `loaded`)
+    // flushed by the next captured SET: seven markers through the deferred
+    // path.
+    for i in 0..3 {
+        for state in ["no", "yes"] {
+            let _: () = redis::cmd("CONFIG")
+                .arg("SET")
+                .arg("eventstream.enabled")
+                .arg(state)
+                .query(&mut c)
+                .expect("toggle enabled");
+        }
+        let _: () = c.set(format!("k{i}"), "v").expect("SET to flush markers");
+        wait_until(CAPTURE_WAIT, "marker pair flushed", || {
+            info_field(&mut c, "control_markers") > 2 * (i + 1)
+        });
+    }
+    assert_eq!(info_field(&mut c, "control_markers"), 7);
+    let len = xlen(&mut c, CONTROL);
+    assert!(
+        (1..=2).contains(&len),
+        "a #control=1 override must trim the control stream to about the cap \
+         (approximate trimming can overshoot by one single-entry node), got {len}"
+    );
+
+    // The direct deinit write applies the same override: after MODULE UNLOAD
+    // the stream stays trimmed and the newest retained entry is the
+    // `unloading` marker.
+    let _: () = redis::cmd("MODULE")
+        .arg("UNLOAD")
+        .arg("eventstream")
+        .query(&mut c)
+        .expect("MODULE UNLOAD");
+    let len = xlen(&mut c, CONTROL);
+    assert!(
+        (1..=2).contains(&len),
+        "the deinit unloading write must trim under the #control override, got {len}"
+    );
+    let actions = marker_actions(&mut c);
+    assert_eq!(
+        actions.last().map(String::as_str),
+        Some("unloading"),
+        "the newest retained marker is the unloading one: {actions:?}"
+    );
+}

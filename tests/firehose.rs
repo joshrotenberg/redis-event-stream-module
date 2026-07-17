@@ -196,3 +196,37 @@ fn event_name_with_hash_cannot_alias_the_firehose() {
         "the firehose holds only module-written copies"
     );
 }
+
+#[test]
+fn firehose_occupies_one_max_streams_slot() {
+    // SPEC.md section 7: the firehose registers like any destination stream
+    // and occupies one cap slot, but is itself never blocked by the cap.
+    let s = TestServer::start(&["events", "set,del", "firehose", "yes", "max-streams", "2"]);
+    let mut c = s.conn();
+
+    // One captured SET registers both events:set and the firehose: cap full.
+    let _: () = c.set("k1", "v").expect("SET");
+    wait_until(CAPTURE_WAIT, "set stream plus firehose registered", || {
+        info_field(&mut c, "active_streams") == 2
+    });
+    assert!(
+        xlen(&mut c, "events:#firehose") > 0,
+        "the firehose is never itself blocked by the cap"
+    );
+
+    // A second event name would need a third slot: refused and counted.
+    let _: () = c.del("k1").expect("DEL");
+    wait_until(CAPTURE_WAIT, "second event name dropped at the cap", || {
+        info_field(&mut c, "dropped_max_streams") >= 1
+    });
+    assert_eq!(xlen(&mut c, "events:del"), 0, "capped stream not created");
+
+    // Copies keep flowing to the firehose for events on registered streams.
+    let copies = info_field(&mut c, "firehose_forwarded");
+    let _: () = c.set("k2", "v").expect("SET");
+    wait_until(
+        CAPTURE_WAIT,
+        "firehose copy written past the full cap",
+        || info_field(&mut c, "firehose_forwarded") > copies,
+    );
+}
