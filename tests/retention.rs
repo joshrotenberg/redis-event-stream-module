@@ -190,10 +190,12 @@ fn retention_ms_trims_entries_by_age() {
 /// re-validation (issue #108).
 #[test]
 fn negative_retention_ms_module_arg_aborts_load() {
-    let err = TestServer::try_start(&["retention-ms", "-1"]);
+    let err = TestServer::try_start(&["retention-ms", "-1"])
+        .err()
+        .expect("loadmodule with retention-ms -1 must abort the server start");
     assert!(
-        err.is_err(),
-        "loadmodule with retention-ms -1 must abort the server start"
+        err.contains("retention-ms must be 0 (disabled) or positive"),
+        "the abort must come from the retention-ms validator, not an unrelated startup failure: {err}"
     );
 }
 

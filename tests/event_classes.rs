@@ -117,10 +117,14 @@ fn uncapturable_classes_rejected_at_load_and_runtime() {
         assert!(res.is_err(), "{token} must be rejected");
     }
 
-    // At load: an invalid filter arg aborts the module load.
+    // At load: an invalid filter arg aborts the module load, and the abort
+    // carries the uncapturable-class reason, not just any startup failure.
+    let err = TestServer::try_start(&["events", "@loaded"])
+        .err()
+        .expect("loading with events @loaded must abort");
     assert!(
-        TestServer::try_start(&["events", "@loaded"]).is_err(),
-        "loading with events @loaded must abort"
+        err.contains("cannot be captured"),
+        "the abort must come from the uncapturable-class check: {err}"
     );
 }
 

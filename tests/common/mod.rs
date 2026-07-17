@@ -299,13 +299,48 @@ impl TestServer {
     }
 
     /// Like `start`, but return the error instead of panicking (for tests
-    /// that assert a load abort).
+    /// that assert a load abort). The server log, when one was written, is
+    /// appended to the error so callers can assert that the intended refusal
+    /// fired rather than accepting any startup failure (issue #188).
     pub fn try_start(module_args: &[&str]) -> Result<TestServer, String> {
         let port = next_port();
         let dir = tempfile::tempdir().expect("tempdir");
-        match Self::builder(port, &dir, module_args).start() {
+        let result = Self::builder(port, &dir, module_args).start();
+        Self::finish_try_start(port, dir, result)
+    }
+
+    /// Like `try_start`, but on a cluster-enabled node. No cluster is formed:
+    /// the CLUSTER context flag alone is what the module's load gate checks,
+    /// so a single node keeps refusal tests fast and independent of cluster
+    /// formation, which is version-fragile in the harness on the oldest
+    /// supported server (issue #188; same rationale as the cluster-streams
+    /// abort test).
+    pub fn try_start_cluster_enabled(module_args: &[&str]) -> Result<TestServer, String> {
+        let port = next_cluster_base();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = Self::builder(port, &dir, module_args)
+            .extra("cluster-enabled", "yes")
+            .extra("cluster-config-file", "nodes.conf")
+            .start();
+        Self::finish_try_start(port, dir, result)
+    }
+
+    /// Shared `try_start` tail: on failure, read the server log before the
+    /// tempdir drops and carry it in the error string.
+    fn finish_try_start(
+        port: u16,
+        dir: tempfile::TempDir,
+        result: redis_server_wrapper::Result<RedisServerHandle>,
+    ) -> Result<TestServer, String> {
+        match result {
             Ok(handle) => Ok(TestServer { handle, port, dir }),
-            Err(e) => Err(e.to_string()),
+            Err(e) => {
+                let log = std::fs::read_to_string(
+                    dir.path().join(format!("node-{port}")).join("redis.log"),
+                )
+                .unwrap_or_default();
+                Err(format!("{e}\n--- server log ---\n{log}"))
+            }
         }
     }
 

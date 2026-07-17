@@ -239,10 +239,12 @@ fn max_streams_control_stream_exempt() {
 
 #[test]
 fn max_streams_rejects_negative_module_arg() {
-    let err = TestServer::try_start(&["max-streams", "-1"]);
+    let err = TestServer::try_start(&["max-streams", "-1"])
+        .err()
+        .expect("loadmodule with max-streams -1 must abort the server start");
     assert!(
-        err.is_err(),
-        "loadmodule with max-streams -1 must abort the server start"
+        err.contains("max-streams must be 0 (unlimited) or positive"),
+        "the abort must come from the max-streams validator, not an unrelated startup failure: {err}"
     );
 }
 
