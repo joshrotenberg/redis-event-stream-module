@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome. This project is spec-first: [SPEC.md](SPEC.md) is
+Contributions are welcome. This project is spec-first: [SPEC.md](https://github.com/joshrotenberg/redis-event-stream-module/blob/main/SPEC.md) is
 the authoritative design, and behavior changes should update it in the same
 pull request. If a change needs a design decision first, open a decision issue
 (there is a template) rather than encoding the decision silently in code.
@@ -46,7 +46,7 @@ untrusted input live under [fuzz/](fuzz/README.md); the weekly `Fuzz` CI
 workflow runs each target with a cached corpus.
 
 Dependency advisories, license policy, and source provenance are enforced by
-`cargo deny check` (policy in [deny.toml](deny.toml)); run it locally with
+`cargo deny check` (policy in [deny.toml](https://github.com/joshrotenberg/redis-event-stream-module/blob/main/deny.toml)); run it locally with
 [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) installed.
 
 ## Before pushing
@@ -156,4 +156,4 @@ release-plz does not release this crate; see `release-plz.toml` for why.
 
 Use the issue templates. For bugs, the `INFO eventstream` counters and the
 exact `loadmodule` line are usually the difference between a one-round-trip
-fix and a guessing game. For security reports, see [SECURITY.md](SECURITY.md).
+fix and a guessing game. For security reports, see [SECURITY.md](https://github.com/joshrotenberg/redis-event-stream-module/blob/main/SECURITY.md).

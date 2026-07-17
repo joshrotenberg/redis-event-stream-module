@@ -8,7 +8,7 @@ you widen `eventstream.events` first.
 
 The module only writes streams. Everything on the read side is ordinary Redis
 Streams, so any Streams-capable client works and nothing here is
-module-specific. See [SPEC.md](../SPEC.md) section 9 for the delivery semantics
+module-specific. See the [specification](./specification.md) (SPEC.md section 9) for the delivery semantics
 these patterns rely on.
 
 This page covers what every consumer needs: the entry shape, live tailing,
@@ -180,4 +180,4 @@ section 8.
 None of the above recovers events the module never captured (module disabled,
 OOM refusal, crash before fsync, and so on). Those windows are bounded and
 detectable, and reconciling over them is its own topic:
-[docs/loss-windows.md](loss-windows.md).
+[Loss windows and reconciliation](./loss-windows.md).

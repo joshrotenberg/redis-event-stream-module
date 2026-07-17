@@ -164,5 +164,7 @@ introspection commands added immediately after it.
   46-test suite (unit plus integration against real servers), including
   replication, AOF durability, crash-gap, and OOM loss-window scenarios.
 
+[Unreleased]: https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/joshrotenberg/redis-event-stream-module/releases/tag/v0.3.0
 [0.2.0]: https://github.com/joshrotenberg/redis-event-stream-module/releases/tag/v0.2.0
 [0.1.0]: https://github.com/joshrotenberg/redis-event-stream-module/releases/tag/v0.1.0

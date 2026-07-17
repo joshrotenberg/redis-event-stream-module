@@ -6,8 +6,9 @@ capture is at-most-once, because some events are never seen or never written.
 This document lists every way an event can be lost, how to detect it, and how to
 reconcile a gap without rescanning the whole keyspace.
 
-All claims here match [SPEC.md](../SPEC.md) sections 9 and 10 exactly. If this
-document and the spec ever disagree, the spec wins.
+All claims here match the [specification](./specification.md) (SPEC.md
+sections 9 and 10) exactly. If this document and the spec ever disagree, the
+spec wins.
 
 ## The guarantee in one sentence
 
