@@ -42,5 +42,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "glob_match"
+path = "fuzz_targets/glob_match.rs"
+test = false
+doc = false
+bench = false
+
 # Detach from the parent workspace: cargo-fuzz crates are nightly-only.
 [workspace]

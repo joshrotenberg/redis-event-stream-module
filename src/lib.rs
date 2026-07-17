@@ -61,6 +61,11 @@ pub mod fuzz_targets {
     pub fn sanitize(input: &str) {
         let _ = crate::capture::sanitize(input);
     }
+    /// Drive `glob_match` (the key-filter matcher, SPEC.md §7): a hand-written
+    /// recursive port of Redis stringmatchlen, fed raw pattern and key bytes.
+    pub fn glob_match(pattern: &[u8], key: &[u8]) {
+        let _ = crate::config::glob_match(pattern, key);
+    }
 }
 
 #[cfg(not(test))]
