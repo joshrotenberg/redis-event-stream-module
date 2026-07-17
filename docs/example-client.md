@@ -1,7 +1,7 @@
 # Example client
 
 `crates/eventstream-client` is a workspace member that drives events into the
-module and reads them back. It is both a runnable CLI and a published consumer
+module and reads them back. It is both a runnable CLI and a consumer
 library, and it doubles as a reference for cluster-wide fan-out (it discovers
 per-node streams and merges them by entry ID). It works against a standalone
 server or a per-node cluster, auto-detected.
@@ -22,10 +22,10 @@ Global options: `--url <redis://…>` (scheme added if absent) and `--prefix
 | Command | What it does |
 |---|---|
 | `info` | Topology, each master's module counters, and the discovered streams. |
-| `produce` | Drive events into the module: `--set N` fires N `SET`s; `--expire N` sets N keys with a TTL and forces their expiry; `--burst N` is a mass-expiry burst; `--ttl-ms` sets the TTL for `--expire`/`--burst`; `--toggle` flips `eventstream.enabled` off then on, writing a gap-marker pair. |
-| `consume` | Discover streams cluster-wide and tail them merged by entry ID. `--only <a,b>` restricts to event types; `--from 0` replays from the beginning (default `$` = new only); `--count N` stops after N entries. |
+| `produce` | Drive events into the module: `--sets N` fires N `SET`s; `--expire N` sets N keys with a TTL and forces their expiry; `--burst N` is a mass-expiry burst; `--ttl-ms` sets the TTL for `--expire`/`--burst`; `--toggle` flips `eventstream.enabled` off then on, writing a gap-marker pair. |
+| `consume` | Discover streams cluster-wide and tail them merged by entry ID. `--events <a,b>` restricts to event types; `--from 0` replays from the beginning (default `$` = new only); `--count N` stops after N entries. |
 | `watch` | A live dashboard of counters and stream lengths. |
-| `soak` | Sustained produce, then verify capture. `--events <a,b>` chooses what to drive; `--rate N` caps events/sec (`0` = unlimited). |
+| `soak` | Sustained produce, then verify capture. `--count N` sets the events to drive (default 5000); `--rate N` caps events/sec (`0` = unlimited). |
 
 Before producing, the client widens the module's event filter on every master
 so what it drives is captured, without narrowing an existing filter. See

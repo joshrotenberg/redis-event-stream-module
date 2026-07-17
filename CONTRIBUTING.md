@@ -41,8 +41,9 @@ raise the case count:
 PROPTEST_CASES=100000 cargo test --lib property_tests
 ```
 
-There is no coverage-guided fuzzing (cargo-fuzz) target; adding one would
-require an `rlib` crate type alongside the `cdylib` (issue #131).
+Coverage-guided (libFuzzer) fuzz targets for the parsers that ingest
+untrusted input live under [fuzz/](fuzz/README.md); the weekly `Fuzz` CI
+workflow runs each target with a cached corpus.
 
 Dependency advisories, license policy, and source provenance are enforced by
 `cargo deny check` (policy in [deny.toml](deny.toml)); run it locally with
