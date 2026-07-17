@@ -38,11 +38,13 @@ curl -k -u "<user>:<password>" -F "module=@redis-event-stream-module-<version>-l
 ```
 
 Then create a database with the module enabled. IMMUTABLE configs
-(`eventstream.stream-prefix`, `eventstream.cluster-streams`) can only be set as
-load-time module arguments, supplied through Enterprise's module-args field at
-database-create time; the mutable configs (`eventstream.enabled`,
-`eventstream.events`, `eventstream.maxlen`, `eventstream.firehose`) can also be
-changed per-database with `CONFIG SET`.
+(`eventstream.stream-prefix`, `eventstream.cluster-streams`,
+`eventstream.entry-seq`) can only be set as load-time module arguments,
+supplied through Enterprise's module-args field at database-create time. The
+twelve mutable configs (`eventstream.enabled`, `eventstream.events`,
+`eventstream.maxlen`, `eventstream.firehose`, and the rest of the table in
+[Configuration](./configuration.md)) can also be changed per-database with
+`CONFIG SET`.
 
 ## Verifying capture
 
@@ -72,5 +74,6 @@ make ramp                        # -> dist/redis-event-stream-module-<version>-l
 ```
 
 `ramp pack` loads the module into a throwaway `redis-server` to enumerate the
-registered commands (`EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`) and the module
-version, so the `redis-server` on `PATH` must be 7.2 or newer.
+registered commands (`EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`,
+`EVENTSTREAM.PRUNE`) and the module version, so the `redis-server` on `PATH`
+must be 7.2 or newer.

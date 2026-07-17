@@ -147,18 +147,33 @@ reading, consumer-group processing, and introspection without any write or
 admin access (SPEC.md section 12).
 
 To also let the consumer call the module's own introspection commands
-(`EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`), grant the custom `@eventstream`
-ACL category, which carries both as a group:
+(`EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`), grant them by name, which keeps
+the user strictly read-only:
+
+```
+ACL SETUSER events-consumer on >secret ~events:* +@read +xreadgroup +xack +xautoclaim +xinfo \
+  +eventstream.stats +eventstream.streams
+```
+
+The custom `@eventstream` ACL category grants the module's commands as a group
+instead, but note what it carries: all module commands, including the `write`
+command `EVENTSTREAM.PRUNE`, and any future module command automatically.
+`EVENTSTREAM.PRUNE` is keyless, so the `~events:*` key pattern does not
+constrain it. Its write is limited to reconciling the stream registry
+(removing registered names whose destination key is absent), never stream
+data, but a consumer meant to be strictly read-only should not carry it. If
+registry reconciliation from this user is acceptable:
 
 ```
 ACL SETUSER events-consumer on >secret ~events:* +@read +xreadgroup +xack +xautoclaim +xinfo +@eventstream
 ```
 
-The `@eventstream` category needs `RM_AddACLCategory` (Redis 7.4+); run
-`ACL CAT` to confirm it exists on your server. On
-Redis 7.2/7.3 the category is unavailable — the module loads without it and you
-grant the commands by name instead (`+eventstream.stats +eventstream.streams`).
-See SPEC.md section 8.
+The category needs `RM_AddACLCategory` (Redis 7.4+); run `ACL CAT` to confirm
+it exists on your server. On Redis 7.2/7.3 the category is unavailable: the
+module loads without it and commands are granted by name only (the category's
+full equivalent is
+`+eventstream.stats +eventstream.streams +eventstream.prune`). See SPEC.md
+section 8.
 
 ## Handling gaps
 

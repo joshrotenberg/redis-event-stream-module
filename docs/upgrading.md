@@ -56,14 +56,17 @@ shipped Prometheus rules use `rate()`/`increase()`, which do (see
 
 ## Re-supply IMMUTABLE configs
 
-`eventstream.stream-prefix` and `eventstream.cluster-streams` are IMMUTABLE:
-they cannot be `CONFIG SET`, only supplied at load. The new `MODULE LOAD` must
-pass the **same values** the old one used. If they differ, the reloaded module
-points at a different set of streams (and, in per-node cluster mode, a different
+`eventstream.stream-prefix`, `eventstream.cluster-streams`, and
+`eventstream.entry-seq` are IMMUTABLE: they cannot be `CONFIG SET`, only
+supplied at load. The new `MODULE LOAD` must pass the **same values** the old
+one used. If the prefix or cluster mode differ, the reloaded module points at
+a different set of streams (and, in per-node cluster mode, a different
 registry and pinned tag) — capture continues, but into new stream names, and
-the pre-upgrade history is orphaned under the old prefix. `CONFIG GET
-eventstream.stream-prefix eventstream.cluster-streams` before the swap to record
-the values in use.
+the pre-upgrade history is orphaned under the old prefix. If `entry-seq` is
+not re-supplied, the reload reverts it to the default `no` and the `seq`
+field silently disappears from every subsequent entry. `CONFIG GET
+eventstream.stream-prefix eventstream.cluster-streams eventstream.entry-seq`
+before the swap to record the values in use.
 
 ## The gap marker pair
 

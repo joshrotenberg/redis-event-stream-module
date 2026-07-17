@@ -24,10 +24,11 @@ module_name: eventstream
 # .so it loads at pack time, so restating them risks drifting from the actual
 # artifact. One bundle is produced per target by packing that target's .so.
 
-# The module has no data type and registers only the two readonly, keyless
-# introspection commands (eventstream.stats, eventstream.streams); ramp-packer
-# extracts their arity/flags from the loaded module, so they are not restated
-# here. There is no config_command / info-only surface to declare beyond that.
+# The module has no data type and registers three keyless commands: the
+# readonly eventstream.stats and eventstream.streams, and the write command
+# eventstream.prune (registry reconciliation); ramp-packer extracts their
+# arity/flags from the loaded module, so they are not restated here. There is
+# no config_command / info-only surface to declare beyond that.
 
 # Version floors. min_redis_version is the hard 7.2 floor from SPEC.md section
 # 14. min_redis_pack_version is the earliest Redis Enterprise Software release
@@ -51,6 +52,7 @@ capabilities:
 # Load-time module arguments. Left empty so the bundle loads with the default
 # expirations-only configuration. Mutable eventstream.* configs can be changed
 # per-database via CONFIG SET; IMMUTABLE keys (eventstream.stream-prefix,
-# eventstream.cluster-streams) can only be set here as load args and must be
-# supplied through Enterprise's module-args field at database-create time.
+# eventstream.cluster-streams, eventstream.entry-seq) can only be set here as
+# load args and must be supplied through Enterprise's module-args field at
+# database-create time.
 command_line_args: ""
