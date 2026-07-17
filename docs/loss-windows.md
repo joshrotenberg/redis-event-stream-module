@@ -22,10 +22,12 @@ captured at least once, within the retention window.
 | Window | Cause | Counter | Detection and reconciliation |
 |---|---|---|---|
 | Module not loaded / `enabled no` | Nothing listens | (none) | Bounded by gap markers (below); reconcile over the window |
-| Filter mismatch | Event name not in `eventstream.events` | `skipped_filtered` | By design; widen the filter if the type matters |
+| Filter mismatch | Event name not in `eventstream.events`, key excluded by `eventstream.key-filter`, or database excluded by `eventstream.source-dbs` | `skipped_filtered`, `skipped_key_filtered`, `skipped_db` | By design; widen the relevant filter if the events matter |
 | `XADD` refused under `maxmemory` | The `M` flag refuses writes at the memory limit | `dropped_oom` | Alert on any increase; free memory or raise `maxmemory`; reconcile over the pressure window. `eventstream.verify-oom no` closes this window — writes proceed at the limit — but the module then adds memory during eviction (SPEC.md section 11), and `dropped_oom` never moves, so alert on `used_memory` instead |
 | `XADD` failed (`WRONGTYPE` etc.) | A non-stream key already occupies the destination name | `dropped_xadd_error` | The module never deletes the offending key; remove or rename it, then reconcile |
 | Job scheduling failed | `add_post_notification_job` returned an error | `dropped_defer_error` | Rare; alert on any increase |
+| Stream cap reached | Creating the destination stream would exceed `eventstream.max-streams` | `dropped_max_streams` | Alert on any increase (SPEC.md section 13); raise the cap, narrow the filter, or run `EVENTSTREAM.PRUNE` to drop dead registry names, which frees slots in the currently-registered count backing the cap |
+| Entry encoding failed | The configured `entry-format` could not encode the event; with the shipped formats only `json` can fail, on a non-UTF-8 event name | `dropped_encode_error` | First failure is logged; alert on any increase and fix the event-name source or switch `entry-format` (SPEC.md section 6) |
 | Cluster migration window (per-node mode) | `XADD` refused with `TRYAGAIN`/`ASK` while the pinned slot is mid-migration, and the one post-re-pin retry was also refused | `dropped_migrating` | Delimited by `repinned` gap markers; reconcile over the reshard window (SPEC.md section 10) |
 | Stream trimming | `MAXLEN` (or `MINID` under `eventstream.retention-ms`) evicts entries before a slow consumer reads them | (see below) | Size `maxlen`/`retention-ms` for the slowest consumer; detectable via resume ID vs first entry ID |
 | Crash before fsync | Server persistence config | (none) | Bounded by `appendfsync` (see Persistence); reconcile since last durable point |
@@ -74,13 +76,15 @@ naming the policy is logged. Alert on the field flipping to 1.
   INFO eventstream
   # eventstream_dropped, eventstream_dropped_oom,
   # eventstream_dropped_xadd_error, eventstream_dropped_defer_error,
+  # eventstream_dropped_max_streams, eventstream_dropped_encode_error,
   # eventstream_last_error_time, eventstream_forwarded, eventstream_enabled
   ```
 
   Alert on: any increase in `eventstream_dropped`; `eventstream_enabled` equal
   to 0 when it should be 1; `eventstream_forwarded` flat while the server's own
   `expired_keys` (from `INFO stats`) keeps rising, which means the filter is not
-  selecting what you think it is.
+  selecting what you think it is (the `skipped_filtered`, `skipped_key_filtered`,
+  and `skipped_db` counters tell you which filter is too narrow).
 
 - Trimming loss, per stream: compare your consumer's resume ID against
   `XINFO STREAM events:expired` `first-entry`. If your resume point is older
