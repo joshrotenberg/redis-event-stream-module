@@ -123,3 +123,27 @@ fn uncapturable_classes_rejected_at_load_and_runtime() {
         "loading with events @loaded must abort"
     );
 }
+
+#[test]
+fn star_at_load_subscribes_missed_and_new() {
+    // SPEC.md section 5: a load-time `events *` subscribes MISSED and NEW in
+    // addition to NOTIFY_ALL. Pins the init star branch, which the unit test
+    // star_does_not_name_extra_classes structurally cannot see: that test
+    // pins extra_classes_named(*) as EMPTY, so an init refactor reusing it
+    // would silently drop this subscription while the rest of the suite
+    // stayed green.
+    let s = TestServer::start(&["events", "*"]);
+    let mut c = s.conn();
+
+    let _: Option<String> = c.get("no_such_key").expect("GET miss");
+    wait_until(CAPTURE_WAIT, "keymiss captured under load-time *", || {
+        xlen(&mut c, "events:keymiss") > 0
+    });
+
+    let _: () = c.set("fresh", "1").expect("SET new key");
+    wait_until(
+        CAPTURE_WAIT,
+        "new-key event captured under load-time *",
+        || xlen(&mut c, "events:new") > 0,
+    );
+}

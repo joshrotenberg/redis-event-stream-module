@@ -257,3 +257,52 @@ fn max_streams_negative_config_set_rejected() {
         .query(&mut c);
     assert!(res.is_err(), "negative max-streams must be rejected");
 }
+
+#[test]
+fn max_streams_runtime_lowering_is_accepted() {
+    // SPEC.md section 7: lowering the cap below the current count at runtime
+    // is accepted; existing streams continue, and no new stream is created
+    // until the count is back under the cap.
+    let s = TestServer::start(&["events", "set,del,lpush"]);
+    let mut c = s.conn();
+    let _: () = c.set("k1", "v").expect("SET");
+    let _: () = c.del("k1").expect("DEL");
+    wait_until(CAPTURE_WAIT, "two streams registered", || {
+        info_field(&mut c, "active_streams") == 2
+    });
+
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.max-streams")
+        .arg(1)
+        .query(&mut c)
+        .expect("CONFIG SET max-streams below the current count is accepted");
+
+    // Already-registered streams keep receiving events.
+    let before = info_field(&mut c, "forwarded");
+    let _: () = c.set("k2", "v").expect("SET into existing stream");
+    wait_until(CAPTURE_WAIT, "existing stream still fed", || {
+        info_field(&mut c, "forwarded") > before
+    });
+
+    // A new event name is refused while the count sits over the cap.
+    let _: () = c.lpush("k3", "v").expect("LPUSH");
+    wait_until(
+        CAPTURE_WAIT,
+        "new stream dropped over the lowered cap",
+        || info_field(&mut c, "dropped_max_streams") >= 1,
+    );
+    assert_eq!(xlen(&mut c, "events:lpush"), 0, "capped stream not created");
+
+    // Raising the cap re-admits new names.
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.max-streams")
+        .arg(5)
+        .query(&mut c)
+        .expect("CONFIG SET max-streams 5");
+    let _: () = c.lpush("k4", "v").expect("LPUSH after raise");
+    wait_until(CAPTURE_WAIT, "new stream admitted after the raise", || {
+        xlen(&mut c, "events:lpush") > 0
+    });
+}
