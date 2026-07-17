@@ -89,4 +89,4 @@ exceeds roughly half of `maxlen`, which leaves time to react before trimming
 starts dropping unread entries (SPEC.md section 13).
 
 For the module's own health counters (forwarded, dropped by reason), see
-`INFO eventstream` and [docs/loss-windows.md](loss-windows.md).
+`INFO eventstream` and [Loss windows and reconciliation](./loss-windows.md).
