@@ -106,7 +106,7 @@ The expired event for `foo` is now a stream entry.
   discovery, counters) and exits nonzero on any failure. All arguments pass
   through to `redis-cli`.
 - The `eventstream-client` binary (workspace member `crates/eventstream-client`,
-  also a published consumer library) drives events into the module and reads
+  also a consumer library) drives events into the module and reads
   them back, against a standalone server or a per-node cluster (auto-detected).
   Run it with `cargo run -p eventstream-client -- <command>`, or from a release
   build/artifact as `eventstream-client <command>`. Commands: `info`, `produce`
@@ -137,7 +137,11 @@ command line) and, except where noted, live via `CONFIG SET`:
 | `eventstream.cluster-streams` | string | `refuse` | cluster behavior: `refuse` (default) or `per-node` (see Limitations); immutable, load-time only |
 | `eventstream.entry-format` | enum | `fixed` | mirrored entry shape: `fixed` (default, `event`/`key`/`db`), `minimal` (no `event`), `verbose` (adds `class`), or `json` (one document field, base64 key); non-`fixed` entries carry a `format` discriminator (SPEC.md section 6) |
 | `eventstream.entry-seq` | bool | `no` | append a process-global monotonic `seq` field for per-node cross-stream same-millisecond ordering; immutable, load-time only (SPEC.md sections 6, 9) |
+| `eventstream.auto-group` | string | `` (empty) | consumer-group auto-provisioning: empty disables (default), or a group name the module creates at `0` on each destination stream at first write; watch the `autogroup_created`/`autogroup_failed` counters (SPEC.md sections 7, 9) |
 
+This table is a convenience copy; the authoritative table is SPEC.md section 7
+(rendered with validation rules in
+[docs/configuration.md](docs/configuration.md)).
 The full filter grammar is in SPEC.md section 7. The high-volume `@missed`
 (read misses) and `@new` (new-key) classes are opt-in and must be named at load
 time; a `*` or explicit `@missed`/`@new` in the load-time filter subscribes to
