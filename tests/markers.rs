@@ -9,12 +9,6 @@ use common::*;
 use redis::Commands;
 use std::time::Duration;
 
-const CONTROL: &str = "events:#control";
-
-fn marker_actions(conn: &mut redis::Connection) -> Vec<String> {
-    stream_field_strings(conn, CONTROL, "action")
-}
-
 #[test]
 fn loaded_marker_flushes_on_first_event_not_before() {
     let s = TestServer::start(&["events", "set"]);

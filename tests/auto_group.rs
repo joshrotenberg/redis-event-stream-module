@@ -170,12 +170,12 @@ fn auto_group_excludes_the_control_stream() {
         .expect("re-enable");
     let _: () = c.set("b", "1").expect("SET flushes the pending markers");
     wait_until(Duration::from_secs(5), "control markers written", || {
-        xlen(&mut c, "events:#control") > 0
+        xlen(&mut c, CONTROL) > 0
     });
 
     assert_eq!(group_names(&mut c, "events:set"), vec!["workers"]);
     assert!(
-        group_names(&mut c, "events:#control").is_empty(),
+        group_names(&mut c, CONTROL).is_empty(),
         "the control stream must never get an auto-provisioned group"
     );
 }
