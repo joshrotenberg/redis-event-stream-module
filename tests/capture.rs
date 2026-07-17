@@ -128,10 +128,12 @@ fn prefix_module_arg_routes() {
 
 #[test]
 fn negative_maxlen_module_arg_aborts_load() {
-    let err = TestServer::try_start(&["maxlen", "-1"]);
+    let err = TestServer::try_start(&["maxlen", "-1"])
+        .err()
+        .expect("loadmodule with maxlen -1 must abort the server start");
     assert!(
-        err.is_err(),
-        "loadmodule with maxlen -1 must abort the server start"
+        err.contains("maxlen must be 0 (trimming disabled) or positive"),
+        "the abort must come from the maxlen validator, not an unrelated startup failure: {err}"
     );
 }
 
@@ -333,9 +335,12 @@ fn glob_stream_prefix_module_arg_aborts_load() {
     // negative_maxlen_module_arg_aborts_load. The empty-prefix rejection
     // stays unit-only: an empty token does not survive the loadmodule line.
     for bad in ["ev*:", "ev?:", "ev[:"] {
+        let err = TestServer::try_start(&["stream-prefix", bad])
+            .err()
+            .expect("loadmodule with a glob stream-prefix must abort the server start");
         assert!(
-            TestServer::try_start(&["stream-prefix", bad]).is_err(),
-            "loadmodule with stream-prefix {bad:?} must abort the server start"
+            err.contains("stream-prefix contains disallowed character"),
+            "the abort must come from the prefix validator ({bad:?}): {err}"
         );
     }
 }

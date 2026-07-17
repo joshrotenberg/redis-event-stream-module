@@ -31,13 +31,19 @@ fn owned_tag(cluster: &TestCluster, node: usize) -> Option<String> {
 
 #[test]
 fn module_refuses_to_load_in_cluster_mode() {
-    // Every node loads the module; the module returns an error from its init
-    // in cluster mode (SPEC.md section 10), so the nodes fail to start and the
-    // cluster never forms.
-    let result = TestCluster::try_start(3, Some(&["events", "*"]));
+    // The module returns an error from its init when the CLUSTER context
+    // flag is set and cluster-streams is the default `refuse` (SPEC.md
+    // section 10). A single cluster-enabled node pins that flag without
+    // forming a cluster, keeping the test fast and independent of formation
+    // (version-fragile on the oldest supported server; the same routing the
+    // cluster-streams abort test uses), and the log assertion proves the
+    // module's own refusal fired rather than any startup failure (#188).
+    let err = TestServer::try_start_cluster_enabled(&["events", "*"])
+        .err()
+        .expect("the module must refuse to load in cluster mode");
     assert!(
-        result.is_err(),
-        "the module must refuse to load in cluster mode, so the cluster fails to form"
+        err.contains("refuses to load in cluster mode"),
+        "the abort must come from the module's cluster refusal: {err}"
     );
 }
 
