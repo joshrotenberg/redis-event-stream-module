@@ -172,7 +172,7 @@ pub(crate) fn streams_in_db0(ctx: &Context, registry: &str, mode: StreamsMode) -
 /// read and restores the caller's database on every path. In per-node cluster
 /// mode this reads only the local node's registry (`<prefix>{tag}#streams`);
 /// cluster-wide discovery is resolved client-side — callers fan out over the
-/// masters and merge (issue #47; docs/consumer-patterns.md, cluster consumers).
+/// masters and merge (issue #47; docs/cluster-consumers.md).
 #[cfg(not(test))]
 pub(crate) fn cmd_streams(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     let mode = match args.len() {

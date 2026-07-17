@@ -69,6 +69,6 @@ The expired event for `foo` is now a durable stream entry — replayable with
 - [Configuration](./configuration.md) — every `eventstream.*` key and the
   filter grammar.
 - [Consumer patterns](./consumer-patterns.md) — live tail, work queues, replay.
-- [Demo and preflight](./demo.md) — scripted end-to-end demo and a deployment
-  health check.
+- [Scripted demo](./demo.md) — the end-to-end demo script;
+  [Preflight checks](./preflight.md) — the deployment health check.
 - [Counters](./counters.md) and [Monitoring](./monitoring.md) — what to watch.

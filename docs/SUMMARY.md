@@ -5,18 +5,24 @@
 # Getting started
 
 - [Quickstart](./quickstart.md)
-- [Demo and preflight](./demo.md)
+- [Scripted demo](./demo.md)
 
-# Deployment
+# Consuming events
+
+- [Consumer patterns](./consumer-patterns.md)
+  - [Durable work queues](./work-queues.md)
+  - [Entry shapes, firehose, and ordering](./entry-shapes.md)
+  - [Discovery and cluster consumers](./cluster-consumers.md)
+- [Loss windows and reconciliation](./loss-windows.md)
+- [Example client](./example-client.md)
+
+# Deployment and operations
 
 - [Docker image](./docker.md)
 - [Redis Enterprise](./enterprise.md)
-
-# Guides
-
-- [Consumer patterns](./consumer-patterns.md)
-- [Loss windows and reconciliation](./loss-windows.md)
-- [Cluster support](./cluster-design.md)
+- [Cluster support](./cluster-support.md)
+- [Preflight checks](./preflight.md)
+- [Sizing and retention](./sizing.md)
 - [Monitoring](./monitoring.md)
 - [Upgrading](./upgrading.md)
 
@@ -26,12 +32,12 @@
 - [Commands](./commands.md)
 - [Counters](./counters.md)
 - [Gap markers](./gap-markers.md)
-- [Example client](./example-client.md)
 - [Benchmarks](./benchmarks.md)
 - [Specification](./specification.md)
 
 # Project
 
+- [Cluster design history](./cluster-design-history.md)
 - [Changelog](./changelog.md)
 - [Contributing](./contributing.md)
 - [Security](./security.md)

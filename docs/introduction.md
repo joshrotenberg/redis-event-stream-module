@@ -12,30 +12,31 @@ This site is the reference documentation. New here? Start with the
 
 ## What is here
 
-- **[Quickstart](./quickstart.md)** - install from a release artifact or source,
-  load the module, and read a mirrored event back.
-- **[Demo and preflight](./demo.md)** - the scripted end-to-end demo and the
-  deployment health check.
-- **[Docker image](./docker.md)** - the preloaded image: `docker run` one-liner,
-  passing module arguments, tags and variants.
-- **[Redis Enterprise](./enterprise.md)** - the RAMP bundle: uploading to a
-  self-managed Enterprise cluster, the Cloud exclusion, and multi-shard
-  (per-shard-stream) semantics.
-- **[Consumer patterns](./consumer-patterns.md)** - reading the mirrored
-  streams: live tail, durable work queues with consumer groups, replay,
-  discovery, and cluster fan-out-and-merge.
-- **[Loss windows and reconciliation](./loss-windows.md)** - every way an event
-  can be lost, how to detect it, and how to reconcile a gap window without a
-  full keyspace scan.
-- **[Cluster support](./cluster-design.md)** - the slot-pinned per-node design:
-  hash-tag selection, re-pinning after a reshard, failover, and discovery.
-- **[Monitoring](./monitoring.md)** - Prometheus rules, a Grafana dashboard, and
-  a metrics collector for the INFO counters.
+Each section addresses one audience:
+
+- **Getting started** - install, load, and read a mirrored event back
+  ([Quickstart](./quickstart.md)), then exercise the whole path with the
+  [scripted demo](./demo.md).
+- **Consuming events** - for the developer reading the streams:
+  [consumer patterns](./consumer-patterns.md) with companion pages on
+  [work queues](./work-queues.md), [entry shapes and the
+  firehose](./entry-shapes.md), and
+  [cluster consumers](./cluster-consumers.md);
+  [loss windows and reconciliation](./loss-windows.md); and the
+  [example client](./example-client.md).
+- **Deployment and operations** - for the operator running the module: the
+  [Docker image](./docker.md), [Redis Enterprise](./enterprise.md),
+  [cluster support](./cluster-support.md),
+  [preflight checks](./preflight.md), [sizing and retention](./sizing.md),
+  [monitoring](./monitoring.md), and [upgrading](./upgrading.md).
 - **Reference** - lookup-ordered pages for
   [configuration](./configuration.md), [commands](./commands.md),
-  [counters](./counters.md), [gap markers](./gap-markers.md), the
-  [example client](./example-client.md), and [benchmarks](./benchmarks.md),
-  plus the full authoritative [specification](./specification.md).
+  [counters](./counters.md), [gap markers](./gap-markers.md), and
+  [benchmarks](./benchmarks.md), plus the full authoritative
+  [specification](./specification.md).
+- **Project** - the [cluster design history](./cluster-design-history.md),
+  [changelog](./changelog.md), [contributing](./contributing.md), and
+  [security](./security.md).
 
 The module writes only streams; everything on the read side is ordinary Redis
 Streams, so any Streams-capable client works.

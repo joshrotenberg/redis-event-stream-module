@@ -29,5 +29,6 @@ Global options: `--url <redis://…>` (scheme added if absent) and `--prefix
 
 Before producing, the client widens the module's event filter on every master
 so what it drives is captured, without narrowing an existing filter. See
-[Consumer patterns](./consumer-patterns.md) for the underlying `XREADGROUP`
+[Consumer patterns](./consumer-patterns.md) and
+[Durable work queues](./work-queues.md) for the underlying `XREADGROUP`
 recipes it demonstrates.

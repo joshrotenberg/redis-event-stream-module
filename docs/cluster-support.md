@@ -4,8 +4,10 @@ Cluster support shipped in v0.2 (issues #45, #46, #47 under epic #19). v0.1
 refused to load in cluster mode; v0.2 keeps that refusal as the default and
 adds opt-in per-node capture via `eventstream.cluster-streams per-node`.
 SPEC.md section 10 is the normative description of this behavior; this page
-explains the mechanism, the consumer-facing consequences, and the design
-history.
+explains the mechanism and its operational consequences. The alternatives
+rejected on the way, and the proposal mechanisms replaced during
+implementation, are preserved in
+[Cluster design history](./cluster-design-history.md).
 
 ## The problem
 
@@ -98,8 +100,8 @@ slots are known, and then cached.
   retried on the next captured event, so capture resumes as soon as the node
   owns a slot again.
 
-Alternative tag sources considered and rejected are in the design-history
-section.
+Alternative tag sources considered and rejected are in
+[Cluster design history](./cluster-design-history.md).
 
 ### Topology changes and resharding
 
@@ -182,35 +184,16 @@ plus a client-side union:
   is node-local by design (this resolved issue #47): the consumer enumerates
   the masters (`CLUSTER SHARDS`, or the client library's topology), runs
   `EVENTSTREAM.STREAMS` on each, and unions the results into the full set of
-  `(node, event)` streams. See "Cluster consumers" in
-  [Consumer patterns](./consumer-patterns.md) for the recipe.
+  `(node, event)` streams. See
+  [Discovery and cluster consumers](./cluster-consumers.md) for the recipe.
 
 ### Consumer guidance
 
-- Read the N per-node streams for one logical event type and merge by entry
-  ID. Entry IDs are millisecond timestamps with a sequence, assigned
-  independently per node, so cross-node ordering is only as good as clock
-  alignment; entries within the same millisecond across nodes cannot be
-  totally ordered (the same-millisecond tie caveat from SPEC.md section 9, now
-  also across nodes).
-- Consumer groups still work per stream. A work queue over `expired` in
-  cluster mode is N consumer groups, one per per-node stream, or one group per
-  stream consumed by a per-node worker pool.
-- `eventstream.auto-group` composes with per-node mode: each node creates the
-  named group on its own `{tag}`-pinned streams as it writes them, so the N
-  per-node streams come with their group already present — no operator-side
-  `XGROUP CREATE` fan-out, and no need to re-run it after a reshard, since a
-  node re-pinned to a new tag provisions the group on the new stream's first
-  write. This is exactly the case where module-side creation at stream birth
-  beats an external sweep: the per-node stream names change after resharding.
-  The group is created at `0` on each stream, so the same slow-consumer caveats
-  apply per node (SPEC.md section 9).
-- After a reshard, the set of per-node streams changes. Consumers re-run
-  discovery periodically, or when they observe a `repinned` marker on a
-  control stream, and adjust which streams they read. A `{tag}` stream that
-  stopped growing because its slot migrated is drained to its end and then
-  dropped from the read set once the consumer confirms (via discovery) that no
-  master pins that tag any more.
+How consumers read the per-node streams (merging by entry ID and its
+cross-node ordering caveat, per-stream consumer groups,
+`eventstream.auto-group` composition with per-node mode, and re-running
+discovery after a reshard) is consumer-side material:
+[Discovery and cluster consumers](./cluster-consumers.md).
 
 ### Config surface and observability
 
@@ -230,70 +213,3 @@ plus a client-side union:
   (`<prefix>{tag}#control`), delimiting the discontinuity in the observable
   trail (SPEC.md section 9).
 - No change to `stream-prefix` validation: `{` and `}` are already permitted.
-
-## Rejected alternatives
-
-- Source-key hashtag (`<prefix>{foo}set` using the source key `foo` as the
-  tag). This does keep writes local (the source key and its stream share a
-  slot), but it produces one stream per source key, which defeats per-event
-  consolidation and explodes the stream count to the cardinality of the
-  keyspace. Rejected.
-- Plain node-id prefix (`<prefix><node-id>:set`). A node-id in the name does not
-  contain a hashtag, so the whole name is hashed and the stream still lands in
-  an arbitrary slot the node likely does not own. It does not solve the slot
-  placement problem at all. Rejected.
-- Cross-slot write with redirection handling (let the XADD go to
-  `<prefix>event` wherever it hashes, and follow the MOVED). Every capture would
-  become a cross-node round trip on the hot path, on the main thread, inside the
-  post-notification job. Rejected on latency grounds; the whole point is a local
-  write.
-
-## Design history
-
-This page began as a pre-implementation proposal. The shipped v0.2 follows its
-slot-pinning scheme, but several proposed mechanisms were replaced by simpler
-ones during implementation. Recorded here so the reasoning is not lost:
-
-- Topology-change detection: the proposal listed a topology-change server
-  event subscription and a low-frequency timer (the cron server event) as
-  candidate mechanisms. Neither was built. Detection is purely error-driven on
-  the failing mirrored `XADD` (above): re-pinning only matters when there is
-  an event to capture, so detecting on the write needs no timer or
-  topology-event plumbing, and the migration-window (`TRYAGAIN`/`ASK`) and
-  probe-fallback triggers were added later (issues #75, #76) to catch the
-  departure earlier and without depending on the exact error text.
-- Owned-slot derivation: the proposal read owned slots from `RM_Call("CLUSTER
-  SHARDS")` and picked the lowest owned slot. The shipped module never parses
-  topology output; it probes candidate tags with the same replicated-write
-  locality rule the real writes obey, which cannot disagree with what an
-  actual capture would experience. Stability across restarts and failovers
-  comes from the deterministic fixed-order slot walk instead of the
-  lowest-slot rule.
-- Slot-to-tag table: the proposal shipped a precomputed 16384-entry `slot ->
-  tag` table as a generated source file. Not built: on servers with the
-  canonical-name API the server itself supplies a name for any slot, and the
-  Redis 7.2 fallback builds its table at runtime in a few milliseconds (issue
-  #116) — no `build.rs`, no 16384-entry generated file to review.
-- Cluster-wide `EVENTSTREAM.STREAMS`: the proposal gave the command a cluster
-  mode that fans out to every master server-side. Resolved instead (issue #47)
-  as client-side fan-out over the per-node registries, keeping the command
-  node-local, readonly, and free of cross-node calls; see "Discovery across
-  nodes" above.
-
-### Resolved questions
-
-The proposal closed with three open questions; all were answered by the v0.2
-implementation:
-
-1. Is cluster support wanted for the first stable release? Yes — shipped in
-   v0.2, opt-in via `eventstream.cluster-streams per-node` with `refuse` as
-   the conservative default.
-2. Does the module get a topology-change server event or a local-slots API, or
-   must it derive topology on a timer? Neither is needed: detection is
-   error-driven on the failing write, so re-pinning happens on the first
-   captured event after the pinned slot leaves (or earlier, mid-migration, via
-   `TRYAGAIN`/`ASK`).
-3. Precomputed `slot -> tag` table or runtime CRC16 search? Runtime CRC16
-   search (issue #116), built once at first fallback use and only on Redis 7.2
-   (later servers ask the canonical-name API); an exhaustive unit test proves
-   every slot's tag hashes back to that slot.
