@@ -72,3 +72,7 @@ The expired event for `foo` is now a durable stream entry — replayable with
 - [Scripted demo](./demo.md) — the end-to-end demo script;
   [Preflight checks](./preflight.md) — the deployment health check.
 - [Counters](./counters.md) and [Monitoring](./monitoring.md) — what to watch.
+- [Loss windows and reconciliation](./loss-windows.md) — before production:
+  capture is at-most-once, and exact recovery of expirations missed during a
+  gap needs an application-maintained expiry index, since expired keys are gone
+  from the keyspace and cannot be reconstructed by a scan.

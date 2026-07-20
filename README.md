@@ -258,8 +258,12 @@ below:
   and the entry's `key` is the hash key — the expired field name is not part
   of the keyspace notification (SPEC.md sections 5 and 6).
 - Capture is at-most-once: events during unloaded or disabled windows are not
-  recoverable. The control stream makes the windows detectable, not the
-  events.
+  recoverable. The control stream makes the windows *detectable*, not the
+  events *recoverable* — a gap marker bounds when a gap happened, not which
+  keys it touched. Because expired keys are gone from the keyspace, `SCAN`
+  cannot reconstruct them; exact reconciliation of missed expirations needs an
+  application-maintained expiry index that outlives the key (see
+  [docs/loss-windows.md](docs/loss-windows.md)).
 - Clean restarts and crashes are indistinguishable: neither writes a closing
   marker (structural: the shutdown event fires after the final save; see
   SPEC.md section 9).
