@@ -261,7 +261,7 @@ jobs:
       # smoke test can run it. buildx --load supports one platform only.
       - name: Build image (PR validation, load locally)
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -295,7 +295,7 @@ jobs:
       # `== 'release'`: the automated tag-push path never has event `release`).
       - name: Build and push image (release)
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
