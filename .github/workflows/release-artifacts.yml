@@ -251,7 +251,7 @@ jobs:
         # release emits no `release: published`, see #85). PR self-validation
         # never logs in or pushes.
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
