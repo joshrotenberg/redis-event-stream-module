@@ -10,6 +10,13 @@ updates:
     groups:
       github-actions:
         update-types: ["minor", "patch"]
+    ignore:
+      # dtolnay/rust-toolchain is referenced as @stable and @nightly
+      # (intentionally unpinned) and, in the msrv job, as @1.88 — the
+      # crate's declared MSRV (rust-version in Cargo.toml), pinned on
+      # purpose to fail CI if the code stops compiling on the floor.
+      # Dependabot reads that ref as a version to bump; it must not.
+      - dependency-name: "dtolnay/rust-toolchain"
 
   # Does not cover the redis-module / redis-module-macros git-tag pin
   # (Cargo.toml); dependabot cannot bump git-tag dependencies, so that
