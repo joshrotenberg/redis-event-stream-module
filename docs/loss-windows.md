@@ -3,8 +3,10 @@
 This module is a live mirror, not a write-ahead log. Within the retention
 window, capture is at-least-once for events the module actually saw; overall,
 capture is at-most-once, because some events are never seen or never written.
-This document lists every way an event can be lost, how to detect it, and how to
-reconcile a gap without rescanning the whole keyspace.
+This document lists every way an event can be lost, how to detect it, and what
+reconciling a gap does and does not recover. Detection is always possible;
+exact recovery of already-removed keys is not, and requires an independent
+source of truth (see Reconciling a gap).
 
 All claims here match the [specification](./specification.md) (SPEC.md
 sections 9 and 10) exactly. If this document and the spec ever disagree, the
@@ -130,34 +132,91 @@ it; and markers are written lazily by the next captured notification, so a
 window in which no event ever fired carries no marker (nothing was mirrored in
 that window either, so the absence is correct).
 
-## Reconciling a gap without a full scan
+## Reconciling a gap
 
-The point is to avoid rescanning the whole keyspace. Given a gap window
-`[t_start, t_end]` in milliseconds (from a marker pair, a restart, or a
-`dropped_oom` alert), reconcile only over that window:
+Gap markers bound an uncertainty window: they prove events *may* be missing and
+delimit *when*, but they carry no record of *which* keys were affected. A
+keyspace notification never carried the value, the previous TTL, or any external
+identity, so nothing about a lost event is queryable after the fact. Closing a
+gap exactly therefore depends on what you can still read, and for the module's
+primary use case — expirations — the answer is usually "nothing".
 
-1. Extract the window. For a disable/enable pair:
+### Expirations need an independent source of truth
+
+A key that Redis expired and removed during the gap is **gone from the post-gap
+keyspace**. `SCAN` enumerates only keys that still exist, and `PTTL` reports only
+keys that still exist, so neither can name a key that already expired or recover
+its former TTL. A full `SCAN` does not help either: the information is no longer
+present to be found. This is the direct consequence of the module being a live
+mirror with no backfill (SPEC.md section 2): a marker tells you a window is
+uncertain; it cannot manufacture the identities Redis has already discarded.
+
+Exact reconciliation of missed expiration events therefore requires a source of
+truth that **outlives the expired key**, maintained by your application:
+
+- a sorted set or index of key identifiers keyed by expiry time;
+- a durable application database carrying the expiry metadata;
+- a separate audit or outbox log;
+- domain-specific enumeration outside the current Redis keyspace.
+
+With such an index, reconcile only the bounded window:
+
+1. Extract the window `[t_start, t_end]` in milliseconds. For a disable/enable
+   pair:
 
    ```
    XRANGE events:#control - +
    # find the `disabled` marker ID (t_start) and the next `enabled`/`loaded` ID (t_end)
    ```
 
-2. Bound the reconciliation to keys whose state could have changed in the
-   window. For expirations, that is keys whose TTL elapsed inside
-   `[t_start, t_end]`. If your application maintains an index of keys and their
-   expiry times (a common pattern for exactly this reason), query that index for
-   the window instead of scanning. Absent such an index, a scoped `SCAN` with
-   per-key `PTTL` checks is still far cheaper than a full sweep because you only
-   act on keys expiring in a narrow window.
+2. Query the index for the keys whose expiry fell inside `[t_start, t_end]` —
+   for example `ZRANGEBYSCORE expiry:index <t_start> <t_end>` against an
+   application-maintained sorted set of `key -> expiry-ms`.
 
 3. Re-derive the missed events from that bounded set and feed them to the same
    consumer logic that processes the streams, so reconciliation and steady-state
    share one code path.
 
-This turns "rescan everything periodically" into "reconcile a bounded window,
-only when a gap actually occurred", which is the improvement the module exists
-to deliver.
+Without such an index, the exact set of expired keys in the window is
+**unknowable from Redis alone**. The correct response to the gap is detection
+and operational alerting (the marker fired, an alert should page), plus whatever
+application-specific recovery policy fits — a conservative re-derivation from
+your own data, a targeted cache rebuild, or accepting the loss. It is not a
+`SCAN`.
+
+### Where a scan does help
+
+`SCAN` is still useful for the reconciliation cases where the state survives the
+gap, and for non-expiration events:
+
+- **Surviving keys.** For write-class events (`set`, `hset`, and so on) the key
+  usually still exists after the gap, so a scoped `SCAN` plus a read of the
+  current value re-derives the missed change. Late or not-yet-fired expirations
+  (the key is still present with a TTL) are visible to `PTTL` and can be handled
+  before they fire.
+- **Domain-specific partial reconciliation.** If your keys carry a prefix or
+  structure that lets you enumerate the affected subset, a scoped `SCAN` over
+  that subset is far cheaper than a full sweep.
+
+Use `SCAN` for these, but do not treat it as a substitute for the expiry index:
+it recovers what is still there, not what is already gone.
+
+### Worked example: with and without an index
+
+Suppose a `disabled`/`enabled` marker pair delimits a 90-second gap, and your
+workload is session expirations.
+
+- **With an expiry index.** Your app maintains `ZADD sessions:expiry <expiry-ms>
+  <session-id>` on every session write. After the gap, `ZRANGEBYSCORE
+  sessions:expiry <t_start> <t_end>` returns exactly the sessions that expired
+  in the window; drive each through the same handler the `events:expired`
+  consumer uses. Reconciliation is exact and bounded.
+- **Without an index.** The expired session keys are gone; no `SCAN` or `PTTL`
+  can list them. You alert on the marker, then apply your recovery policy — for
+  example, treat every session that *would* have expired in the window as
+  expired based on your own issuance records, or force a re-authentication
+  sweep. The exact expired-key set is not recoverable from Redis; the policy,
+  not a scan, closes the gap.
 
 ## Executable reference
 
