@@ -101,17 +101,35 @@ pub(crate) static DROPPED_MAX_STREAMS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) static LOGGED_MAX_STREAMS: AtomicBool = AtomicBool::new(false);
 
-/// Distinct destination streams written since load, excluding the control
-/// stream; the membership records live in `STREAM_STATS`. Never resets, so it
-/// can exceed the current distinct count after a flush (SPEC.md section 13).
+/// Distinct destination streams **created** (first `XADD` succeeded) since
+/// load, excluding the control stream; the membership records live in
+/// `STREAM_STATS`. Counted on first successful write, not on registry `SADD`
+/// success (issue #216), so a stream that captured but failed to register
+/// still counts here. Never resets, so it can exceed the current distinct
+/// count after a flush (SPEC.md section 13).
 pub(crate) static ACTIVE_STREAMS: AtomicU64 = AtomicU64::new(0);
 
-/// Currently-registered distinct destination streams: like `ACTIVE_STREAMS`
-/// but reset to 0 on flush (when `STREAM_STATS` is cleared), so it tracks the
-/// streams the in-process registry cache currently knows about. This is the
+/// Currently-created distinct destination streams: like `ACTIVE_STREAMS` but
+/// reset to 0 on flush (when `STREAM_STATS` is cleared), so it tracks the
+/// streams this process has written since load or the last flush. This is the
 /// basis for the `eventstream.max-streams` cap (issue #64): "streams already
-/// known keep receiving events; only creation of new streams is blocked."
+/// known keep receiving events; only creation of new streams is blocked." It
+/// counts a stream on its first successful `XADD` regardless of whether the
+/// registry `SADD` succeeds (issue #216), so the cap bounds created streams,
+/// not registrations.
 pub(crate) static CURRENT_STREAMS: AtomicI64 = AtomicI64::new(0);
+
+/// Registry `SADD` failures (issue #216): a mirrored `XADD` succeeded but the
+/// follow-up write registering the stream in `<prefix><seg>#streams` failed
+/// (a `WRONGTYPE` occupant, an OOM on the set write, etc.). Auxiliary, not a
+/// lost event and not a failed *destination* write: the entry was captured, so
+/// this stays out of both `events_lost` and the `dropped` sum. The affected
+/// stream is captured but not yet discoverable through `EVENTSTREAM.STREAMS`;
+/// `registered` stays false so the next write retries. First-failure logging
+/// latches on `LOGGED_REGISTRY`, re-armed on recovery.
+pub(crate) static REGISTRY_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) static LOGGED_REGISTRY: AtomicBool = AtomicBool::new(false);
 
 /// Unix seconds of the most recent drop, 0 if none (SPEC.md section 13).
 pub(crate) static LAST_ERROR_TIME: AtomicU64 = AtomicU64::new(0);
@@ -180,9 +198,20 @@ pub(crate) struct StreamStats {
     /// Entries dropped by a refused XADD to this stream (`dropped_xadd_error`
     /// and `dropped_oom` scopes) since load or the last flush invalidation.
     pub(crate) dropped: u64,
+    /// Counted toward `ACTIVE_STREAMS`/`CURRENT_STREAMS` (the max-streams cap):
+    /// set on this stream's first successful `XADD`, independent of the
+    /// registry `SADD` (issue #216). Separate from `registered` so the cap
+    /// bounds created streams even when registration is failing. Cleared with
+    /// the whole map on flush, so a re-write after a flush re-counts (matching
+    /// `CURRENT_STREAMS` resetting to 0).
+    pub(crate) counted: bool,
     /// Present in the persistent `<prefix><seg>#streams` set. Cleared with
     /// the whole map on flush so the next write re-registers.
     pub(crate) registered: bool,
+    /// The last registry `SADD` for this stream failed (issue #216): the
+    /// stream is captured but not discoverable. Drives the recovery notice
+    /// when a later `SADD` succeeds. Cleared with the whole map on flush.
+    pub(crate) registry_failed: bool,
     /// The `eventstream.auto-group` consumer group has been provisioned on
     /// this stream (issue #109). Deduped separately from `registered` so
     /// enabling the config provisions an already-registered ("warm") stream on
@@ -370,6 +399,7 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
         ("skipped_db", load(&SKIPPED_DB)),
         ("skipped_invalid", load(&SKIPPED_INVALID)),
         ("active_streams", load(&ACTIVE_STREAMS)),
+        ("registry_errors", load(&REGISTRY_ERRORS)),
         ("control_markers", load(&CONTROL_MARKERS)),
         ("handler_panics", load(&HANDLER_PANICS)),
         ("dropped_no_owned_slot", load(&DROPPED_NO_OWNED_SLOT)),

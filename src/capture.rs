@@ -408,7 +408,10 @@ pub(crate) fn mirror_entry(
     // namespace is not event-derived and markers must never be dropped).
     if max_streams > 0 {
         let stats = STREAM_STATS.lock(ctx);
-        let known = stats.get(&stream).is_some_and(|s| s.registered);
+        // Keyed on `counted` (created), not `registered`: a stream that
+        // captured but whose registry SADD failed still occupies a cap slot
+        // (issue #216), so the cap bounds created streams, not registrations.
+        let known = stats.get(&stream).is_some_and(|s| s.counted);
         if !known && CURRENT_STREAMS.load(Ordering::Relaxed) >= max_streams {
             return MirrorOutcome::MaxStreams { stream };
         }
@@ -491,18 +494,59 @@ pub(crate) fn mirror_entry(
                     "eventstream: {stream} recovered after {drops} drops"
                 ));
             }
+            // Count the created stream toward the cap on its first successful
+            // XADD, independent of the registry SADD below (issue #216): the
+            // cap must bound created destination streams, not registrations,
+            // so a stream whose SADD keeps failing still occupies a slot.
+            if !entry.counted {
+                entry.counted = true;
+                ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+                // Currently-created count backing the max-streams cap (issue
+                // #64); resets on flush with STREAM_STATS.
+                CURRENT_STREAMS.fetch_add(1, Ordering::Relaxed);
+            }
+            // Registry membership is a best-effort side effect (issue #71),
+            // deduped by `registered`. A failed SADD is observable, not
+            // silent (issue #216): the entry was captured, so it is not a
+            // dropped event, but the stream is not yet discoverable through
+            // EVENTSTREAM.STREAMS, and `registered` stays false so the next
+            // write retries.
             if !entry.registered {
                 let sadd: CallResult = ctx.call_ext(
                     "SADD",
                     &xadd_call_options(),
                     &[registry.as_bytes(), stream.as_bytes()][..],
                 );
-                if sadd.is_ok() {
-                    entry.registered = true;
-                    ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
-                    // Currently-registered count backing the max-streams cap
-                    // (issue #64); resets on flush with STREAM_STATS.
-                    CURRENT_STREAMS.fetch_add(1, Ordering::Relaxed);
+                match sadd {
+                    Ok(_) => {
+                        entry.registered = true;
+                        if entry.registry_failed {
+                            // Recovery: a prior SADD failed, this one worked.
+                            entry.registry_failed = false;
+                            LOGGED_REGISTRY.store(false, Ordering::Relaxed);
+                            ctx.log_notice(&format!(
+                                "eventstream: registry registration recovered for {stream}"
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let msg = e.to_utf8_string().unwrap_or_default();
+                        entry.registry_failed = true;
+                        REGISTRY_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        LAST_ERROR_TIME.store(unix_now(), Ordering::Relaxed);
+                        if LOGGED_REGISTRY
+                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            ctx.log_warning(&format!(
+                                "eventstream: registry SADD to '{registry}' failed for \
+                                 '{stream}': {msg} (registry_errors); the event was \
+                                 captured but the stream is not yet discoverable through \
+                                 EVENTSTREAM.STREAMS. Registration retries on the stream's \
+                                 next write"
+                            ));
+                        }
+                    }
                 }
             }
             // Auto-group provisioning (issue #109): once `eventstream.auto-group`

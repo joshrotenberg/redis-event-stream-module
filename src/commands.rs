@@ -252,18 +252,23 @@ pub(crate) fn prune_in_db0(ctx: &Context, registry: &str) -> RedisResult {
         if srem.is_ok() {
             pruned += 1;
             // Invalidate the in-process dedupe in the same operation (issue #81
-            // hazard 2): clear the membership bit and drop the currently-
-            // registered count so a later write to this name re-registers it.
+            // hazard 2): clear the dedupe bits and drop the currently-created
+            // count so a later write to this name re-counts and re-registers
+            // it. The cap counter (CURRENT_STREAMS) tracks `counted`, the
+            // first-successful-XADD bit (issue #216), so clear that as well as
+            // `registered`; a pruned name was registered, hence also counted.
             // ACTIVE_STREAMS is a since-load lifetime counter that never resets
             // (SPEC.md section 13), so it is intentionally left untouched; the
-            // re-register on the next write bumps it as a fresh distinct-stream
+            // re-count on the next write bumps it as a fresh distinct-stream
             // event.
             let mut stats = STREAM_STATS.lock(ctx);
             if let Some(entry) = stats.get_mut(&name) {
-                if entry.registered {
-                    entry.registered = false;
+                if entry.counted {
+                    entry.counted = false;
                     CURRENT_STREAMS.fetch_sub(1, Ordering::Relaxed);
                 }
+                entry.registered = false;
+                entry.registry_failed = false;
             }
         }
     }
