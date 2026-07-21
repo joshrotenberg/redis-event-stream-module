@@ -497,3 +497,66 @@ fn registry_rebuilds_after_flushall() {
     assert_eq!(streams_withstats(&mut c)["events:set"], (1, 0));
     assert_eq!(info_field(&mut c, "forwarded"), 2);
 }
+
+#[test]
+fn registry_failure_is_observable_and_cap_still_bounds() {
+    // Issue #216: a WRONGTYPE occupant at the registry key fails the SADD
+    // after the per-event XADD succeeds. The event is still captured (not a
+    // drop, not a lost event), the failure is observable via registry_errors,
+    // and max-streams still bounds created streams because the cap counts on
+    // XADD success, not on SADD success.
+    let s = TestServer::start(&["events", "set,del", "max-streams", "1"]);
+    let mut c = s.conn();
+    // Occupy the registry key with a string before any capture. Writes under
+    // the prefix are guarded, so this is never mirrored back.
+    let _: () = c
+        .set("events:#streams", "occupied")
+        .expect("SET registry occupant");
+
+    // One event: its XADD lands even though the registry SADD gets WRONGTYPE.
+    let _: () = c.set("k1", "v").expect("SET k1");
+    wait_until(
+        CAPTURE_WAIT,
+        "event captured despite registry failure",
+        || xlen(&mut c, "events:set") >= 1,
+    );
+    wait_until(CAPTURE_WAIT, "registry failure observable", || {
+        info_field(&mut c, "registry_errors") >= 1
+    });
+    // The event was captured: not a lost event, not a failed destination
+    // write (the registry SADD is an auxiliary side effect, issue #218).
+    assert_eq!(info_field(&mut c, "events_lost"), 0);
+    assert_eq!(info_field(&mut c, "dropped"), 0);
+    // Not discoverable while the registry key is the wrong type: EVENTSTREAM.STREAMS
+    // reads that key, so it errors WRONGTYPE (the issue's own symptom) rather
+    // than omitting the stream. The recovery step below confirms it registers
+    // once the key is cleared.
+    let streams_err: Result<Vec<String>, _> = redis::cmd("EVENTSTREAM.STREAMS").query(&mut c);
+    assert!(
+        streams_err.is_err(),
+        "STREAMS reads the wrong-type registry key and must surface the error"
+    );
+
+    // The cap counted events:set on its XADD, so a second event name is
+    // refused even though the first never registered.
+    let _: () = c.del("k1").expect("DEL k1");
+    wait_until(CAPTURE_WAIT, "second stream refused at the cap", || {
+        info_field(&mut c, "dropped_max_streams") >= 1
+    });
+    assert_eq!(
+        xlen(&mut c, "events:del"),
+        0,
+        "the cap bounds created streams even while the registry is failing"
+    );
+
+    // Recovery: clear the occupant and write again; the SADD now succeeds and
+    // the stream becomes discoverable.
+    let _: () = redis::cmd("DEL")
+        .arg("events:#streams")
+        .query(&mut c)
+        .expect("DEL occupant");
+    let _: () = c.set("k2", "v").expect("SET k2");
+    wait_until(CAPTURE_WAIT, "stream registers after recovery", || {
+        streams(&mut c).contains(&"events:set".to_string())
+    });
+}

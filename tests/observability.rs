@@ -38,6 +38,7 @@ fn info_section_has_all_fields() {
         "skipped_db",
         "skipped_invalid",
         "active_streams",
+        "registry_errors",
         "control_markers",
         "handler_panics",
         "dropped_no_owned_slot",
