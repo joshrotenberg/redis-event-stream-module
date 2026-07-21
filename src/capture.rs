@@ -562,7 +562,7 @@ pub(crate) fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, ret
     let seg = match tag_segment(ctx) {
         Some(s) => s,
         None => {
-            count_no_slot_drop(ctx);
+            count_no_slot_drop(ctx, false);
             return;
         }
     };
@@ -727,7 +727,7 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
             // All destination streams are consolidated in db 0.
             let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
             if rc != raw::REDISMODULE_OK as i32 {
-                count_drop(
+                count_event_lost(
                     ctx,
                     &DROPPED_XADD_ERROR,
                     &LOGGED_XADD_ERROR,
@@ -742,7 +742,7 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
             let seg = match tag_segment(ctx) {
                 Some(s) => s,
                 None => {
-                    count_no_slot_drop(ctx);
+                    count_no_slot_drop(ctx, true);
                     return;
                 }
             };
@@ -779,7 +779,7 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
             ) {
                 MirrorOutcome::Written => {}
                 MirrorOutcome::Oom { stream, msg } => {
-                    count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg)
+                    count_event_lost_stream(ctx, &stream, &DROPPED_OOM, &msg)
                 }
                 // The pinned slot migrated away in a reshard (issue #46) or is
                 // mid-migration (issue #75): re-pin and retry once.
@@ -811,12 +811,12 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
                             max_streams,
                         );
                     } else {
-                        count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
+                        count_event_lost_stream(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
                     }
                 }
                 // Max-streams cap reached (issue #64): the new stream was never
                 // created. First-failure-per-reason log, then counted silently.
-                MirrorOutcome::MaxStreams { stream } => count_drop(
+                MirrorOutcome::MaxStreams { stream } => count_event_lost(
                     ctx,
                     &DROPPED_MAX_STREAMS,
                     &LOGGED_MAX_STREAMS,
@@ -828,7 +828,7 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
                 // The configured entry-format could not encode this event
                 // (issue #60): dropped before any XADD, counted, first failure
                 // logged once per process.
-                MirrorOutcome::EncodeError { stream, reason } => count_drop(
+                MirrorOutcome::EncodeError { stream, reason } => count_event_lost(
                     ctx,
                     &DROPPED_ENCODE_ERROR,
                     &LOGGED_ENCODE_ERROR,
@@ -848,7 +848,7 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
         });
     });
     if !matches!(status, Status::Ok) {
-        count_drop(
+        count_event_lost(
             ctx,
             &DROPPED_DEFER_ERROR,
             &LOGGED_DEFER_ERROR,

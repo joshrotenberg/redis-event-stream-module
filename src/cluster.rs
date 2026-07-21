@@ -8,8 +8,9 @@
 use crate::capture::{mirror_entry, xadd_call_options, EntrySpec, MirrorOutcome, Retention};
 use crate::markers::write_marker;
 use crate::stats::{
-    count_drop, count_stream_drop, DROPPED_ENCODE_ERROR, DROPPED_MAX_STREAMS, DROPPED_OOM,
-    DROPPED_XADD_ERROR, FORWARDED, LOGGED_ENCODE_ERROR, LOGGED_MAX_STREAMS,
+    count_drop, count_event_lost, count_event_lost_stream, DROPPED_ENCODE_ERROR,
+    DROPPED_MAX_STREAMS, DROPPED_OOM, DROPPED_XADD_ERROR, EVENTS_LOST, FORWARDED,
+    LOGGED_ENCODE_ERROR, LOGGED_MAX_STREAMS,
 };
 use redis_module::{CallResult, Context};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -273,7 +274,13 @@ pub(crate) fn pinned_tag_lost_by_probe(ctx: &Context) -> bool {
 /// no slot that accepted a local write), not an inference about ownership
 /// (issue #116); on 7.4+ a slot whose canonical name is unusable is skipped
 /// rather than probed, so "probed every slot" would overstate it.
-pub(crate) fn count_no_slot_drop(ctx: &Context) {
+/// `canonical` is true for the per-event write (the event produced no entry,
+/// so it counts toward `events_lost`, issue #218) and false for the firehose
+/// copy (the canonical entry already succeeded, so only the copy is lost).
+pub(crate) fn count_no_slot_drop(ctx: &Context, canonical: bool) {
+    if canonical {
+        EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    }
     count_drop(
         ctx,
         &DROPPED_NO_OWNED_SLOT,
@@ -328,7 +335,7 @@ pub(crate) fn repin_and_retry(
         None => {
             // No slot owned now; capture resumes on a later event once this
             // node owns a slot again.
-            count_no_slot_drop(ctx);
+            count_no_slot_drop(ctx, true);
             return;
         }
     };
@@ -343,30 +350,32 @@ pub(crate) fn repin_and_retry(
     );
     match mirror_entry(ctx, prefix, &seg, suffix, spec, retention, max_streams, &FORWARDED) {
         MirrorOutcome::Written => {}
-        MirrorOutcome::Oom { stream, msg } => count_stream_drop(ctx, &stream, &DROPPED_OOM, &msg),
+        MirrorOutcome::Oom { stream, msg } => {
+            count_event_lost_stream(ctx, &stream, &DROPPED_OOM, &msg)
+        }
         // Still refused (slot in flux): a migration-window drop, delimited by
         // the marker above (SPEC.md section 10). Migration refusals stay on
         // the process-wide latch: the condition is node-level (the pinned
         // slot), not stream-level (issue #68 scope).
-        MirrorOutcome::SlotMigrated => count_drop(
+        MirrorOutcome::SlotMigrated => count_event_lost(
             ctx,
             &DROPPED_MIGRATING,
             &LOGGED_MIGRATING,
             "XADD still refused as non-local after re-pin; entry dropped in \
              migration window (dropped_migrating)",
         ),
-        MirrorOutcome::Migrating(msg) => count_drop(
+        MirrorOutcome::Migrating(msg) => count_event_lost(
             ctx,
             &DROPPED_MIGRATING,
             &LOGGED_MIGRATING,
             &format!("{msg} (after re-pin; entry dropped in migration window)"),
         ),
         MirrorOutcome::Failed { stream, msg } => {
-            count_stream_drop(ctx, &stream, &DROPPED_XADD_ERROR, &msg)
+            count_event_lost_stream(ctx, &stream, &DROPPED_XADD_ERROR, &msg)
         }
         // The re-pinned name is new after a tag change; if the cap is reached
         // the entry is dropped like any other new stream (issue #64).
-        MirrorOutcome::MaxStreams { stream } => count_drop(
+        MirrorOutcome::MaxStreams { stream } => count_event_lost(
             ctx,
             &DROPPED_MAX_STREAMS,
             &LOGGED_MAX_STREAMS,
@@ -374,7 +383,7 @@ pub(crate) fn repin_and_retry(
         ),
         // Encode failure is deterministic per format+event, so the retry would
         // fail identically; count it once and stop (issue #60).
-        MirrorOutcome::EncodeError { stream, reason } => count_drop(
+        MirrorOutcome::EncodeError { stream, reason } => count_event_lost(
             ctx,
             &DROPPED_ENCODE_ERROR,
             &LOGGED_ENCODE_ERROR,

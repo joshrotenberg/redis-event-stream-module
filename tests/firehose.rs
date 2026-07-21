@@ -276,6 +276,18 @@ fn firehose_failure_leaves_per_event_entry_intact() {
         (2, 0),
         "the per-event row records no drop"
     );
+    // The canonical entry was written, so this is an auxiliary-copy failure,
+    // not a lost event (issue #218): events_lost must stay 0 even though
+    // dropped moved.
+    assert_eq!(
+        info_field(&mut c, "events_lost"),
+        0,
+        "a firehose-only failure is not a lost event"
+    );
+    assert!(
+        info_field(&mut c, "dropped") >= 1,
+        "the failed copy still counts as a failed destination write"
+    );
 
     // Clear the occupant: the copy path recovers on the next event.
     let _: () = redis::cmd("DEL")
@@ -321,6 +333,14 @@ fn both_writes_refused_counts_two_drops() {
     assert_eq!(
         info_field(&mut c, "dropped"),
         2,
-        "the dropped sum sees both"
+        "the dropped sum sees both writes"
+    );
+    // The per-event vs per-write distinction (issue #218): the two failed
+    // writes belong to one selected event, so events_lost is 1 while dropped
+    // is 2.
+    assert_eq!(
+        info_field(&mut c, "events_lost"),
+        1,
+        "one selected event lost, even though two destination writes failed"
     );
 }

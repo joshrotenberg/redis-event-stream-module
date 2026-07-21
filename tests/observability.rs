@@ -22,6 +22,7 @@ fn info_section_has_all_fields() {
         "enabled",
         "eviction_risk",
         "forwarded",
+        "events_lost",
         "firehose_forwarded",
         "autogroup_created",
         "autogroup_failed",
@@ -194,6 +195,13 @@ fn wrongtype_destination_counts_per_stream_and_recovers() {
         "the drop lands on the failing stream's row"
     );
     assert!(info_field(&mut c, "last_error_time") > 0);
+    // The canonical per-event write failed (firehose off), so this is a lost
+    // event: one canonical failure, one events_lost (issue #218).
+    assert_eq!(
+        info_field(&mut c, "events_lost"),
+        1,
+        "a canonical-write failure is one lost event"
+    );
 
     // Fix the destination; the next capture succeeds and ends the streak.
     let _: () = redis::cmd("DEL")

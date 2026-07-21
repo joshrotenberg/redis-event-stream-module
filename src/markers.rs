@@ -209,8 +209,12 @@ pub(crate) fn drain_pending_markers(ctx: &Context) {
             let seg = match tag_segment(ctx) {
                 Some(s) => s,
                 None => {
+                    // Gap markers are control-plane writes, not selected
+                    // events, so a no-slot marker loss counts in
+                    // dropped_no_owned_slot but never in events_lost (issue
+                    // #218: markers are not lost source events).
                     for _ in &drained {
-                        count_no_slot_drop(ctx);
+                        count_no_slot_drop(ctx, false);
                     }
                     return;
                 }

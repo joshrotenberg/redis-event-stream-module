@@ -18,8 +18,12 @@ across a module reload or [in-place upgrade](./upgrading.md).
 ## Meaning and derivation
 
 The definitions below are included from the authoritative
-[specification](./specification.md) (section 13). In short: `dropped` is the
-sum of the `dropped_*` reasons; `handler_panics` should always be zero and any
+[specification](./specification.md) (section 13). In short: `events_lost` is the
+total-loss SLO — one per selected event that produced no canonical entry, the
+field to alert on for "did this node lose an event" (it includes the zero-slot
+case that `dropped` omits); `dropped` is a per-*write* count of failed
+destination writes (it also counts firehose-copy failures, so it can exceed or
+diverge from `events_lost`); `handler_panics` should always be zero and any
 nonzero value is a module bug; and `dropped_no_owned_slot`, `dropped_migrating`,
 `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag`
 are cluster per-node fields.

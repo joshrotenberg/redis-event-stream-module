@@ -37,6 +37,11 @@ groups:
       # total drop rate. Counter resets handled by rate().
       - record: eventstream:forwarded:rate5m
         expr: sum by (redis_instance) (rate(eventstream_forwarded[5m]))
+      # Lost selected events (issue #218): the total-loss SLO. Per event, and
+      # includes the zero-slot case eventstream_dropped omits.
+      - record: eventstream:events_lost:rate5m
+        expr: sum by (redis_instance) (rate(eventstream_events_lost[5m]))
+      # Failed destination writes (per write, includes firehose copies).
       - record: eventstream:dropped:rate5m
         expr: sum by (redis_instance) (rate(eventstream_dropped[5m]))
       - record: eventstream:skipped:rate5m
@@ -44,21 +49,42 @@ groups:
 
   - name: eventstream.alerts
     rules:
-      # SPEC.md section 13: "eventstream_dropped — any increase." A drop is
-      # unmirrored history; the per-reason counters below localize the cause.
+      # SPEC.md section 13: "eventstream_events_lost — any increase." This is
+      # the total-loss SLO (issue #218): one per selected event that produced
+      # no canonical entry, for any reason, and it includes a zero-slot
+      # master's complete loss that eventstream_dropped omits. Alert on this
+      # for "did this node lose an event".
+      - alert: EventstreamEventsLost
+        expr: increase(eventstream_events_lost[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eventstream lost selected events on {{ $labels.redis_instance }}"
+          description: >-
+            eventstream_events_lost increased in the last 5m
+            ({{ $value | printf "%.0f" }} events). Each is a selected event that
+            produced no mirrored entry. Break down by reason with the
+            eventstream_dropped_* counters plus eventstream_dropped_no_owned_slot.
+            See SPEC.md section 13.
+
+      # SPEC.md section 13: "eventstream_dropped — any increase." A drop is a
+      # failed destination write (per write, includes firehose copies); the
+      # per-reason counters below localize the cause. For lost *events* see
+      # EventstreamEventsLost above.
       - alert: EventstreamDropped
         expr: increase(eventstream_dropped[5m]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "eventstream is dropping events on {{ $labels.redis_instance }}"
+          summary: "eventstream destination writes are failing on {{ $labels.redis_instance }}"
           description: >-
             eventstream_dropped increased in the last 5m
-            ({{ $value | printf "%.0f" }} events). Each drop is an event that was
-            not mirrored. Break down by reason with the eventstream_dropped_*
-            counters (xadd_error, oom, defer_error, max_streams, encode_error,
-            migrating). See SPEC.md section 13.
+            ({{ $value | printf "%.0f" }} failed writes). Break down by reason
+            with the eventstream_dropped_* counters (xadd_error, oom,
+            defer_error, max_streams, encode_error, migrating). See SPEC.md
+            section 13.
 
       # SPEC.md section 13: "eventstream_dropped_max_streams — any increase: the
       # max-streams cap is refusing new streams." Distinct remediation, so its
