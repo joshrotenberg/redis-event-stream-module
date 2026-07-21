@@ -914,3 +914,103 @@ fn migration_window_triggers_early_repin() {
         "a repinned gap marker delimits the early re-pin: {actions:?}"
     );
 }
+
+#[test]
+fn fresh_discovery_after_reshard_reads_both_histories_and_marker() {
+    // Issue #215: after a pinned-slot migration, a consumer starting fresh
+    // must discover both the old retained streams (migrated to their new
+    // owner) and the new-tag streams, and read the `repinned` marker. The
+    // library's read_gap_markers could never return a marker before this fix,
+    // because it filtered the data-stream registry, which never contains the
+    // control streams; discover_all scans the keyspace instead.
+    use eventstream_client::{discover_all, read_gap_markers, Target};
+
+    let cluster =
+        TestCluster::try_start(3, Some(&["events", "set", "cluster-streams", "per-node"]))
+            .expect("per-node cluster forms");
+    let n = cluster.num_masters();
+    let mut conn = cluster.cluster_conn();
+
+    // Pre-reshard batch.
+    for i in 0..120 {
+        let _: () = redis::cmd("SET")
+            .arg(format!("a:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET a");
+    }
+    wait_until(
+        Duration::from_secs(15),
+        "pre-reshard batch captured",
+        || {
+            (0..n)
+                .map(|i| cluster.node_info_field(i, "forwarded"))
+                .sum::<i64>()
+                == 120
+        },
+    );
+
+    // Migrate a capturing node's pinned slot away; the old-tag streams (data
+    // and control) move with the slot to the destination node.
+    let victim = (0..n)
+        .find(|&i| cluster.node_info_field(i, "forwarded") > 0)
+        .expect("some node captured");
+    let old_tag = cluster.node_pinned_tag(victim);
+    let old_slot = cluster.keyslot(&format!("{{{old_tag}}}"));
+    let other = (0..n).find(|&i| i != victim).unwrap();
+    cluster.migrate_slot(old_slot, victim, other);
+
+    // Post-reshard batch: the victim re-pins to a new tag and writes a
+    // `repinned` marker to the new control stream.
+    for i in 0..200 {
+        let _: () = redis::cmd("SET")
+            .arg(format!("b:{i}"))
+            .arg("v")
+            .query(&mut conn)
+            .expect("SET b");
+    }
+    wait_until(Duration::from_secs(20), "victim re-pins", || {
+        cluster.node_info_field(victim, "repins") >= 1
+    });
+    let new_tag = cluster.node_pinned_tag(victim);
+    assert_ne!(new_tag, old_tag, "victim re-pinned to a new tag");
+
+    // A consumer starting fresh, via the shipped library, pointed at any node.
+    let url = format!("redis://127.0.0.1:{}", cluster.node_ports()[0]);
+    let target = Target::detect(&url, "events:").expect("client detects the cluster");
+
+    // discover_all (keyspace scan) finds both the migrated old-tag stream on
+    // its new owner and the victim's new-tag stream.
+    let all = discover_all(&target);
+    let old_stream = format!("events:{{{old_tag}}}set");
+    let new_stream = format!("events:{{{new_tag}}}set");
+    assert!(
+        all.contains(&old_stream),
+        "the old retained stream is rediscovered after migration: {all:?}"
+    );
+    assert!(
+        all.contains(&new_stream),
+        "the new active stream is discovered: {all:?}"
+    );
+
+    // The repinned marker is now readable through the library (it returned an
+    // empty set before this fix, in standalone and cluster mode alike).
+    let markers = read_gap_markers(&target, "0").expect("read gap markers");
+    assert!(
+        markers.iter().any(|m| m.action == "repinned"),
+        "the repinned marker is discoverable via read_gap_markers: {:?}",
+        markers.iter().map(|m| m.action.clone()).collect::<Vec<_>>()
+    );
+
+    // Both histories survive and are readable by name through the cluster.
+    let old_len: i64 = redis::cmd("XLEN")
+        .arg(&old_stream)
+        .query(&mut conn)
+        .expect("old stream len");
+    let new_len: i64 = redis::cmd("XLEN")
+        .arg(&new_stream)
+        .query(&mut conn)
+        .expect("new stream len");
+    assert!(old_len > 0, "pre-reshard history retained on the new owner");
+    assert!(new_len > 0, "post-reshard history present on the new tag");
+}
