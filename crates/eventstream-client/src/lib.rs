@@ -237,6 +237,62 @@ pub fn discover_streams(target: &Target) -> Vec<String> {
     v
 }
 
+/// Every stream on one node found by scanning the keyspace, not the registry:
+/// `SCAN MATCH <prefix>* TYPE stream`, looping the cursor. Finds streams by
+/// name regardless of which registry (if any) records them, so it sees the
+/// `#control` streams — never in the data-stream registry (issue #215) — and
+/// old-tag data streams a reshard moved onto this node. O(keyspace) on the
+/// node, so it is a discovery-time cost, not a hot-path one.
+pub fn scan_streams(conn: &mut Connection, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = "0".to_string();
+    loop {
+        let (next, keys): (String, Vec<String>) = match Cmd::new()
+            .arg("SCAN")
+            .arg(&cursor)
+            .arg("MATCH")
+            .arg(format!("{prefix}*"))
+            .arg("TYPE")
+            .arg("stream")
+            .arg("COUNT")
+            .arg(256)
+            .query(conn)
+        {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        out.extend(keys);
+        if next == "0" {
+            break;
+        }
+        cursor = next;
+    }
+    out
+}
+
+/// Cluster-wide discovery by keyspace scan: the sorted union of
+/// [`scan_streams`] over every master. Unlike [`discover_streams`] (the
+/// `EVENTSTREAM.STREAMS` registry fan-out), this finds streams the registry
+/// can miss after a reshard — a migrated old-tag stream now living on its new
+/// owner — and the `#control` streams, which are never registered (issue
+/// #215). It is the basis for gap-marker discovery and for a consumer
+/// refreshing its stream set across a re-pin. An unreachable master is skipped,
+/// matching [`discover`], so a just-killed node does not abort discovery.
+pub fn discover_all(target: &Target) -> Vec<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    for master in &target.masters {
+        let Ok(mut c) = open_single(master) else {
+            continue;
+        };
+        for name in scan_streams(&mut c, &target.prefix) {
+            set.insert(name);
+        }
+    }
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
 /// The event name a destination stream carries: strip the prefix and, in
 /// cluster mode, the leading `{tag}`. `events:{06S}set` -> `set`,
 /// `events:expired` -> `expired`.
@@ -386,6 +442,35 @@ impl MergedReader {
         &self.streams
     }
 
+    /// Add any streams in `candidates` not already covered, initializing only
+    /// their cursors (issue #215): a running consumer that re-discovers after a
+    /// re-pin picks up the new-tag data and control streams without disturbing
+    /// the per-stream cursors of streams it is already reading. New streams
+    /// start at `0` when `from_zero` (so a migrated stream's retained history
+    /// is read), otherwise at their current tail. Returns the names added.
+    pub fn add_streams(
+        &mut self,
+        conn: &mut Conn,
+        candidates: &[String],
+        from_zero: bool,
+    ) -> Vec<String> {
+        let mut added = Vec::new();
+        for s in candidates {
+            if self.cursors.contains_key(s) {
+                continue;
+            }
+            let start = if from_zero {
+                "0".to_string()
+            } else {
+                last_id(conn, s)
+            };
+            self.cursors.insert(s.clone(), start);
+            self.streams.push(s.clone());
+            added.push(s.clone());
+        }
+        added
+    }
+
     /// One `XREAD COUNT count` round across every stream, advancing each
     /// cursor, returning the round's entries sorted by entry ID. A stream that
     /// errors on this round (e.g. a node that just went away) is skipped.
@@ -474,7 +559,10 @@ pub struct GapMarker {
 /// only newer ones). A `repinned` marker means a node re-pinned to a new tag
 /// and its streams have new names, so a caller should re-run [`discover`].
 pub fn read_gap_markers(target: &Target, from: &str) -> RedisResult<Vec<GapMarker>> {
-    let controls: Vec<String> = discover_streams(target)
+    // Control streams are never in the data-stream registry, so they must be
+    // found by keyspace scan, not `EVENTSTREAM.STREAMS` (issue #215): the old
+    // filter over `discover_streams` was always empty.
+    let controls: Vec<String> = discover_all(target)
         .into_iter()
         .filter(|s| s.ends_with("#control"))
         .collect();

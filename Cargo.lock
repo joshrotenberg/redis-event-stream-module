@@ -891,6 +891,7 @@ dependencies = [
 name = "redis-event-stream-module"
 version = "0.3.0"
 dependencies = [
+ "eventstream-client",
  "lazy_static",
  "linkme",
  "proptest",

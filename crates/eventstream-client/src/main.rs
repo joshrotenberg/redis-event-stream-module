@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use redis::{Cmd, RedisResult};
 
 use eventstream_client::{
-    counter_sum, discover_streams, node_counters, Conn, MergedReader, Target,
+    counter_sum, discover_all, discover_streams, node_counters, Conn, MergedReader, Target,
 };
 
 /// Consumer/verification client for redis-event-stream-module.
@@ -341,15 +341,23 @@ fn cmd_consume(
     let from_zero = from == "0";
     let limit = count.unwrap_or(i64::MAX);
 
-    let mut streams = discover_streams(target);
-    if let Some(w) = &wanted {
-        // Match by event name, which in cluster mode sits after the {tag}.
-        streams.retain(|s| {
-            eventstream_client::event_name(&target.prefix, s).is_some_and(|e| w.contains(&e))
-        });
-    }
-    // Skip the module's own control/registry keys.
-    streams.retain(|s| !s.contains('#'));
+    // The matched data streams for the current topology. Uses the keyspace
+    // scan (issue #215) so a reshard's migrated old-tag streams are found on
+    // their new owner, not only what each node's registry still lists.
+    let matched = |target: &Target| -> Vec<String> {
+        let mut streams = discover_all(target);
+        if let Some(w) = &wanted {
+            // Match by event name, which in cluster mode sits after the {tag}.
+            streams.retain(|s| {
+                eventstream_client::event_name(&target.prefix, s).is_some_and(|e| w.contains(&e))
+            });
+        }
+        // Skip the module's own control/registry keys.
+        streams.retain(|s| !s.contains('#'));
+        streams
+    };
+
+    let streams = matched(target);
     if streams.is_empty() {
         println!("no matching streams yet; produce some events first, then re-run");
         return Ok(());
@@ -363,6 +371,12 @@ fn cmd_consume(
     let mut conn = target.open_rw()?;
     let mut reader = MergedReader::new(&mut conn, streams, from_zero);
 
+    // Re-discover on this cadence so a node that re-pins after a reshard has
+    // its new-tag streams picked up without a restart (issue #215). New
+    // streams start from 0 to read their retained history; the cursors of
+    // streams already being read are preserved by add_streams.
+    let rediscover_every = Duration::from_secs(5);
+    let mut last_discovery = Instant::now();
     let mut seen = 0i64;
     loop {
         for e in reader.poll(&mut conn, 200) {
@@ -370,6 +384,17 @@ fn cmd_consume(
             seen += 1;
             if seen >= limit {
                 return Ok(());
+            }
+        }
+        if last_discovery.elapsed() >= rediscover_every {
+            last_discovery = Instant::now();
+            let added = reader.add_streams(&mut conn, &matched(target), true);
+            if !added.is_empty() {
+                println!(
+                    "discovered {} new stream(s): {}",
+                    added.len(),
+                    added.join(", ")
+                );
             }
         }
         sleep(Duration::from_millis(200));

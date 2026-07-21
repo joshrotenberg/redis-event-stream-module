@@ -86,14 +86,31 @@ redis-cli -h <master> -p <port> EVENTSTREAM.STREAMS
 # union the results; each name already carries the owning node's {tag}
 ```
 
-Or use the shipped client/library instead of hand-rolling this. The
-`eventstream-client` crate (`crates/eventstream-client`) packages the fan-out,
-the merged-by-entry-ID reader, and `#control` gap-marker reads (including
-`repinned`-driven re-discovery) as a library, and ships a binary over it:
-`eventstream-client consume --url redis://<any-node>:<port>` discovers the
-streams cluster-wide and tails them merged, so operators get the fan-out
-without a `redis-cli` loop and callers get the logic without reimplementing
-SPEC.md sections 9-10.
+The registry fan-out above (`EVENTSTREAM.STREAMS` per node) is the
+replica-friendly view, but it lists only **data** streams: the control streams
+(`events:{tag}#control`) are never registered, and after a reshard a node's
+registry no longer names the old-tag streams that migrated to another owner. To
+find those, scan each master's keyspace by name instead:
+
+```
+# per master: every module stream by name, including #control and migrated tags
+redis-cli -h <master> -p <port> SCAN 0 MATCH 'events:*' TYPE stream COUNT 256
+# loop the cursor; union across masters
+```
+
+Or use the shipped client/library instead of hand-rolling either fan-out. The
+`eventstream-client` crate (`crates/eventstream-client`) packages both: the
+registry fan-out (`discover_streams`) and the keyspace-scan union
+(`discover_all`), the merged-by-entry-ID reader, and `#control` gap-marker reads
+(`read_gap_markers`, which uses the scan so it returns markers in standalone and
+cluster mode alike). It ships a binary over it: `eventstream-client consume
+--url redis://<any-node>:<port>` discovers the streams cluster-wide, tails them
+merged, and re-discovers on an interval so a node that re-pins after a reshard
+has its new-tag data and control streams picked up without a restart — the
+per-stream cursors of streams already being read are preserved. An unreachable
+master is skipped rather than aborting discovery, so a just-killed node does not
+stall a consumer. Callers get all of SPEC.md sections 9-10 without
+reimplementing them.
 
 Once you have the names, read them from any node: a cluster-aware client routes
 each `events:{tag}event` to its slot owner by the tag. To follow one logical
