@@ -7,14 +7,20 @@
 ![Redis 7.2+](https://img.shields.io/badge/Redis_7.2%2B-informational)
 
 A Redis module that mirrors keyspace notifications into per-event Redis
-Streams. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
-stream entry, written atomically with the keyspace change, so events are
-durable, replayable, and consumable with `XREAD` or consumer groups. Runs on
+Streams: a **bounded, replayable buffer** of keyspace events, especially
+expirations. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
+stream entry, written atomically with the keyspace change, then consumable with
+`XREAD` or consumer groups. Replay is bounded by stream trimming and crash
+durability is whatever the server's persistence config provides: this is a live
+mirror, not a change-data-capture pipeline, an application outbox, a write-ahead
+log, or independent durable storage (see [Limitations](#limitations)). Runs on
 Redis 7.2+, standalone or with replicas.
 
 Status: early release. The code implements the [SPEC.md](SPEC.md) design, the
-authoritative reference: the v0.1 capture and introspection surface, plus v0.2
-opt-in cluster per-node support. Interfaces may change before 1.0.
+authoritative reference. The supported surface is tiered — Stable, Preview, and
+Internal — so what is frozen versus still accruing evidence is explicit; see
+[Stability and support tiers](#stability-and-support-tiers). Interfaces may
+change before 1.0.
 
 ## Install
 
@@ -247,6 +253,48 @@ below:
   does not trip and each shard mirrors its own events into shard-local streams.
   A multi-shard database therefore exposes per-shard streams behind one
   endpoint (SPEC.md section 10 does not cover Enterprise clustering).
+
+## Stability and support tiers
+
+Before 1.0 freezes the interface, the surface is split into three tiers so
+support expectations are explicit. This feeds the 1.0 stability contract
+([#114](https://github.com/joshrotenberg/redis-event-stream-module/issues/114)).
+
+- **Stable** — proven end to end; changes stay backward-compatible or go
+  through a deprecation.
+- **Preview** — implemented and tested, but the full cross-feature lifecycle
+  contract (for cluster mode: reshard + discovery + failover composed together)
+  is still accruing evidence, so it may change before 1.0. Preview is not
+  unsupported; it is not yet frozen.
+- **Internal** — an implementation or observability detail, not an interface to
+  build on.
+
+Deployment topologies:
+
+| Topology | Tier | Notes |
+|---|---|---|
+| Standalone | Stable | The primary target. |
+| Replication / failover | Stable | Standard async-replication caveat: entries not yet replicated to a promoted replica are lost (see [Limitations](#limitations)). |
+| OSS Cluster (`cluster-streams per-node`) | Preview | Per-node capture, re-pinning, and cluster-wide discovery; materially more complex than standalone. |
+| Redis Enterprise (multi-shard) | Preview | Per-shard streams behind the proxy; not fully validated (see above). |
+| Persistence | Inherited | Durability is entirely the server's RDB/AOF config, not module-provided; AOF `everysec` is the recommended minimum. |
+
+Feature surface:
+
+| Tier | Surface |
+|---|---|
+| **Stable** | Fixed `event`/`key`/`db` entry schema. Configs `eventstream.enabled`, `stream-prefix`, `events`, `key-filter`, `source-dbs`, `maxlen`, `maxlen-overrides`, `retention-ms`, `max-streams`, `verify-oom`. Commands `EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`. Capture-health counters `forwarded`, `events_lost`, `dropped`, `skipped_*`. Consumption via ordinary Redis Streams (`XREAD` / consumer groups). |
+| **Preview** | `eventstream.cluster-streams per-node` and everything cluster (re-pinning, discovery). The `eventstream-client` cluster consumer helper. `eventstream.firehose`. `eventstream.entry-format` `minimal`/`verbose`/`json` (the `fixed` default is Stable). `eventstream.entry-seq`. `eventstream.auto-group`. `EVENTSTREAM.PRUNE`. |
+| **Internal** | Per-node cluster counters (`repins`, `repins_probe_detected`, `dropped_no_owned_slot`, `dropped_migrating`, `cluster_*`), `registry_errors`, `handler_panics`, and the derived `eviction_risk` flag. Informative, but not an interface to alert wiring against long-term. |
+
+**Promotion bar.** A Preview feature graduates to Stable once it has an
+end-to-end lifecycle test joining it with restart/failover/reshard/discovery as
+applicable, plus an operator-visible failure signal. Cluster discovery and the
+gap-marker lifecycle gained that coverage in
+[#182](https://github.com/joshrotenberg/redis-event-stream-module/issues/182)
+and [#215](https://github.com/joshrotenberg/redis-event-stream-module/issues/215);
+the remaining promotions are tracked toward 1.0 in
+[#114](https://github.com/joshrotenberg/redis-event-stream-module/issues/114).
 
 ## Limitations
 
