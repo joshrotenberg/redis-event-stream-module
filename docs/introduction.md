@@ -1,14 +1,21 @@
 # Introduction
 
 `redis-event-stream-module` is a Redis module that mirrors keyspace
-notifications into per-event Redis Streams. Each selected event (key
-expiration, `SET`, `DEL`, ...) becomes a stream entry, written atomically with
-the keyspace change, so events are durable, replayable, and consumable with
-`XREAD` or consumer groups. It runs on Redis 7.2+, standalone, with replicas,
-or in a cluster with opt-in per-node capture.
+notifications into per-event Redis Streams: a bounded, replayable buffer of
+keyspace events, especially expirations. Each selected event (key expiration,
+`SET`, `DEL`, ...) becomes a stream entry, written atomically with the keyspace
+change, then consumable with `XREAD` or consumer groups. Replay is bounded by
+stream trimming and crash durability is whatever the server's persistence
+config provides: this is a live mirror, not a change-data-capture pipeline, an
+outbox, or a write-ahead log (see
+[Loss windows and reconciliation](./loss-windows.md)). It runs on Redis 7.2+,
+standalone, with replicas, or in a cluster with opt-in per-node capture.
 
 This site is the reference documentation. New here? Start with the
 [Quickstart](./quickstart.md) — install, load, and capture your first event.
+The supported surface is tiered (Stable / Preview / Internal); the
+[support tiers](https://github.com/joshrotenberg/redis-event-stream-module#stability-and-support-tiers)
+in the README record what is frozen versus still accruing evidence before 1.0.
 
 ## What is here
 
