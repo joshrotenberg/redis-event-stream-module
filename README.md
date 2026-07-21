@@ -111,6 +111,10 @@ The expired event for `foo` is now a stream entry.
   (reachability, module presence, config, an end-to-end probe expiration,
   discovery, counters) and exits nonzero on any failure. All arguments pass
   through to `redis-cli`.
+- A browser demo shows events lighting up live in per-event lanes, with counter
+  tiles and gap-marker bands: `cargo run -p eventstream-client --example
+  eventstream_web` then open `http://127.0.0.1:8080`. Read-only, one static
+  page; see [docs/web-demo.md](docs/web-demo.md).
 - The `eventstream-client` binary (workspace member `crates/eventstream-client`,
   also a consumer library) drives events into the module and reads
   them back, against a standalone server or a per-node cluster (auto-detected).
