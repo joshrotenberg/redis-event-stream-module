@@ -6,6 +6,7 @@
 
 - [Quickstart](./quickstart.md)
 - [Scripted demo](./demo.md)
+- [Web demo](./web-demo.md)
 
 # Consuming events
 

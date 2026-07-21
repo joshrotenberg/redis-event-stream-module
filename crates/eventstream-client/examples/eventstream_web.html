@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>redis-event-stream-module live</title>
+<style>
+  :root {
+    --bg: #0f1116; --panel: #171a21; --line: #262b36; --fg: #e6e9ef;
+    --muted: #8b93a3; --accent: #6ea8fe; --expired: #ffcf5c; --ok: #4ade80;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  #status { margin-left: auto; font-size: 12px; }
+  #status.up { color: var(--ok); } #status.down { color: var(--bad); }
+  .tiles { display: flex; gap: 10px; padding: 12px 18px; flex-wrap: wrap; }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 14px; min-width: 96px;
+  }
+  .tile .n { font-size: 20px; font-weight: 600; }
+  .tile .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .tile.lost .n { color: var(--bad); }
+  #bands { padding: 0 18px; }
+  .band {
+    margin: 6px 0; padding: 6px 12px; border-radius: 6px; font-size: 12px;
+    border: 1px solid var(--line);
+  }
+  .band.disabled, .band.unloading { background: #3a1d1d; border-color: #7f2d2d; }
+  .band.enabled, .band.loaded { background: #16321f; border-color: #2d7f4a; }
+  .band.flushed, .band.swapdb, .band.repinned { background: #332a12; border-color: #7f6a2d; }
+  #lanes {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px; padding: 12px 18px;
+  }
+  .lane { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .lane h2 {
+    margin: 0; padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .lane h2 .count { color: var(--muted); font-size: 11px; }
+  .lane.expired h2 { color: var(--expired); }
+  .rows { max-height: 340px; overflow-y: auto; }
+  .row {
+    padding: 5px 12px; border-bottom: 1px solid var(--line); font-size: 12px;
+    animation: flash .6s ease-out;
+  }
+  .row .key { color: var(--fg); } .row .meta { color: var(--muted); font-size: 11px; }
+  .lane.expired .row { border-left: 3px solid var(--expired); }
+  @keyframes flash { from { background: #2a3550; } to { background: transparent; } }
+  .empty { color: var(--muted); padding: 12px; font-size: 12px; }
+  footer { color: var(--muted); font-size: 11px; padding: 10px 18px; border-top: 1px solid var(--line); }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>redis-event-stream-module</h1>
+  <span class="sub">live keyspace events &mdash; read-only observer</span>
+  <span id="status" class="down">connecting&hellip;</span>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="n" id="t-forwarded">0</div><div class="l">forwarded</div></div>
+  <div class="tile lost"><div class="n" id="t-events_lost">0</div><div class="l">events lost</div></div>
+  <div class="tile"><div class="n" id="t-dropped">0</div><div class="l">dropped writes</div></div>
+  <div class="tile"><div class="n" id="t-streams">0</div><div class="l">streams</div></div>
+  <div class="tile"><div class="n" id="t-length">0</div><div class="l">retained</div></div>
+</div>
+
+<div id="bands"></div>
+<div id="lanes"><div class="empty">Waiting for events. Drive some with <code>eventstream-client produce --expire 50 --toggle</code>.</div></div>
+<footer>
+  Fed by the <code>eventstream_web</code> SSE bridge over the module's mirrored streams.
+  Expirations are highlighted. Gap markers appear as bands.
+</footer>
+
+<script>
+  const lanesEl = document.getElementById("lanes");
+  const bandsEl = document.getElementById("bands");
+  const statusEl = document.getElementById("status");
+  const lanes = new Map();          // event name -> { rows, countEl }
+  const MAX_ROWS = 200;
+
+  function laneFor(event) {
+    if (lanes.has(event)) return lanes.get(event);
+    if (lanesEl.querySelector(".empty")) lanesEl.innerHTML = "";
+    const lane = document.createElement("div");
+    lane.className = "lane" + (event === "expired" ? " expired" : "");
+    lane.innerHTML =
+      `<h2><span>${escapeHtml(event)}</span><span class="count">0</span></h2><div class="rows"></div>`;
+    lanesEl.appendChild(lane);
+    // Keep lanes in a stable (alphabetical) order.
+    [...lanesEl.children]
+      .sort((a, b) => a.querySelector("h2 span").textContent.localeCompare(
+        b.querySelector("h2 span").textContent))
+      .forEach((el) => lanesEl.appendChild(el));
+    const rec = { rows: lane.querySelector(".rows"), countEl: lane.querySelector(".count"), n: 0 };
+    lanes.set(event, rec);
+    return rec;
+  }
+
+  function addEntry(e) {
+    const lane = laneFor(e.event || "(none)");
+    lane.n++;
+    lane.countEl.textContent = lane.n;
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      `<span class="key">${escapeHtml(e.key)}</span>` +
+      `<div class="meta">db ${escapeHtml(e.db)} &middot; ${escapeHtml(e.id)}</div>`;
+    lane.rows.insertBefore(row, lane.rows.firstChild);
+    while (lane.rows.childElementCount > MAX_ROWS) lane.rows.removeChild(lane.rows.lastChild);
+  }
+
+  function addBand(m) {
+    const band = document.createElement("div");
+    band.className = "band " + m.action;
+    const dbNote = (m.db !== null && m.db !== undefined) ? ` (db ${m.db})` : "";
+    band.textContent = `gap marker: ${m.action}${dbNote} on ${m.stream} @ ${m.id}`;
+    bandsEl.insertBefore(band, bandsEl.firstChild);
+    while (bandsEl.childElementCount > 12) bandsEl.removeChild(bandsEl.lastChild);
+  }
+
+  function setStats(s) {
+    for (const k of ["forwarded", "events_lost", "dropped", "streams", "length"]) {
+      const el = document.getElementById("t-" + k);
+      if (el && s[k] !== undefined) el.textContent = s[k];
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function connect() {
+    const es = new EventSource("/events");
+    es.onopen = () => { statusEl.textContent = "live"; statusEl.className = "up"; };
+    es.onerror = () => { statusEl.textContent = "reconnecting…"; statusEl.className = "down"; };
+    es.addEventListener("entry", (ev) => { try { addEntry(JSON.parse(ev.data)); } catch (_) {} });
+    es.addEventListener("marker", (ev) => { try { addBand(JSON.parse(ev.data)); } catch (_) {} });
+    es.addEventListener("stats", (ev) => { try { setStats(JSON.parse(ev.data)); } catch (_) {} });
+    // EventSource auto-reconnects on error; nothing else to do.
+  }
+  connect();
+</script>
+</body>
+</html>
