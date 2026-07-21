@@ -291,6 +291,9 @@ fn per_node_repins_after_slot_migration() {
     // was refused in a migration window (issues #75, #76).
     assert_eq!(cluster.node_info_field(victim, "repins_probe_detected"), 0);
     assert_eq!(cluster.node_info_field(victim, "dropped_migrating"), 0);
+    // A clean re-pin loses no event, so the total-loss counter stays 0: the
+    // canonical no-owned-slot wiring does not spuriously fire (issue #218).
+    assert_eq!(cluster.node_info_field(victim, "events_lost"), 0);
 
     // The victim pinned a new, different tag and captures on it.
     let new_tag = cluster.node_pinned_tag(victim);

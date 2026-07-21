@@ -27,6 +27,20 @@ use redis_module_macros::info_command_handler;
 // Counters (SPEC.md section 13): process-lifetime, monotonic, reset on load.
 pub(crate) static FORWARDED: AtomicU64 = AtomicU64::new(0);
 
+/// Selected events that produced no canonical per-event entry (issue #218):
+/// the total-loss SLO, one increment per lost logical event regardless of
+/// reason (no-owned-slot, max-streams, encode, defer, OOM, XADD error, and a
+/// migration refusal still unrecovered after the one re-pin retry). Unlike
+/// `dropped` (a per-*write* sum that also counts firehose-copy and other
+/// auxiliary failures), this is per-*event*: a firehose-only failure after a
+/// successful canonical write does not touch it, and one event whose per-event
+/// entry and firehose copy both fail counts one here but two in `dropped`.
+/// Incremented only through [`count_event_lost`]/[`count_event_lost_stream`]
+/// and the canonical no-owned-slot path, so auxiliary failures never inflate
+/// it. Includes `dropped_no_owned_slot`, which `dropped` omits, so alerting on
+/// `events_lost` catches a zero-slot master that alerting on `dropped` misses.
+pub(crate) static EVENTS_LOST: AtomicU64 = AtomicU64::new(0);
+
 /// Copies written to the combined firehose stream when `eventstream.firehose`
 /// is on (issue #58). Kept apart from `FORWARDED` so that counter keeps
 /// meaning "captured events", not "XADDs issued"; firehose write failures
@@ -250,6 +264,35 @@ pub(crate) fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool,
     }
 }
 
+/// A canonical per-event loss (issue #218): the selected event produced no
+/// per-event entry, so it counts toward `events_lost` (the total-loss SLO) in
+/// addition to its per-reason counter. Bundles the `EVENTS_LOST` bump with
+/// [`count_drop`] so the two cannot drift: auxiliary failures (firehose copy,
+/// registry `SADD`, gap markers, auto-group) call `count_drop` directly and
+/// never reach `events_lost`, because their canonical entry was still written.
+pub(crate) fn count_event_lost(
+    ctx: &Context,
+    counter: &AtomicU64,
+    latch: &AtomicBool,
+    detail: &str,
+) {
+    EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    count_drop(ctx, counter, latch, detail);
+}
+
+/// A canonical per-event loss counted against its destination stream: the
+/// `EVENTS_LOST` bump (issue #218) plus [`count_stream_drop`]. See
+/// [`count_event_lost`] for why auxiliary failures stay out of `events_lost`.
+pub(crate) fn count_event_lost_stream(
+    ctx: &Context,
+    stream: &str,
+    counter: &AtomicU64,
+    detail: &str,
+) {
+    EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    count_stream_drop(ctx, stream, counter, detail);
+}
+
 /// Count a drop against its destination stream (issue #68): the global
 /// counter and `LAST_ERROR_TIME` as in [`count_drop`], plus the per-stream
 /// `dropped` counter, rate-limited per stream instead of latched per reason —
@@ -311,6 +354,7 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
             Int(EVICTION_RISK.load(Ordering::Relaxed) as i64),
         ),
         ("forwarded", load(&FORWARDED)),
+        ("events_lost", load(&EVENTS_LOST)),
         ("firehose_forwarded", load(&FIREHOSE_FORWARDED)),
         ("autogroup_created", load(&AUTOGROUP_CREATED)),
         ("autogroup_failed", load(&AUTOGROUP_FAILED)),

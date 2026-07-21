@@ -593,7 +593,7 @@
         "w": 12,
         "h": 8
       },
-      "description": "Drops are unmirrored events. eventstream_dropped is the sum of these reasons (SPEC.md section 13).",
+      "description": "eventstream_dropped counts failed destination writes (per write, includes firehose copies) and is the sum of these reasons. For lost events use eventstream_events_lost, which is per event and includes the zero-slot case dropped omits (SPEC.md section 13).",
       "fieldConfig": {
         "defaults": {
           "color": {

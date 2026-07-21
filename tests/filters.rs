@@ -190,6 +190,12 @@ fn max_streams_caps_new_stream_creation() {
     assert!(xlen(&mut c, "events:set") >= 2);
     // The cap drop is part of the dropped sum.
     assert!(info_field(&mut c, "dropped") >= 1);
+    // A max-streams refusal produces no canonical entry, so it is a lost
+    // event (issue #218).
+    assert!(
+        info_field(&mut c, "events_lost") >= 1,
+        "a max-streams drop is a lost event"
+    );
 }
 
 #[test]
