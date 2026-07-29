@@ -18,7 +18,7 @@ events.
 cargo build --release          # builds the module cdylib
 cargo test --lib               # unit tests, no server needed
 cargo test --release --tests   # integration suite (spawns servers per test)
-./demo.sh                      # scripted end-to-end run
+./demo.sh                      # contributor smoke test
 ```
 
 To run the integration suite against a specific server build:

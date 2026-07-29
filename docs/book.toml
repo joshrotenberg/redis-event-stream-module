@@ -1,0 +1,49 @@
+[book]
+title = "Redis Event Stream"
+description = "Turn Redis keyspace events into bounded, replayable Streams."
+authors = ["Josh Rotenberg"]
+language = "en"
+src = "src"
+
+[build]
+# Keep the deployed Pages artifact at the repository-level `book/` path.
+build-dir = "../book"
+
+[preprocessor.lint]
+command = "mdbook-lint"
+
+[output.html]
+git-repository-url = "https://github.com/joshrotenberg/redis-event-stream-module"
+edit-url-template = "https://github.com/joshrotenberg/redis-event-stream-module/edit/main/docs/{path}"
+default-theme = "rust"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.redirect]
+"/introduction.html" = "overview.html"
+"/demo.html" = "observatory.html"
+"/web-demo.html" = "observatory.html"
+"/consumer-patterns.html" = "consume.html"
+"/work-queues.html" = "consume.html"
+"/entry-shapes.html" = "consume.html"
+"/example-client.html" = "consume.html"
+"/loss-windows.html" = "reliability.html"
+"/gap-markers.html" = "reliability.html"
+"/sizing.html" = "production.html"
+"/docker.html" = "quickstart.html"
+"/preflight.html" = "production.html"
+"/security.html" = "production.html"
+"/cluster-design.html" = "topologies.html"
+"/cluster-support.html" = "topologies.html"
+"/cluster-consumers.html" = "topologies.html"
+"/enterprise.html" = "topologies.html"
+"/configuration.html" = "reference/configuration.html"
+"/commands.html" = "reference/commands-observability.html"
+"/counters.html" = "reference/commands-observability.html"
+"/benchmarks.html" = "overview.html"
+"/cluster-design-history.html" = "topologies.html"
+"/specification.html" = "overview.html"
+"/changelog.html" = "overview.html"
+"/contributing.html" = "overview.html"

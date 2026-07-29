@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Phoenix LiveView observatory with wrapper-owned standalone and three-master
+  Redis lifecycles, live module reconfiguration, routed commands, generated
+  workloads, node-aware event lanes, and a self-contained Docker image.
+- Task-oriented mdBook layout with `mdbook-lint` validation.
+
+### Changed
+
+- Rewrote the README and user documentation around evaluation, integration,
+  reliability, and production workflows.
+- Repositioned `demo.sh` as a contributor smoke test.
+
+### Deprecated
+
+- The `eventstream_web` Rust/SSE example is superseded by the LiveView
+  observatory. It remains for one release of notice and is scheduled for
+  removal under issue #234; the `eventstream-client` CLI and library remain
+  supported.
+
 ## [0.3.0] - 2026-07-16
 
 Packaging and operability release: a preloaded container image, a Redis
@@ -20,7 +40,8 @@ new surface is opt-in.
   `ghcr.io/joshrotenberg/redis-event-stream-module` on each release: a Redis
   server built from source with the module `.so` loaded, so a bare `docker run`
   starts a server that is already capturing. Multi-arch (`linux/amd64` and
-  `linux/arm64`), with a Valkey 8 variant. See [docs/docker.md](docs/docker.md).
+  `linux/arm64`), with a Valkey 8 variant. See the
+  [Quickstart](docs/src/quickstart.md).
 - Redis Enterprise RAMP bundle (`ramp pack`) so the module installs through the
   Enterprise `POST /v1/modules` API rather than a bare `.so`.
 - Shipped consumer client (`eventstream-client`), promoted from the example to a
@@ -72,7 +93,7 @@ new surface is opt-in.
   process) no longer fails on the second load. Redis keeps a module's
   `@eventstream` ACL category across unload, so re-adding it aborted the reload;
   the category is now registered tolerantly at init. Documented in the new
-  [upgrading](docs/upgrading.md) runbook and pinned by an integration test.
+  [upgrading](docs/src/upgrading.md) runbook and pinned by an integration test.
 - The release workflow now publishes the container image and RAMP bundle on the
   automated tag-push release path. The docker and ramp jobs were gated on a
   `release` event that a `GITHUB_TOKEN`-created release never emits, so they are
@@ -99,7 +120,7 @@ unchanged and the new capabilities are opt-in.
   eventstream` and `EVENTSTREAM.STATS`.
 - Cluster-wide discovery and consumer guidance: each master's
   `EVENTSTREAM.STREAMS` reports its own tagged streams, and
-  [docs/consumer-patterns.md](docs/consumer-patterns.md) documents the
+  [consumer guide](docs/src/consume.md) documents the
   client-side fan-out-and-merge across masters, the same-millisecond cross-node
   tie caveat, and the failover behavior (a promoted replica re-derives the same
   tag, so stream names are stable).

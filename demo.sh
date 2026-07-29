@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end demo: load the module, expire a key, read the mirrored event back
-# out of the durable stream. Requires redis-server (7.2+) and redis-cli on PATH.
+# Contributor smoke test: load the module, expire a key, and read the mirrored
+# event back from the stream. The canonical interactive demo is demos/liveview.
+# Requires redis-server (7.2+) and redis-cli on PATH.
 set -euo pipefail
 
 cd "$(dirname "$0")"

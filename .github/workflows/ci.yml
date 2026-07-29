@@ -12,14 +12,12 @@ on:
     paths-ignore:
       - "docs/**"
       - "**.md"
-      - "book.toml"
       - ".github/workflows/docs.yml"
       - "LICENSE*"
   pull_request:
     paths-ignore:
       - "docs/**"
       - "**.md"
-      - "book.toml"
       - ".github/workflows/docs.yml"
       - "LICENSE*"
 
@@ -111,6 +109,36 @@ jobs:
         run: node --check examples/node/consumer.js
       - name: Go (vet)
         run: cd examples/go && go vet ./...
+
+  liveview-demo:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demos/liveview
+    steps:
+      - uses: actions/checkout@v7
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            demos/liveview/deps
+            demos/liveview/_build
+          key: liveview-${{ runner.os }}-${{ hashFiles('demos/liveview/mix.lock') }}
+      - name: Install dependencies
+        run: mix deps.get
+      - name: Check formatting
+        run: mix format --check-formatted
+      - name: Run tests
+        run: mix test
+      - name: Build the self-contained demo image
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker build \
+            -f demos/liveview/Dockerfile \
+            -t redis-event-stream-observatory:test .
 
   integration:
     runs-on: ubuntu-latest

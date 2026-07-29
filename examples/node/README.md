@@ -2,8 +2,8 @@
 
 An [ioredis](https://github.com/redis/ioredis) consumer for
 `redis-event-stream-module`, covering the core patterns from
-[docs/consumer-patterns.md](../../docs/consumer-patterns.md) and its companion
-pages.
+[Consume events](../../docs/src/consume.md) and
+[Reliability and delivery](../../docs/src/reliability.md).
 
 ```sh
 npm install
@@ -19,17 +19,17 @@ Connection defaults to `127.0.0.1:6379`; override with `REDIS_HOST` /
 
 | Subcommand | Documentation section |
 |---|---|
-| `tail` | Live tail ([consumer-patterns.md](../../docs/consumer-patterns.md)) |
-| `work` | Durable work queue + Recovering stuck work ([work-queues.md](../../docs/work-queues.md)) |
-| `reconcile` | Handling gaps (→ [loss-windows.md](../../docs/loss-windows.md)) |
-| `discover` | Discovery ([cluster-consumers.md](../../docs/cluster-consumers.md)) |
+| `tail` | Live tail ([Consume events](../../docs/src/consume.md)) |
+| `work` | Durable work queue and stuck-work recovery ([Consume events](../../docs/src/consume.md)) |
+| `reconcile` | Gap handling ([Reliability and delivery](../../docs/src/reliability.md)) |
+| `discover` | Stream discovery ([Deployment topologies](../../docs/src/topologies.md)) |
 
 ## Why ioredis, and binary-safe keys
 
-The `key` field is raw bytes. Per SPEC.md section 6: *"Consumers must read `key`
+The `key` field is raw bytes. Per SPEC.md section 6: "Consumers must read `key`
 with a bytes-typed client API; clients that eagerly decode replies as UTF-8 will
 mangle non-UTF-8 keys, which is a client configuration issue, not stream data
-loss."* This example uses **ioredis** specifically because its `*Buffer` command
+loss." This example uses **ioredis** specifically because its `*Buffer` command
 variants (`xreadBuffer`, `xreadgroupBuffer`, `xrangeBuffer`, `xautoclaimBuffer`)
 return replies as `Buffer`s, so the `key` field is kept as bytes and round-trips
 exactly; it is decoded only for display. (node-redis works too, via its

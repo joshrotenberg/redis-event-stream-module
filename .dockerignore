@@ -2,6 +2,8 @@
 # it needs (Cargo.toml, Cargo.lock, src/, examples/). Everything else is noise.
 /target
 /book
+/demos/liveview/_build
+/demos/liveview/deps
 .git
 .github
 docs

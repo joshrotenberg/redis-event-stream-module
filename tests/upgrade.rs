@@ -2,7 +2,7 @@
 //! live server, without a restart. Pins the full swap path that no other test
 //! exercises — the marker tests stop at UNLOAD, the restart tests replace the
 //! whole process. The same `.so` stands in for "a new version"; the swap
-//! mechanics, not a binary diff, are what this pins. See docs/upgrading.md for
+//! mechanics, not a binary diff, are what this pins. See docs/src/upgrading.md for
 //! the operator runbook this test guards.
 
 mod common;

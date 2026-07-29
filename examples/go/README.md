@@ -2,8 +2,8 @@
 
 A [go-redis/v9](https://github.com/redis/go-redis) consumer for
 `redis-event-stream-module`, covering the core patterns from
-[docs/consumer-patterns.md](../../docs/consumer-patterns.md) and its companion
-pages.
+[Consume events](../../docs/src/consume.md) and
+[Reliability and delivery](../../docs/src/reliability.md).
 
 ```sh
 # against a server with the module loaded (default: expirations only)
@@ -18,10 +18,10 @@ Connection defaults to `127.0.0.1:6379`; override with `REDIS_ADDR` (and
 
 | Subcommand | Documentation section |
 |---|---|
-| `tail` | Live tail ([consumer-patterns.md](../../docs/consumer-patterns.md)) |
-| `work` | Durable work queue + Recovering stuck work ([work-queues.md](../../docs/work-queues.md)) |
-| `reconcile` | Handling gaps (→ [loss-windows.md](../../docs/loss-windows.md)) |
-| `discover` | Discovery ([cluster-consumers.md](../../docs/cluster-consumers.md)) |
+| `tail` | Live tail ([Consume events](../../docs/src/consume.md)) |
+| `work` | Durable work queue and stuck-work recovery ([Consume events](../../docs/src/consume.md)) |
+| `reconcile` | Gap handling ([Reliability and delivery](../../docs/src/reliability.md)) |
+| `discover` | Stream discovery ([Deployment topologies](../../docs/src/topologies.md)) |
 
 ## Binary-safe keys
 

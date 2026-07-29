@@ -1,399 +1,207 @@
-# redis-event-stream-module
+# Redis Event Stream
 
 [![CI](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/ci.yml)
-[![Chaos](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/chaos.yml/badge.svg)](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/chaos.yml)
+[![Docs](https://github.com/joshrotenberg/redis-event-stream-module/actions/workflows/docs.yml/badge.svg?branch=main)](https://joshrotenberg.github.io/redis-event-stream-module/)
 [![Release](https://img.shields.io/github/v/release/joshrotenberg/redis-event-stream-module)](https://github.com/joshrotenberg/redis-event-stream-module/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 ![Redis 7.2+](https://img.shields.io/badge/Redis_7.2%2B-informational)
 
-A Redis module that mirrors keyspace notifications into per-event Redis
-Streams: a **bounded, replayable buffer** of keyspace events, especially
-expirations. Each selected event (key expiration, `SET`, `DEL`, ...) becomes a
-stream entry, written atomically with the keyspace change, then consumable with
-`XREAD` or consumer groups. Replay is bounded by stream trimming and crash
-durability is whatever the server's persistence config provides: this is a live
-mirror, not a change-data-capture pipeline, an application outbox, a write-ahead
-log, or independent durable storage (see [Limitations](#limitations)). Runs on
-Redis 7.2+, standalone or with replicas.
+A Redis module that mirrors selected keyspace events into bounded, replayable
+Redis Streams.
 
-Status: early release. The code implements the [SPEC.md](SPEC.md) design, the
-authoritative reference. The supported surface is tiered — Stable, Preview, and
-Internal — so what is frozen versus still accruing evidence is explicit; see
-[Stability and support tiers](#stability-and-support-tiers). Interfaces may
-change before 1.0.
+An expiration, `SET`, `DEL`, or another selected event becomes a stream entry
+written atomically with the keyspace change. Applications consume the entries
+with ordinary Redis commands such as `XREAD`, `XRANGE`, and `XREADGROUP`.
 
-## Install
+The project is pre-1.0. Standalone Redis and replication/failover are the
+primary targets; OSS Cluster per-node capture and multi-shard Redis Enterprise
+are Preview capabilities.
 
-Prebuilt modules for Linux (x86_64, aarch64) and macOS (x86_64, aarch64) are
-attached to each [release](https://github.com/joshrotenberg/redis-event-stream-module/releases)
-with sha256 checksums:
+## Why use it
 
-```sh
-curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so
-curl -LO https://github.com/joshrotenberg/redis-event-stream-module/releases/latest/download/redis-event-stream-module-<version>-linux-x86_64.so.sha256
-shasum -a 256 -c redis-event-stream-module-<version>-linux-x86_64.so.sha256
+- **Survive disconnects.** Unlike keyspace pub/sub, entries wait in a stream
+  while a consumer is offline.
+- **Replay recent history.** Resume from a stream ID or inspect a retained time
+  range.
+- **Distribute work.** Redis consumer groups provide acknowledgement,
+  redelivery, and worker coordination.
+- **Detect capture gaps.** Counters and a control stream expose disabled,
+  reconfigured, or failed capture.
+
+This is a live mirror, not permanent change data capture, an application
+outbox, or a write-ahead log. Retention is bounded, and crash durability is
+whatever the Redis persistence configuration provides.
+
+## Try it in 60 seconds
+
+Start the published image with the module already loaded:
+
+```bash
+docker run --rm --name eventstream-quickstart \
+  -d -p 6379:6379 \
+  ghcr.io/joshrotenberg/redis-event-stream-module:latest
 ```
 
-Each artifact also carries a Sigstore build-provenance attestation that ties it
-back to this repo, the source commit, and the workflow run that built it. With
-the [GitHub CLI](https://cli.github.com/) you can verify provenance in addition
-to the checksum:
+Create a short-lived key and force Redis to observe its expiration:
 
-```sh
-gh attestation verify redis-event-stream-module-<version>-linux-x86_64.so \
-  --repo joshrotenberg/redis-event-stream-module
+```bash
+docker exec eventstream-quickstart \
+  redis-cli SET quickstart:session active PX 500
+sleep 1
+docker exec eventstream-quickstart \
+  redis-cli GET quickstart:session
 ```
 
-The `.sha256` file remains the low-dependency check for users without `gh`.
+Read the mirrored event:
 
-Or build from source (Rust 1.88 or newer; the MSRV is declared in
-`Cargo.toml` and gated in CI):
-
-```sh
-cargo build --release
-# module at target/release/libredis_event_stream_module.so (.dylib on macOS)
+```bash
+docker exec eventstream-quickstart \
+  redis-cli XRANGE events:expired - +
 ```
 
-## Run
+The default entry contains the event name, binary-safe key, and origin
+database:
 
-The fastest path is the preloaded image on GHCR, which starts a Redis server
-with the module already loaded (default configuration: expirations only):
-
-```sh
-docker run --rm -p 6379:6379 ghcr.io/joshrotenberg/redis-event-stream-module:latest
+```text
+1785349757949-0
+event
+expired
+key
+quickstart:session
+db
+0
 ```
 
-Module arguments pass through by overriding the command; read events back with
-`docker exec`:
+Stop the container with:
 
-```sh
-docker run --rm -p 6379:6379 ghcr.io/joshrotenberg/redis-event-stream-module:latest \
-  redis-server \
-  --loadmodule /usr/local/lib/redis/modules/libredis_event_stream_module.so \
-  events 'expired,set' maxlen 1000000
-# in another terminal, against the same container:
-docker exec <container> redis-cli XREAD COUNT 10 STREAMS events:expired 0
+```bash
+docker stop eventstream-quickstart
 ```
 
-Tags: `<version>` and `latest`; images are multi-arch (`linux/amd64`,
-`linux/arm64`). The server is built from source in the image (the CI-pinned
-Redis version) rather than layered onto an upstream image; see
-[docs/docker.md](docs/docker.md) for why and for build details. Only Redis 7.2+
-is published (SPEC.md section 14).
+See the [full Quickstart](docs/src/quickstart.md) for prebuilt artifacts, source
+builds, and health checks.
 
-Or load a prebuilt/locally built `.so` into an existing server:
+## Open the live observatory
 
-```sh
-redis-server --loadmodule ./redis-event-stream-module-<version>-linux-x86_64.so
+The Phoenix LiveView observatory owns disposable Redis instances, lets you
+reconfigure capture, sends commands through a real Redis client, and shows each
+event type filling its stream in real time.
+
+```bash
+docker build \
+  -f demos/liveview/Dockerfile \
+  -t redis-event-stream-observatory .
+docker run --rm -p 4000:4000 redis-event-stream-observatory
 ```
 
-The server's `notify-keyspace-events` setting is not required: module
-subscribers receive keyspace events regardless of that setting, which gates
-pub/sub delivery only (SPEC.md section 7).
+Open [http://127.0.0.1:4000](http://127.0.0.1:4000), then follow the visible
+configure → send commands → watch streams workflow. Standalone mode is the
+default; an advanced three-master mode demonstrates cluster routing, per-node
+stream discovery, and merged event lanes.
 
-`MODULE LIST` reports the crate version as `ver`, encoded
-`major*10000 + minor*100 + patch` (0.2.0 reports `ver 200`), so the loaded
-release is auditable server-side (SPEC.md section 14).
+The image is a local evaluation environment, not a production Redis control
+plane. See the [observatory guide](docs/src/observatory.md) for architecture,
+security boundaries, and source setup.
 
-Quick check in `redis-cli` (the default configuration captures expirations
-only):
+## How capture is organized
 
-```
-> SET foo bar PX 100
-> GET foo          (after ~100ms; forces lazy expiry)
-> XREAD COUNT 10 STREAMS events:expired 0
-```
+Event names route to one stream each:
 
-The expired event for `foo` is now a stream entry.
-
-- `./demo.sh` runs a scripted end-to-end demonstration on a local server.
-- `./demo-preflight.sh -h host -p port` checks an existing deployment
-  (reachability, module presence, config, an end-to-end probe expiration,
-  discovery, counters) and exits nonzero on any failure. All arguments pass
-  through to `redis-cli`.
-- A browser demo shows events lighting up live in per-event lanes, with counter
-  tiles and gap-marker bands: `cargo run -p eventstream-client --example
-  eventstream_web` then open `http://127.0.0.1:8080`. Read-only, one static
-  page; see [docs/web-demo.md](docs/web-demo.md).
-- The `eventstream-client` binary (workspace member `crates/eventstream-client`,
-  also a consumer library) drives events into the module and reads
-  them back, against a standalone server or a per-node cluster (auto-detected).
-  Run it with `cargo run -p eventstream-client -- <command>`, or from a release
-  build/artifact as `eventstream-client <command>`. Commands: `info`, `produce`
-  (drive sets, expirations, a mass-expiry burst, or an enabled-toggle gap-marker
-  pair), `consume` (discover streams cluster-wide and tail them merged by entry
-  ID), `watch` (a live counters-and-lengths dashboard), and `soak` (sustained
-  produce, then verify capture). It doubles as a consumer reference for the
-  cluster fan-out; see [docs/cluster-consumers.md](docs/cluster-consumers.md).
-
-## Configuration
-
-Set at load (module arguments, or `--eventstream.<name> <value>` on the server
-command line) and, except where noted, live via `CONFIG SET`:
-
-| Config | Type | Default | Meaning |
-|--------|------|---------|---------|
-| `eventstream.enabled` | bool | `yes` | master on/off switch |
-| `eventstream.firehose` | bool | `no` | also mirror every captured event into one combined `<prefix>#firehose` stream; doubles write amplification (SPEC.md section 11) |
-| `eventstream.stream-prefix` | string | `events:` | destination stream prefix; immutable, load-time only |
-| `eventstream.events` | string | `expired` | `*` for everything, `@class` tokens, or a comma list of event names, e.g. `expired,del` |
-| `eventstream.key-filter` | string | `*` | comma list of key-name globs, ANDed with `events`; matched against raw key bytes, e.g. `session:*,cache:*` |
-| `eventstream.source-dbs` | string | `*` | `*` for all databases, or a comma list of db indexes, e.g. `0,2`; standalone only |
-| `eventstream.maxlen` | i64 | `10000` | approximate per-stream `MAXLEN`; `0` disables trimming |
-| `eventstream.maxlen-overrides` | string | `` (empty) | per-event `maxlen` overrides as `event=cap` pairs keyed by stream suffix, e.g. `expired=600000,set=1000`; falls back to `maxlen`. `#control` is addressable; the firehose uses `maxlen` (SPEC.md section 7) |
-| `eventstream.retention-ms` | i64 | `0` | time-based retention: when `>0`, trim by `MINID` over a `now−retention-ms` window instead of by count, taking precedence over `maxlen`; `0` disables (SPEC.md sections 7, 11) |
-| `eventstream.max-streams` | i64 | `0` | cap on distinct destination streams; `0` is unlimited, new streams beyond the cap are dropped and counted |
-| `eventstream.verify-oom` | bool | `yes` | `yes` refuses mirrored writes under `maxmemory` (counted `dropped_oom`); `no` continues capturing at the limit at the cost of adding memory during eviction (SPEC.md sections 10, 11) |
-| `eventstream.cluster-streams` | string | `refuse` | cluster behavior: `refuse` (default) or `per-node` (see Limitations); immutable, load-time only |
-| `eventstream.entry-format` | enum | `fixed` | mirrored entry shape: `fixed` (default, `event`/`key`/`db`), `minimal` (no `event`), `verbose` (adds `class`), or `json` (one document field, base64 key); non-`fixed` entries carry a `format` discriminator (SPEC.md section 6) |
-| `eventstream.entry-seq` | bool | `no` | append a process-global monotonic `seq` field for per-node cross-stream same-millisecond ordering; immutable, load-time only (SPEC.md sections 6, 9) |
-| `eventstream.auto-group` | string | `` (empty) | consumer-group auto-provisioning: empty disables (default), or a group name the module creates at `0` on each destination stream at first write; watch the `autogroup_created`/`autogroup_failed` counters (SPEC.md sections 7, 9) |
-
-This table is a convenience copy; the authoritative table is SPEC.md section 7
-(rendered with validation rules in
-[docs/configuration.md](docs/configuration.md)).
-The full filter grammar is in SPEC.md section 7. The high-volume `@missed`
-(read misses) and `@new` (new-key) classes are opt-in and must be named at load
-time; a `*` or explicit `@missed`/`@new` in the load-time filter subscribes to
-them.
-
-Counters (forwarded, dropped and skipped by reason, active streams, gap
-markers) are exposed in a module INFO section: `INFO eventstream`. Module
-sections do not appear in plain `INFO`; name the section or use
-`INFO everything`. Three keyless commands are also registered:
-`EVENTSTREAM.STATS` (readonly) returns the counters as a structured reply, and
-`EVENTSTREAM.STREAMS` (readonly) lists the destination streams written so far,
-backed by a persistent registry that survives restart. `EVENTSTREAM.STREAMS
-WITHSTATS` adds this process's per-stream forwarded and dropped counts, and
-`VERBOSE` annotates each name with its live existence and `XLEN` (`[name, exists,
-length]`), all without mutating the registry — so discovery keeps working on
-replicas. The opt-in cleanup is the separate `write` command `EVENTSTREAM.PRUNE`,
-which removes the registered names whose key is absent (deleted) and returns the
-count removed; keeping it a distinct command is what lets `EVENTSTREAM.STREAMS`
-stay `readonly`. Write failures log per stream, rate-limited to one warning per
-stream per 60 seconds with suppressed-count summaries, plus a notice when a
-failing stream recovers.
-
-## How it works
-
-Events route by event name into `<prefix><event>`:
-
-| Event | Stream |
-|-------|--------|
-| key expiration | `events:expired` |
-| hash-field expiration (Redis 7.4+) | `events:hexpired` |
+| Event | Default destination |
+|---|---|
+| Key expiration | `events:expired` |
 | `SET` | `events:set` |
 | `HSET` | `events:hset` |
 | `DEL` | `events:del` |
-| eviction | `events:evicted` |
 
-Each entry has three fields by default: `event` (the event name), `key` (the
-affected key, binary-safe), and `db` (the database the event fired in). All
-destination streams live in database 0; the `db` field records the origin. The
-stream entry ID carries the event's millisecond timestamp. `eventstream.entry-format`
-selects an alternative shape (drop `event`, add the notification `class`, or a
-single JSON document), and `eventstream.entry-seq` appends a global monotonic
-`seq` field for cross-stream ordering (SPEC.md section 6).
+The default configuration captures expirations and retains approximately the
+newest 10,000 entries. Runtime configuration can select events, key globs,
+source databases, count- or time-based retention, entry shapes, and an optional
+combined firehose.
 
-Delivery semantics (SPEC.md section 9): on a healthy capturing master, each
-selected event produces exactly one entry, atomic with the keyspace change.
-Overall capture is at-most-once; consumption through consumer groups is
-at-least-once within the retention window, so consumers must be idempotent on
-stream name plus entry ID. Mirrored entries replicate to replicas and the AOF.
+`notify-keyspace-events` does not need to be enabled. That setting controls
+Redis pub/sub delivery; module subscribers receive keyspace events
+independently.
 
-The module writes capture-gap markers (`loaded`, `disabled`, `enabled`,
-`flushed`, `swapdb`, `unloading`) to a control stream at `<prefix>#control`, so
-consumers can bound reconciliation to known gap windows (SPEC.md section 9).
+## Configure the feed
 
-## Comparison with other approaches
+Widen the default expiration-only filter at runtime:
 
-| | Periodic keyspace scan | Pub/sub keyspace notifications | This module |
-|---|---|---|---|
-| Consumer disconnect | no effect (stateless poll) | events during the gap are lost | entries wait in the stream |
-| Replay after restart | rescan everything | none | `XRANGE` / group from any ID |
-| Server load per detection | full or partial keyspace scan | one pub/sub publish | one `XADD` (plus approximate trim) |
-| Detection latency | up to one scan interval | immediate | immediate |
-| Consumer scaling | manual sharding | fan-out only, no work splitting | consumer groups |
-| Loss detectable | n/a (always rescans) | no | yes (gap markers, counters) |
-| Needs `notify-keyspace-events` | no | yes | no |
+```text
+CONFIG SET eventstream.events "expired,set,hset,del"
+CONFIG SET eventstream.key-filter "session:*,lease:*"
+CONFIG SET eventstream.maxlen 100000
+```
 
-RedisGears / Triggers-and-Functions could script similar capture in-server and
-is deprecated by Redis.
+The event and key filters are combined, so only named operations affecting a
+matching key are mirrored. Retention can be count-based, time-based, or
+overridden per event type.
 
-This module does not provide exactly-once delivery, and it does not backfill
-events that occur while the module is unloaded, disabled, or the server is
-down. It is a live mirror, not a write-ahead log. See
-[docs/loss-windows.md](docs/loss-windows.md) for the loss windows and how to
-reconcile over them.
+Inspect the effective state after a change:
 
-## Supported servers
+```text
+CONFIG GET eventstream.*
+EVENTSTREAM.STATS
+EVENTSTREAM.STREAMS VERBOSE
+```
 
-Requires `RM_AddPostNotificationJob` (Redis 7.2+). CI runs the full integration
-suite against each pinned version:
+These inspection commands are read-only. `EVENTSTREAM.STREAMS VERBOSE` reports
+each registered destination, whether it currently exists, and its length. See
+[Configure capture](docs/src/configure.md) for filter recipes and the
+[configuration reference](docs/src/reference/configuration.md) for exact
+defaults and validation.
 
-| Server | Version in CI |
-|--------|---------------|
-| Redis 7.2 | 7.2.8 (minimum supported) |
-| Redis 7.4 | 7.4.5 |
-| Redis 8.x | 8.8.0 |
+## Know the boundary
 
-Servers below 7.2 fail to load the module (SPEC.md section 14 describes the
-failure mode).
+- Capture is at-most-once overall. Events during unloaded, disabled, refused,
+  or unpersisted windows cannot be recreated by the module.
+- Consumer groups provide at-least-once processing only while entries remain
+  inside the retention window.
+- Gap markers identify when capture was incomplete, not which keys were
+  missed. An expired key is already gone, so exact reconciliation requires an
+  independent application index or source of truth.
+- Replication and AOF/RDB settings determine crash and failover durability.
+- Cluster mode produces node-local tagged streams that consumers must discover
+  and merge.
 
-### Redis Enterprise
-
-Redis Enterprise Software does not load a bare `.so`; it takes a RAMP bundle (a
-zip of the `.so` plus a generated `module.json`) uploaded through the cluster
-UI or `POST /v1/modules`. A `redis-event-stream-module-<version>-linux-x86_64.zip`
-RAMP bundle is attached to each release, built from [`ramp.yml`](ramp.yml). See
-[docs/enterprise.md](docs/enterprise.md) for upload steps and the scope caveats
-below:
-
-- **Self-managed Enterprise Software only.** Redis Cloud does not accept
-  uncertified custom modules; this bundle does not make the module deployable
-  there.
-- **Enterprise sharding is not OSS cluster mode.** Each shard is an ordinary
-  non-clustered Redis process behind the proxy, so `eventstream.cluster-streams`
-  does not trip and each shard mirrors its own events into shard-local streams.
-  A multi-shard database therefore exposes per-shard streams behind one
-  endpoint (SPEC.md section 10 does not cover Enterprise clustering).
-
-## Stability and support tiers
-
-Before 1.0 freezes the interface, the surface is split into three tiers so
-support expectations are explicit. This feeds the 1.0 stability contract
-([#114](https://github.com/joshrotenberg/redis-event-stream-module/issues/114)).
-
-- **Stable** — proven end to end; changes stay backward-compatible or go
-  through a deprecation.
-- **Preview** — implemented and tested, but the full cross-feature lifecycle
-  contract (for cluster mode: reshard + discovery + failover composed together)
-  is still accruing evidence, so it may change before 1.0. Preview is not
-  unsupported; it is not yet frozen.
-- **Internal** — an implementation or observability detail, not an interface to
-  build on.
-
-Deployment topologies:
-
-| Topology | Tier | Notes |
-|---|---|---|
-| Standalone | Stable | The primary target. |
-| Replication / failover | Stable | Standard async-replication caveat: entries not yet replicated to a promoted replica are lost (see [Limitations](#limitations)). |
-| OSS Cluster (`cluster-streams per-node`) | Preview | Per-node capture, re-pinning, and cluster-wide discovery; materially more complex than standalone. |
-| Redis Enterprise (multi-shard) | Preview | Per-shard streams behind the proxy; not fully validated (see above). |
-| Persistence | Inherited | Durability is entirely the server's RDB/AOF config, not module-provided; AOF `everysec` is the recommended minimum. |
-
-Feature surface:
-
-| Tier | Surface |
-|---|---|
-| **Stable** | Fixed `event`/`key`/`db` entry schema. Configs `eventstream.enabled`, `stream-prefix`, `events`, `key-filter`, `source-dbs`, `maxlen`, `maxlen-overrides`, `retention-ms`, `max-streams`, `verify-oom`. Commands `EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`. Capture-health counters `forwarded`, `events_lost`, `dropped`, `skipped_*`. Consumption via ordinary Redis Streams (`XREAD` / consumer groups). |
-| **Preview** | `eventstream.cluster-streams per-node` and everything cluster (re-pinning, discovery). The `eventstream-client` cluster consumer helper. `eventstream.firehose`. `eventstream.entry-format` `minimal`/`verbose`/`json` (the `fixed` default is Stable). `eventstream.entry-seq`. `eventstream.auto-group`. `EVENTSTREAM.PRUNE`. |
-| **Internal** | Per-node cluster counters (`repins`, `repins_probe_detected`, `dropped_no_owned_slot`, `dropped_migrating`, `cluster_*`), `registry_errors`, `handler_panics`, and the derived `eviction_risk` flag. Informative, but not an interface to alert wiring against long-term. |
-
-**Promotion bar.** A Preview feature graduates to Stable once it has an
-end-to-end lifecycle test joining it with restart/failover/reshard/discovery as
-applicable, plus an operator-visible failure signal. Cluster discovery and the
-gap-marker lifecycle gained that coverage in
-[#182](https://github.com/joshrotenberg/redis-event-stream-module/issues/182)
-and [#215](https://github.com/joshrotenberg/redis-event-stream-module/issues/215);
-the remaining promotions are tracked toward 1.0 in
-[#114](https://github.com/joshrotenberg/redis-event-stream-module/issues/114).
-
-## Limitations
-
-- `expired` fires when Redis actually removes the key, not at the TTL instant.
-- Hash-field expirations (Redis 7.4+) fire `hexpired`, a distinct event under
-  the hash class that the default `expired` filter does not match: durable
-  field expiry needs `expired,hexpired` (or `@hash`) in `eventstream.events`.
-  `hexpired` has the same removal-time (not TTL-instant) timing as `expired`,
-  and the entry's `key` is the hash key — the expired field name is not part
-  of the keyspace notification (SPEC.md sections 5 and 6).
-- Capture is at-most-once: events during unloaded or disabled windows are not
-  recoverable. The control stream makes the windows *detectable*, not the
-  events *recoverable* — a gap marker bounds when a gap happened, not which
-  keys it touched. Because expired keys are gone from the keyspace, `SCAN`
-  cannot reconstruct them; exact reconciliation of missed expirations needs an
-  application-maintained expiry index that outlives the key (see
-  [docs/loss-windows.md](docs/loss-windows.md)).
-- Clean restarts and crashes are indistinguishable: neither writes a closing
-  marker (structural: the shutdown event fires after the final save; see
-  SPEC.md section 9).
-- Cluster mode: the module refuses to load by default. Setting
-  `eventstream.cluster-streams per-node` enables per-node capture, where each
-  master pins its streams to a slot it owns via a shared hash tag; single-shard
-  clusters are the safest deployment. After a reshard that moves a node's pinned
-  slot, the node re-pins to a slot it still owns and resumes capture on a new
-  tag (the old entries move with the slot to its new owner); events refused
-  during the brief migration window are counted drops delimited by gap markers
-  (SPEC.md section 10; mechanism in
-  [docs/cluster-support.md](docs/cluster-support.md), design history in
-  [docs/cluster-design-history.md](docs/cluster-design-history.md)).
-
-## Performance
-
-The cost per captured event is one `XADD` plus an inline approximate trim, on
-the main thread, in a post-notification job. When loaded but not capturing,
-the per-event cost is the gate checks in the notification callback.
-
-Measured with `bench/run.sh` across the SPEC.md section 11 scenarios (S0: no
-module; S1: loaded, default filter, `SET` workload so nothing is captured;
-S2: `events=set`, every `SET` captured):
-
-| Scenario | ops/sec | vs S0 | p50 (ms) | p99 (ms) |
-|---|---|---|---|---|
-| S0 baseline (no module) | 133262 | - | 0.199 | 0.399 |
-| S1 loaded, no capture | 133262 | +0.0% | 0.207 | 0.407 |
-| S2 loaded, full capture | 114260 | -14.3% | 0.335 | 0.623 |
-
-S1 is within measurement noise of S0. Capture cost scales with captured write
-volume; the default filter captures expirations only.
-
-Method: median of 3 runs, `redis-benchmark -t set -n 1000000 -c 50 --threads 4
--d 64 -r 100000` per run, on Apple M4 Pro (14 cores, 24 GB, macOS 26.5.2)
-against Redis 8.8.0. Numbers vary with hardware and workload; run
-`bench/run.sh` on your own host to reproduce. SPEC.md section 11 specifies
-`memtier_benchmark`; the script uses `redis-benchmark` because it ships with
-every Redis.
-
-Mass expiry is the heaviest case: each expiration becomes an `XADD` on the
-main thread, paced by the server's expire-cycle throttling. The integration
-suite includes a 2000-key staggered-expiry scenario captured with zero drops,
-and `bench/run.sh` measures the drain itself (S3: foreground GET p50/p99 and
-drain duration while an expiring backlog drains, with and without the module)
-plus maxlen sensitivity (S4: the full-capture workload across
-`eventstream.maxlen` values). A scheduled CI job
-([bench.yml](.github/workflows/bench.yml)) runs the reduced matrix nightly
-and gates on relative thresholds only — ratios within one run survive runner
-noise where absolute ops/sec cannot; the thresholds and their rationale live
-in [bench/gate.sh](bench/gate.sh), so changing one is a reviewed change.
+Read [Reliability and delivery](docs/src/reliability.md) before using captured
+events for production work.
 
 ## Documentation
 
-- [SPEC.md](SPEC.md): the authoritative design (architecture, routing, entry
-  schema, configuration, delivery semantics, failure modes).
-- [docs/consumer-patterns.md](docs/consumer-patterns.md): live tail, replay,
-  and event selection, with companion pages for
-  [work queues](docs/work-queues.md), [entry shapes and the
-  firehose](docs/entry-shapes.md), and
-  [cluster consumers](docs/cluster-consumers.md); operator-side retention
-  sizing is [docs/sizing.md](docs/sizing.md).
-- [docs/loss-windows.md](docs/loss-windows.md): every way an event can be
-  lost, how to detect it, and how to reconcile a gap window without a full
-  scan.
-- [docs/cluster-support.md](docs/cluster-support.md): the cluster per-node
-  design (refuse-by-default, slot-pinned per-node tags, re-pinning on reshard).
-- [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+- [Overview](docs/src/overview.md)
+- [Configure capture](docs/src/configure.md)
+- [Consume events](docs/src/consume.md)
+- [Production checklist](docs/src/production.md)
+- [Deployment topologies](docs/src/topologies.md)
+- [Configuration reference](docs/src/reference/configuration.md)
+- [Commands and observability](docs/src/reference/commands-observability.md)
+- [Authoritative specification](SPEC.md)
+
+Runnable consumers are included for
+[Python](examples/python),
+[Go](examples/go),
+[Node.js](examples/node), and
+[Rust](crates/eventstream-client).
+
+## Build and contribute
+
+Build the native module with Rust 1.88 or newer:
+
+```bash
+cargo build --release
+```
+
+The artifact is
+`target/release/libredis_event_stream_module.so` on Linux and `.dylib` on
+macOS. Prebuilt artifacts, checksums, attestations, the consumer client, and a
+Redis Enterprise RAMP bundle are attached to each
+[release](https://github.com/joshrotenberg/redis-event-stream-module/releases).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for tests and development workflows.
+Report security issues through [SECURITY.md](SECURITY.md).
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
-
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall
-be dual licensed as above, without any additional terms or conditions.
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.
