@@ -23,6 +23,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rewrote the README and user documentation around evaluation, integration,
   reliability, and production workflows.
 - Repositioned `demo.sh` as a contributor smoke test.
+- Defined content/value predicates as a downstream consumer concern, keeping
+  the module capture path metadata-only and documenting current-value and
+  removal-event limits.
 
 ### Deprecated
 

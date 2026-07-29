@@ -21,6 +21,29 @@ db
 The ID's millisecond component is the event time. `key` is binary-safe, and
 `db` is the database in which the source event occurred.
 
+## Filter by the current value
+
+The module filters on event name, key name, and source database. It does not
+read or store the affected value. Keeping capture metadata-only avoids adding a
+type-specific read to Redis's atomic notification path and works equally for
+strings, hashes, JSON documents, and module-defined event types.
+
+For a write event, a consumer can apply a content predicate before its side
+effect and `XACK`:
+
+1. read the binary-safe `key` and origin `db` from the stream entry;
+2. select the origin database, when using standalone Redis;
+3. read the value with the appropriate command, such as `GET`, `HGET`, or
+   `JSON.GET`; and
+4. evaluate the predicate in the consumer.
+
+This observes the value at consumption time. A later write or deletion may
+have changed it since the captured event. Removal events such as `expired`,
+`evicted`, and `del` have no readable value at all. When event-time content is
+part of the correctness contract, have the application write an immutable
+domain event or payload to a stream as part of its original operation instead
+of reconstructing it from a keyspace notification.
+
 ## Tail new events
 
 Block until the next expiration:

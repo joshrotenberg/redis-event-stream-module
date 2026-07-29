@@ -19,6 +19,13 @@
 - Exactly-once delivery. Consumers must be idempotent (natural key: stream name plus entry ID).
 - Backfill. Events that occur while the module is unloaded, disabled, or the server is down are not recoverable. This is a live mirror, not a write-ahead log. Gap markers (section 9) make the uncertainty window visible but do not reconstruct which keys it affected: a marker carries no key identities, and for expirations the removed keys are already gone from the keyspace, so exact reconciliation of missed expiration events needs an application-maintained source of truth that outlives the key (docs/src/reliability.md).
 - Capturing key values or payloads. The notification API delivers only the event name and key; for `expired` the value is already gone.
+- Filtering capture by key value or document content. That would require a
+  type-specific key read in the post-notification job, adding work to the
+  server's atomic notification path while remaining impossible for
+  `expired`, `evicted`, and `del`. Consumers may inspect the current value for
+  write events; applications that require the value as it existed at event
+  time must emit an immutable domain event or payload themselves
+  (docs/src/consume.md).
 - Cluster support in v0.1 (see section 10).
 - Capturing `LOADED` or `TRIMMED` class events: `LOADED` fires only while the server loads its dataset, when stream writes are unavailable, and `TRIMMED` fires only during cluster reshard trimming, which is unsupported (section 5). `MISSED` and `NEW` are capturable as of the raw-subscription change (section 5).
 
