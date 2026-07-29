@@ -59,13 +59,19 @@ jobs:
             src
       - name: Check links
         run: |
+          # A Release Please PR links to its comparison tag before that tag
+          # exists. Exclude only the manifest's current version; older release
+          # comparisons remain checked.
+          pending_version="$(jq -er '.["."]' .release-please-manifest.json)"
+          pending_compare="^https://github\.com/joshrotenberg/redis-event-stream-module/compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.v${pending_version}$"
           git ls-files -z '*.md' |
             xargs -0 lychee \
               --no-progress \
               --max-retries 3 \
               --retry-wait-time 2 \
               --exclude '^http://127\.0\.0\.1' \
-              --exclude '^http://localhost'
+              --exclude '^http://localhost' \
+              --exclude "$pending_compare"
       - name: Build book
         run: mdbook build docs
       - name: Exercise the published-image quickstart

@@ -24,6 +24,11 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      - name: Check out the workflow revision
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
       - name: Run Release Please
         id: release
         uses: googleapis/release-please-action@v4
@@ -32,9 +37,38 @@ jobs:
           # pull-request checks. The built-in token is a functional fallback.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Check out the released revision
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        uses: actions/checkout@v7
+      # The webhook sink is intentionally a detached workspace, so the Rust
+      # releaser cannot update its lockfile alongside the root Cargo.lock.
+      # Refresh it on the generated branch before the release PR is reviewed.
+      - name: Refresh detached example lockfile
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          branch="$(jq -er '.headBranchName' <<<"$RELEASE_PR")"
+          git fetch origin "$branch"
+          git switch --force-create "$branch" "origin/$branch"
+
+          cargo update \
+            --manifest-path examples/webhook-sink/Cargo.toml \
+            --package eventstream-client
+          cargo metadata \
+            --manifest-path examples/webhook-sink/Cargo.toml \
+            --locked \
+            --no-deps \
+            >/dev/null
+
+          if git diff --quiet -- examples/webhook-sink/Cargo.lock; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add examples/webhook-sink/Cargo.lock
+          git commit -m "chore: refresh webhook sink lockfile"
+          git push origin "HEAD:$branch"
 
       - name: Append install and verification instructions
         if: ${{ steps.release.outputs.release_created == 'true' }}
