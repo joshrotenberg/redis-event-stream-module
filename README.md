@@ -13,9 +13,11 @@ An expiration, `SET`, `DEL`, or another selected event becomes a stream entry
 written atomically with the keyspace change. Applications consume the entries
 with ordinary Redis commands such as `XREAD`, `XRANGE`, and `XREADGROUP`.
 
-The project is pre-1.0. Standalone Redis and replication/failover are the
-primary targets; OSS Cluster per-node capture and multi-shard Redis Enterprise
-are Preview capabilities.
+The project is pre-1.0, with a documented
+[stability contract](docs/src/stability.md) for the surfaces intended to
+freeze at 1.0. Standalone Redis and replication/failover are the primary
+targets; OSS Cluster per-node capture and multi-shard Redis Enterprise are
+Preview capabilities.
 
 ## Why use it
 

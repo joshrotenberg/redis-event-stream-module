@@ -66,9 +66,9 @@ Redis Enterprise deployments are available as Preview capabilities with extra
 consumer and operational requirements.
 
 The project is pre-1.0. Stable surfaces aim to remain compatible; Preview
-surfaces can change while their lifecycle evidence is completed. The detailed
-contract is tracked in
-[issue #114](https://github.com/joshrotenberg/redis-event-stream-module/issues/114).
+surfaces can change while their lifecycle evidence is completed. The
+[stability contract](stability.md) classifies the module's wire, operational,
+Preview, and internal surfaces and defines how each can evolve.
 
 ## Choose a next step
 
