@@ -80,6 +80,12 @@ entry formats. It consumes per-event streams and deliberately skips
 `<prefix>#firehose`, avoiding duplicate forwarding when both representations
 are enabled.
 
+The record identifies the affected key; it does not contain the key's value.
+If a webhook needs content-based routing, apply the predicate downstream or
+extend the consumer to read the current value before delivery. That read has
+staleness and removal-event limits; see
+[Filter by the current value](consume.md#filter-by-the-current-value).
+
 ## Gap record
 
 The control stream is read through the same consumer group and acknowledgement
