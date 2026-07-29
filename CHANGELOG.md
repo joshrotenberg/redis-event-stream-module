@@ -14,6 +14,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Task-oriented mdBook layout with `mdbook-lint` validation.
 - A normative 1.0 stability contract classifying Stable, Preview, internal,
   and separately versioned surfaces and defining additive evolution rules.
+- A standalone-first webhook sink example with stream discovery,
+  consumer-group recovery, binary-safe JSON records, gap propagation, retry
+  backoff, and acknowledgement after downstream acceptance.
 
 ### Changed
 

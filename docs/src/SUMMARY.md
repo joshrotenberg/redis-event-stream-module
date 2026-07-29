@@ -11,6 +11,7 @@
 
 - [Configure capture](configure.md)
 - [Consume events](consume.md)
+- [Forward streams to a webhook](sink-connector.md)
 - [Reliability and delivery](reliability.md)
 
 # Run it

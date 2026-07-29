@@ -147,7 +147,11 @@ Small runnable consumers live under `examples/`:
 - [Go with go-redis](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/examples/go)
 - [Node.js with ioredis](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/examples/node)
 - [Rust eventstream-client](https://github.com/joshrotenberg/redis-event-stream-module/tree/main/crates/eventstream-client)
+- Rust webhook sink: `examples/webhook-sink`
 
 Each example demonstrates live reads, consumer-group recovery, gap inspection,
-and binary-safe key handling. Read [Reliability and delivery](reliability.md)
-before selecting retention and retry behavior.
+and binary-safe key handling. The webhook sink adds ack-after-delivery and
+downstream gap propagation; see
+[Forward streams to a webhook](sink-connector.md). Read
+[Reliability and delivery](reliability.md) before selecting retention and retry
+behavior.

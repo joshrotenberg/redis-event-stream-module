@@ -103,12 +103,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Python (py_compile)
         run: python3 -m py_compile examples/python/consumer.py
       - name: Node (--check)
         run: node --check examples/node/consumer.js
       - name: Go (vet)
         run: cd examples/go && go vet ./...
+      - name: Webhook sink
+        run: |
+          cargo fmt \
+            --manifest-path examples/webhook-sink/Cargo.toml \
+            -- --check
+          cargo clippy \
+            --manifest-path examples/webhook-sink/Cargo.toml \
+            --all-targets \
+            --locked \
+            -- -D warnings
+          cargo test \
+            --manifest-path examples/webhook-sink/Cargo.toml \
+            --locked
+          cargo +1.88 check \
+            --manifest-path examples/webhook-sink/Cargo.toml \
+            --all-targets \
+            --locked
 
   liveview-demo:
     runs-on: ubuntu-latest
