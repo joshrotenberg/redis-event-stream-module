@@ -827,3 +827,112 @@ Each item is additive (new config key, counter, command, or entry field), so not
 2. **notify-keyspace-events bypass across versions.** Resolved. The integration suite never sets `notify-keyspace-events`, so it only passes if module keyspace subscribers receive events with the setting empty. CI runs the full suite against Redis 7.2.8, 7.4.5, and 8.8.0, so every supported server line empirically pins the bypass. Originally verified by reading Redis 7.2 `src/notify.c` (`moduleNotifyKeyspaceEvent()` runs before the config check); now enforced across the matrix rather than asserted.
 3. **Is an immutable `stream-prefix` acceptable for launch?** Resolved 2026-07-14: keep IMMUTABLE (issue #59, closed not-planned). IMMUTABLE deletes real complexity (dual-prefix guard, cleanup semantics), no concrete need to re-prefix without a restart has appeared, and relaxing later remains non-breaking if one does.
 4. **`module_args_as_configuration` with three config types.** The macro grammar makes each config-type block optional, but the established wrapper guidance says all four sections must be present when module args are enabled. Resolved 2026-07-09 by experiment against the pinned v2.1.3 tag: omitting the enum section fails to compile, but an empty `enum: []` list compiles and works (module loads, `CONFIG GET eventstream.*` lists the real configs, unprefixed module args are applied). The block was kept as `enum: []` with a code comment until issue #60 added the first real enum config (`eventstream.entry-format`); it now holds that entry, defined with the wrapper's `enum_configuration!` macro (variant names are the byte-exact config strings, so they are lowercase).
+
+## 18. Stability contract
+
+<!-- ANCHOR: stability-contract -->
+This section defines the compatibility boundary intended for 1.0. Before 1.0,
+the classifications below are the project's compatibility promise and design
+constraint, but Semantic Versioning still permits a breaking change in a
+minor release. Any such change must be deliberate, documented in the
+changelog, and accompanied by a migration path. At 1.0, changing a Stable
+surface incompatibly requires a major release.
+
+### Stability levels
+
+- **Stable** means names, wire shapes, defaults, and documented semantics are
+  compatibility commitments. Additive growth is allowed as described below.
+- **Preview** means the capability is supported and tested, but its
+  capability-specific names or mechanics may change in a minor release before
+  promotion to Stable.
+- **Internal** means no compatibility promise is made. Applications must not
+  depend on it.
+
+### Stable module surface
+
+The following standalone and replication/failover surfaces are Stable:
+
+- The destination naming and sanitization rules in section 5, including the
+  module-owned `<prefix>#` namespace and the registry, control, and firehose
+  key names.
+- The entry formats and field ordering in section 6. In particular, `fixed`
+  remains the default `event`, `key`, `db` schema; keys remain binary-safe;
+  entries remain in database 0; and every non-`fixed` format carries its
+  discriminator. The optional `seq` field keeps its documented per-process
+  meaning.
+- Every non-Preview configuration key in the authoritative section 7 table:
+  its name, type, default, validation, and load-time or runtime mutability.
+  `eventstream.stream-prefix` remains immutable. Existing enum values keep
+  their meanings.
+- The command names, flags, ACL classification, and reply shapes in section 8:
+  `EVENTSTREAM.STATS`, `EVENTSTREAM.STREAMS`, and `EVENTSTREAM.PRUNE`.
+- The delivery semantics in section 9, including capture atomicity, the
+  at-most-once capture boundary, consumer-group at-least-once processing
+  boundary, and slow-consumer retention limit.
+- The `<prefix>#control` marker schema and the meanings of existing `action`
+  values. New actions may be added, so consumers must tolerate an unknown
+  action while preserving the marker.
+- The INFO field names and definitions in section 13. Counter values are
+  process-lifetime observations, not persisted state; their documented reset
+  behavior is part of the definition.
+- The crate-version encoding exposed through `MODULE LIST` in section 14.
+
+The fixed entry schema, stream naming, configuration table, command replies,
+marker schema, and INFO definitions remain canonical in their existing SPEC
+sections. This contract classifies those definitions; it does not duplicate
+them.
+
+### Additive evolution
+
+A minor release may add:
+
+- a configuration key with a default that preserves existing behavior;
+- an enum value that is used only when an operator selects it;
+- an opt-in entry format with its own discriminator;
+- an entry field gated by an opt-in configuration;
+- a command, command option, counter, INFO field, or marker action; or
+- a new capturable event name or notification class.
+
+Consumers must ignore unknown entry fields where the selected format permits
+them, unknown marker actions, unknown INFO fields, and extra keyed elements in
+command replies. They must not infer a closed vocabulary from today's event
+names or counters.
+
+The following require a major release after 1.0: removing or renaming a Stable
+surface; changing a Stable default incompatibly; reordering or changing the
+meaning of existing entry fields; changing the sanitizer or reserved-key
+rules; reusing an existing marker action for a different transition; or
+weakening the documented delivery boundary. A correction that makes an
+implementation conform to this specification is a bug fix, even when a caller
+had come to rely on the bug.
+
+### Preview surface
+
+OSS Cluster per-node capture and multi-shard Redis Enterprise deployment are
+Preview. The `eventstream.cluster-streams` switch and the basic promise of
+node-local capture are supported, but the exact tag-selection and re-pin
+mechanics, tagged internal key layout, cluster-only marker details, and
+cluster-only INFO fields may change in a minor release before promotion.
+Preview changes still require a changelog entry and migration guidance.
+
+Promotion requires the capability to have a supported deployment runbook,
+consumer discovery and merge guidance, lifecycle and reshard coverage, and CI
+coverage across the supported server matrix. Promotion is a documented
+release event; it is never inferred only from age.
+
+### Internal and separately versioned surfaces
+
+Log wording and ordering, debug traces, benchmark numbers, the LiveView
+observatory UI, contributor scripts, raw-FFI workarounds, and source-module
+organization are Internal.
+
+The `eventstream-client` Rust crate and CLI are supported conveniences but are
+versioned as their own pre-1.0 package surface. They do not define the module's
+wire contract; applications can always consume the Stable surface through
+ordinary Redis commands.
+
+The minimum Redis version, Rust MSRV, release artifact platform list, and
+third-party dependency versions are support-policy choices rather than wire
+formats. A floor may rise in a minor release, never a patch release, and must
+be called out in the changelog and upgrading guide.
+<!-- ANCHOR_END: stability-contract -->

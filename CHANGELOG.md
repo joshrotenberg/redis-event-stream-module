@@ -12,6 +12,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Redis lifecycles, live module reconfiguration, routed commands, generated
   workloads, node-aware event lanes, and a self-contained Docker image.
 - Task-oriented mdBook layout with `mdbook-lint` validation.
+- A normative 1.0 stability contract classifying Stable, Preview, internal,
+  and separately versioned surfaces and defining additive evolution rules.
 
 ### Changed
 

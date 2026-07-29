@@ -24,6 +24,7 @@
 
 - [Configuration reference](reference/configuration.md)
 - [Commands and observability](reference/commands-observability.md)
+- [Stability contract](stability.md)
 
 # Project
 
