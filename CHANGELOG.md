@@ -31,11 +31,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Expanded documentation CI to lint every tracked README and check links in
   every tracked Markdown file automatically.
 
-### Deprecated
+### Removed
 
-- The `eventstream_web` Rust/SSE example is superseded by the LiveView
-  observatory. It remains for one release of notice and is scheduled for
-  removal under issue #234; the `eventstream-client` CLI and library remain
+- Removed the legacy `eventstream_web` Rust/SSE example in favor of the
+  LiveView observatory. The `eventstream-client` CLI and library remain
   supported.
 
 ## [0.3.0] - 2026-07-16
