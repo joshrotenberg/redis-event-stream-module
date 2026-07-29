@@ -7,7 +7,7 @@ name: Chaos
 # properties. It is too slow and the failover/sentinel scenarios too
 # timing-sensitive to gate PRs (see chaos/README.md), so it runs weekly
 # instead: enough to catch a regression within a week of it landing on main,
-# which matches how this module ships (manual releases).
+# before the human-gated Release Please PR is merged.
 #
 # Trigger choice: weekly schedule + manual dispatch, NOT pull_request/push.
 # Server: the newest line in ci.yml's matrix only (redis 8.8.0), reusing the
