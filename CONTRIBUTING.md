@@ -112,9 +112,10 @@ null-pointer guard on the raw keyspace callback's event-name pointer, and the
 event-name panic, RedisLabsModules/redismodule-rs#472) — so it is never bumped
 blindly. Standing policy:
 
-- **Re-verify cadence.** At each release prep, check whether redismodule-rs has
-  tagged a release newer than the pin. (Optional low-noise automation, not yet
-  added: a scheduled workflow that opens an issue when a newer tag appears.)
+- **Re-verify cadence.** At each Release Please PR, check whether
+  redismodule-rs has tagged a release newer than the pin. (Optional low-noise
+  automation, not yet added: a scheduled workflow that opens an issue when a
+  newer tag appears.)
 - **Bump gate.** Every pin bump must pass the full CI integration matrix
   (SPEC.md section 14) *and* a re-check that each workaround above is still
   needed against the new tag — a fixed defect means the workaround becomes
@@ -125,32 +126,38 @@ blindly. Standing policy:
   `min-redis-compatibility-version-7-2` feature, the
   `module_args_as_configuration` configuration API (all config types plus the
   `enum` block), the raw keyspace-notification subscription surface, and
-  `info_command_handler`. Unpinning is also the precondition that would unblock
-  an automated release-plz flow (release-plz.toml).
+  `info_command_handler`.
 - **Publishing this crate to crates.io stays disabled** (`publish = false`): it
-  is a cdylib loaded as a compiled artifact, not a Rust library dependency
-  (release-plz.toml). This is settled; revisit only if the crate grows a
-  reusable library surface.
+  is a cdylib loaded as a compiled artifact, not a Rust library dependency.
+  This is settled; revisit only if the crate grows a reusable library surface.
 
 ## Releasing
 
-Releases are two manual steps plus one automated step:
+Merges to `main` make `.github/workflows/release-please.yml` create or update
+one human-gated release PR from Conventional Commit subjects:
 
-1. Open a "chore: release prep for vX.Y.Z" PR that bumps `version` in
-   `Cargo.toml` and adds a `## [X.Y.Z]` section at the top of `CHANGELOG.md`.
-2. Merge it to main.
-3. Tag the merged commit and push the tag:
+- `feat:` proposes a minor release and `fix:` proposes a patch release.
+- A `!` before the colon or a `BREAKING CHANGE:` footer proposes a breaking
+  release. Before 1.0, breaking changes bump the minor version so a stray
+  subject cannot create 1.0 accidentally.
+- Documentation, CI, and other configured commit types appear in the changelog
+  when a releasable `feat:` or `fix:` is present.
 
-   ```sh
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
+Merging the release PR updates the root module and `eventstream-client`
+versions, `Cargo.lock`, `CHANGELOG.md`, and the Release Please manifest. The
+next workflow run creates the `vX.Y.Z` tag and GitHub release, appends the
+install/verification notes, and directly calls the reusable artifact workflow.
+That workflow builds and attaches the `.so`/`.dylib` files and consumer binaries
+for Linux and macOS, publishes the Redis and Valkey images, builds the RAMP
+bundle, writes sha256 checksums, and records Sigstore build-provenance
+attestations. It does not publish either Rust package to crates.io.
 
-The tag push triggers `.github/workflows/release.yml`, which verifies that the
-tag, `Cargo.toml`, and the top CHANGELOG section all agree, creates the GitHub
-release from that CHANGELOG section, then builds and attaches the prebuilt
-`.so`/`.dylib` artifacts (linux-x86_64, linux-aarch64, macos-aarch64,
-macos-x86_64) with sha256 checksums and Sigstore build-provenance attestations.
-release-plz does not release this crate; see `release-plz.toml` for why.
+Configure an Actions secret named `RELEASE_PLEASE_TOKEN` with a suitable
+fine-grained PAT or GitHub App token so the generated release PR triggers the
+normal pull-request checks. Without it, Release Please falls back to
+`GITHUB_TOKEN`; the PR and release still work, but GitHub suppresses workflow
+runs caused by that token. To recover artifact publication for an existing
+release, manually dispatch **Release artifacts** with its tag.
 
 ## Reporting problems
 

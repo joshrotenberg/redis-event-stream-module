@@ -9,7 +9,7 @@ name: Bench
 # Trigger choice: nightly schedule + manual dispatch, NOT pull requests. The
 # job takes several minutes and a noisy runner could flake a PR; a nightly
 # run still catches a capture-path regression within a day of it landing on
-# main, which matches how this module ships (manual releases). Revisit once
+# main, before the human-gated Release Please PR is merged. Revisit once
 # scheduled runs establish real variance.
 on:
   schedule:

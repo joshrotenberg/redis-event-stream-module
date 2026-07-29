@@ -13,16 +13,21 @@ permissions:
   packages: write
 
 on:
-  release:
-    types: [published]
-  # Called by release.yml after it creates the release from a pushed tag.
-  # Releases created by a workflow using GITHUB_TOKEN do not emit a
-  # `release: published` event, so the automated path invokes this workflow
-  # directly and passes the tag rather than relying on that trigger (#85).
+  # Called directly by release-please.yml after Release Please creates the
+  # tag and GitHub release. Direct invocation works with either the built-in
+  # GITHUB_TOKEN or a configured PAT and cannot double-run from a release event.
   workflow_call:
     inputs:
       tag:
         description: "Release tag to upload artifacts to."
+        required: true
+        type: string
+  # Recovery path for rebuilding or reattaching artifacts to an existing
+  # release without recreating its tag or release notes.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to upload artifacts to."
         required: true
         type: string
   # Self-validation: build (but do not upload to a release or push an image)
@@ -167,13 +172,12 @@ jobs:
           echo "artifact loads cleanly"
 
       - name: Upload to the release
-        # release: published (manual/UI release) or workflow_call from
-        # release.yml (github.event_name is the caller's `push`); the only
-        # non-uploading path is the PR self-validation build.
+        # workflow_call from Release Please or a manual recovery dispatch; the
+        # only non-uploading path is the PR self-validation build.
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           gh release upload "$TAG" \
             "dist/${{ steps.pkg.outputs.name }}" \
@@ -226,11 +230,8 @@ jobs:
           SUFFIX="${{ matrix.suffix }}"
           TAGS="${IMAGE}:${VERSION}${SUFFIX}"
           # `latest` (and the bare `-valkey8` moving tag) on any publishing
-          # run: a UI `release: published` event or the automated tag-push
-          # path (release.yml calls this via workflow_call, where
-          # github.event_name is the caller's `push`; a GITHUB_TOKEN-created
-          # release emits no `release: published`, see #85). Never on the PR
-          # self-validation build.
+          # run: workflow_call from Release Please or manual recovery. Never
+          # on the PR self-validation build.
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             if [ -n "$SUFFIX" ]; then
               TAGS="${TAGS},${IMAGE}:latest${SUFFIX}"
@@ -245,11 +246,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        # Any non-PR run publishes: the UI `release: published` event or the
-        # automated path (release.yml -> workflow_call, where
-        # github.event_name is the caller's `push` and a GITHUB_TOKEN-created
-        # release emits no `release: published`, see #85). PR self-validation
-        # never logs in or pushes.
+        # Any non-PR run publishes: the Release Please workflow_call or a
+        # manual recovery dispatch. PR self-validation never logs in or pushes.
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
@@ -281,7 +279,7 @@ jobs:
           # only place that says why.
           trap 'echo "=== es-smoke logs ==="; docker logs es-smoke 2>&1 || true' EXIT
           docker run -d --name es-smoke -p 6399:6379 "eventstream-ci:${{ matrix.name }}"
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             if docker exec es-smoke redis-cli PING 2>/dev/null | grep -q PONG; then
               break
             fi
@@ -290,9 +288,7 @@ jobs:
           docker exec es-smoke redis-cli MODULE LIST | grep -q eventstream
           echo "image loads the module cleanly"
 
-      # Release: multi-arch manifest pushed to GHCR on any non-PR run (see the
-      # login step above for why this is `!= 'pull_request'` and not
-      # `== 'release'`: the automated tag-push path never has event `release`).
+      # Release: multi-arch manifest pushed to GHCR on any non-PR run.
       - name: Build and push image (release)
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
@@ -325,17 +321,28 @@ jobs:
           python-version: "3.11"
 
       - name: Install ramp-packer and a modern redis-server
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
         run: |
           set -euo pipefail
-          pip install ramp-packer
-          sudo apt-get update
-          sudo apt-get install -y lsb-release curl gpg
-          curl -fsSL https://packages.redis.io/gpg \
-            | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+          pip install --retries 3 --timeout 30 ramp-packer
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y lsb-release curl gpg
+          curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            -fsSL https://packages.redis.io/gpg \
+            | sudo gpg --batch --yes --dearmor \
+              -o /usr/share/keyrings/redis-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/redis.list
-          sudo apt-get update
-          sudo apt-get install -y redis
+          sudo apt-get -o Acquire::Retries=3 update
+          # The runner only needs the binary. Prevent the package post-install
+          # from trying to start a long-lived system service.
+          printf '#!/bin/sh\nexit 101\n' \
+            | sudo tee /usr/sbin/policy-rc.d >/dev/null
+          sudo chmod 0755 /usr/sbin/policy-rc.d
+          sudo apt-get -o Acquire::Retries=3 install -y redis
           redis-server --version
 
       - name: Build release cdylib
@@ -363,14 +370,11 @@ jobs:
           echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to the release
-        # Mirror the .so upload: fire on any non-PR run and take the tag from
-        # inputs.tag (workflow_call / automated path) or the release event, so
-        # the automated tag-push path uploads too -- github.event.release is
-        # empty there (see #85).
+        # Mirror the .so upload for Release Please and manual recovery runs.
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           gh release upload "$TAG" \
             "dist/${{ steps.pkg.outputs.zip }}" \

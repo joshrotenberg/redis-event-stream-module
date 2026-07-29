@@ -4,39 +4,6 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- Phoenix LiveView observatory with wrapper-owned standalone and three-master
-  Redis lifecycles, live module reconfiguration, routed commands, generated
-  workloads, node-aware event lanes, and a self-contained Docker image.
-- Task-oriented mdBook layout with `mdbook-lint` validation.
-- A normative 1.0 stability contract classifying Stable, Preview, internal,
-  and separately versioned surfaces and defining additive evolution rules.
-- A standalone-first webhook sink example with stream discovery,
-  consumer-group recovery, binary-safe JSON records, gap propagation, retry
-  backoff, and acknowledgement after downstream acceptance.
-
-### Changed
-
-- Rewrote the README and user documentation around evaluation, integration,
-  reliability, and production workflows.
-- Repositioned `demo.sh` as a contributor smoke test.
-- Defined content/value predicates as a downstream consumer concern, keeping
-  the module capture path metadata-only and documenting current-value and
-  removal-event limits.
-- Changed the Rust consumer's `Entry` model to preserve arbitrary Redis key
-  bytes instead of decoding them as lossy UTF-8.
-- Expanded documentation CI to lint every tracked README and check links in
-  every tracked Markdown file automatically.
-
-### Removed
-
-- Removed the legacy `eventstream_web` Rust/SSE example in favor of the
-  LiveView observatory. The `eventstream-client` CLI and library remain
-  supported.
-
 ## [0.3.0] - 2026-07-16
 
 Packaging and operability release: a preloaded container image, a Redis

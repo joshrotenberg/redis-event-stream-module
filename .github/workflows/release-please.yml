@@ -1,0 +1,63 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+# Release Please maintains the release PR, tag, and GitHub release. The
+# reusable artifact workflow receives its own narrower publishing permissions.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Maintain release PR
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          # A PAT or GitHub App token lets the generated release PR run normal
+          # pull-request checks. The built-in token is a functional fallback.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Check out the released revision
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/checkout@v7
+
+      - name: Append install and verification instructions
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json body --jq .body > notes.md
+          if ! grep -q '^## Install$' notes.md; then
+            cat .github/release-install-notes.md >> notes.md
+            gh release edit "$TAG" --notes-file notes.md
+          fi
+
+  artifacts:
+    name: Build and attach artifacts
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/release-artifacts.yml
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      packages: write
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
