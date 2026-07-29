@@ -26,6 +26,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Defined content/value predicates as a downstream consumer concern, keeping
   the module capture path metadata-only and documenting current-value and
   removal-event limits.
+- Changed the Rust consumer's `Entry` model to preserve arbitrary Redis key
+  bytes instead of decoding them as lossy UTF-8.
+- Expanded documentation CI to lint every tracked README and check links in
+  every tracked Markdown file automatically.
 
 ### Deprecated
 
