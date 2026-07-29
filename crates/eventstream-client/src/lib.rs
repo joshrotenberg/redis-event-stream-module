@@ -364,7 +364,9 @@ pub struct Entry {
     pub stream: String,
     pub id: String,
     pub event: String,
-    pub key: String,
+    /// The exact Redis key bytes. Redis keys are binary-safe, so consumers
+    /// must choose their own text or encoding representation at the boundary.
+    pub key: Vec<u8>,
     pub db: String,
 }
 
@@ -383,7 +385,14 @@ impl Entry {
             stream: stream.to_string(),
             id: id.to_string(),
             event: field("event"),
-            key: field("key"),
+            key: map
+                .get("key")
+                .map(|value| match value {
+                    Value::BulkString(bytes) => bytes.clone(),
+                    Value::SimpleString(value) => value.as_bytes().to_vec(),
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default(),
             db: field("db"),
         }
     }
@@ -405,7 +414,11 @@ impl std::fmt::Display for Entry {
         write!(
             f,
             "{:<16} {:>14}  {:<8} db={} key={}",
-            self.stream, self.id, self.event, self.db, self.key
+            self.stream,
+            self.id,
+            self.event,
+            self.db,
+            self.key.escape_ascii()
         )
     }
 }
@@ -546,7 +559,7 @@ pub struct GapMarker {
     pub stream: String,
     /// The marker's entry ID.
     pub id: String,
-    /// `enabled`, `disabled`, `repinned`, or `flushed`.
+    /// `loaded`, `unloading`, `enabled`, `disabled`, `repinned`, or `flushed`.
     pub action: String,
     /// For `flushed`, the flushed database (`-1` == `FLUSHALL`); else `None`.
     pub db: Option<i64>,
@@ -636,12 +649,29 @@ mod tests {
             stream: String::new(),
             id: id.to_string(),
             event: String::new(),
-            key: String::new(),
+            key: Vec::new(),
             db: String::new(),
         };
         assert!(mk("100-0").sort_key() < mk("100-1").sort_key());
         assert!(mk("100-9").sort_key() < mk("101-0").sort_key());
         assert_eq!(mk("bad").sort_key(), (0, 0));
+    }
+
+    #[test]
+    fn entry_preserves_binary_key_bytes() {
+        let key = vec![0xff, 0x00, b'a'];
+        let map = HashMap::from([
+            ("event".to_string(), Value::BulkString(b"set".to_vec())),
+            ("key".to_string(), Value::BulkString(key.clone())),
+            ("db".to_string(), Value::BulkString(b"0".to_vec())),
+        ]);
+
+        let entry = Entry::from("events:set", "1-0", &map);
+
+        assert_eq!(entry.key, key);
+        assert_eq!(entry.event, "set");
+        assert_eq!(entry.db, "0");
+        assert!(format!("{entry}").ends_with(r"key=\xff\x00a"));
     }
 
     #[test]

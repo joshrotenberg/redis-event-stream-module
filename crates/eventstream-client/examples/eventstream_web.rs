@@ -171,7 +171,7 @@ fn serve_events(mut stream: TcpStream, url: &str, prefix: &str) {
                 jstr(&e.stream),
                 jstr(&e.id),
                 jstr(&e.event),
-                jstr(&e.key),
+                jstr(&String::from_utf8_lossy(&e.key)),
                 jstr(&e.db),
             );
             if send(&mut stream, "entry", &json).is_err() {
@@ -251,9 +251,8 @@ fn send(stream: &mut TcpStream, event: &str, data: &str) -> std::io::Result<()> 
 }
 
 /// A JSON string literal (quotes included), escaping the characters JSON
-/// requires. `Entry`/`GapMarker` fields are already lossy-decoded (non-UTF-8
-/// key bytes became the U+FFFD marker), so this only needs to make the text
-/// JSON-safe, not byte-safe.
+/// requires. The client library retains exact key bytes; this deprecated
+/// browser demo renders them lossily at its JSON/display boundary.
 fn jstr(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

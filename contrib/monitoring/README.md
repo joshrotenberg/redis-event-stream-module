@@ -4,7 +4,7 @@ Deployable Prometheus + Grafana artifacts for `redis-event-stream-module`. This
 is the [SPEC.md](../../SPEC.md) section 13 alerting-guidance table turned into
 files you can load, instead of prose each operator re-derives by hand.
 
-```
+```text
 exporter/eventstream-textfile.sh    scrape INFO eventstream -> Prometheus text
 prometheus/eventstream.rules.yml    recording + alert rules (the section 13 table)
 prometheus/prometheus.yml           example scrape config for the stack below
