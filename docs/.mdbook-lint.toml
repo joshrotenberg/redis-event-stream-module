@@ -1,0 +1,44 @@
+# Long commands and generated SPEC tables are more readable unwrapped. Bare
+# URL/proper-name rules misread badge targets and package names. The disabled
+# content rules are editorial heuristics rather than correctness checks; the
+# structural, link, include, heading, table, and Markdown rules remain active.
+# MDBOOK010-012 are experimental in 0.15 and currently misread code-span `$`
+# characters and named include anchors that mdBook itself supports.
+disabled-rules = [
+  "MD013",
+  "MD034",
+  "MD044",
+  "MDBOOK010",
+  "MDBOOK011",
+  "MDBOOK012",
+  "CONTENT003",
+  "CONTENT004",
+  "CONTENT005",
+  "CONTENT007",
+  "CONTENT010",
+  "CONTENT011",
+]
+
+[MD003]
+style = "atx"
+
+[MD004]
+style = "dash"
+
+[MD007]
+indent = 2
+
+[MD029]
+style = "ordered"
+
+[MD046]
+style = "fenced"
+
+[MD048]
+style = "backtick"
+
+[MD049]
+style = "asterisk"
+
+[MD050]
+style = "asterisk"

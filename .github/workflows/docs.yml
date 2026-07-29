@@ -14,7 +14,9 @@ on:
       - "CONTRIBUTING.md"
       - "SECURITY.md"
       - "CHANGELOG.md"
-      - "book.toml"
+      - "README.md"
+      - "demos/liveview/README.md"
+      - "examples/**/README.md"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -23,7 +25,9 @@ on:
       - "CONTRIBUTING.md"
       - "SECURITY.md"
       - "CHANGELOG.md"
-      - "book.toml"
+      - "README.md"
+      - "demos/liveview/README.md"
+      - "examples/**/README.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -45,9 +49,71 @@ jobs:
       - name: Install mdBook
         uses: taiki-e/install-action@v2
         with:
-          tool: mdbook
-      - name: Build
-        run: mdbook build
+          tool: mdbook@0.5.3
+      - name: Install mdbook-lint
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook-lint@0.15.0
+      - name: Install lychee
+        uses: taiki-e/install-action@v2
+        with:
+          tool: lychee@0.24.2
+      - name: Lint Markdown
+        run: |
+          mdbook-lint lint --standard-only \
+            --config docs/.mdbook-lint.toml \
+            --fail-on-warnings \
+            README.md \
+            demos/liveview/README.md \
+            examples/python/README.md \
+            examples/go/README.md \
+            examples/node/README.md
+          cd docs
+          mdbook-lint lint \
+            --config .mdbook-lint.toml \
+            --fail-on-warnings \
+            src
+      - name: Check links
+        run: |
+          lychee \
+            --no-progress \
+            --max-retries 3 \
+            --retry-wait-time 2 \
+            --exclude '^http://127\.0\.0\.1' \
+            --exclude '^http://localhost' \
+            README.md \
+            docs/src \
+            demos/liveview/README.md \
+            examples/python/README.md \
+            examples/go/README.md \
+            examples/node/README.md
+      - name: Build book
+        run: mdbook build docs
+      - name: Exercise the published-image quickstart
+        run: |
+          set -euo pipefail
+          name=eventstream-docs-smoke
+          cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run --name "$name" -d \
+            ghcr.io/joshrotenberg/redis-event-stream-module:latest
+          ready=no
+          for _ in $(seq 1 30); do
+            if docker exec "$name" redis-cli PING | grep -q PONG; then
+              ready=yes
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = yes
+          docker exec "$name" redis-cli \
+            SET quickstart:session active PX 500
+          sleep 1
+          docker exec "$name" redis-cli \
+            GET quickstart:session >/dev/null
+          docker exec "$name" redis-cli --raw \
+            XRANGE events:expired - + |
+            grep -F quickstart:session
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:

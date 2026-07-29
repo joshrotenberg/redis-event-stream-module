@@ -1,0 +1,30 @@
+# Summary
+
+[Overview](overview.md)
+
+# Get started
+
+- [Quickstart](quickstart.md)
+- [Live observatory](observatory.md)
+
+# Build with it
+
+- [Configure capture](configure.md)
+- [Consume events](consume.md)
+- [Reliability and delivery](reliability.md)
+
+# Run it
+
+- [Production checklist](production.md)
+- [Monitoring](monitoring.md)
+- [Upgrading](upgrading.md)
+- [Deployment topologies](topologies.md)
+
+# Reference
+
+- [Configuration reference](reference/configuration.md)
+- [Commands and observability](reference/commands-observability.md)
+
+# Project
+
+- [Project links](project.md)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Consumer examples for redis-event-stream-module (issue #110), ioredis.
 //
-// Subcommands map 1:1 to docs/consumer-patterns.md:
+// Subcommands map to docs/src/consume.md:
 //   tail       live tail (pub/sub replacement)
 //   work       durable work queue (consumer groups) + stuck-work recovery
 //   reconcile  delimit capture gaps from the control stream's markers
@@ -128,7 +128,7 @@ async function work(r) {
 
 // Pair open markers (disabled/unloading) with the next close (enabled/loaded)
 // to print bounded capture-gap windows. Marker IDs are ms timestamps, usable
-// directly as XRANGE bounds (see docs/loss-windows.md).
+// directly as XRANGE bounds (see docs/src/reliability.md).
 async function reconcile(r) {
   const entries = await r.xrangeBuffer(CONTROL, "-", "+");
   if (!entries || entries.length === 0) {

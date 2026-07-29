@@ -1,4 +1,4 @@
 /target
 dump.rdb
-# mdBook build output (book.toml src = "docs"; output goes to /book)
+# mdBook build output (docs/book.toml sets build-dir = "../book")
 /book

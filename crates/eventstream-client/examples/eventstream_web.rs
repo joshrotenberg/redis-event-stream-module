@@ -1,5 +1,7 @@
-//! Web live-events demo (issue #113): a browser page showing captured events
-//! lighting up live, fed by a tiny SSE bridge.
+//! Deprecated web live-events demo.
+//!
+//! Use `demos/liveview` for the canonical interactive experience. This bridge
+//! remains for one release of notice and is then removed under issue #234.
 //!
 //! Strictly consumer-side and read-only against Redis (XREAD / XLEN / INFO /
 //! EVENTSTREAM.STREAMS / CLUSTER NODES, all via the `eventstream_client`
@@ -61,6 +63,9 @@ fn parse_args() -> Args {
 }
 
 fn main() {
+    eprintln!(
+        "warning: eventstream_web is deprecated; use the LiveView observatory in demos/liveview"
+    );
     let args = parse_args();
     // Fail fast if the target is unreachable, before binding the listener.
     if let Err(e) = Target::detect(&args.url, &args.prefix) {

@@ -1,6 +1,6 @@
 // Consumer examples for redis-event-stream-module (issue #110), go-redis/v9.
 //
-// Subcommands map 1:1 to docs/consumer-patterns.md:
+// Subcommands map to docs/src/consume.md:
 //
 //	tail       live tail (pub/sub replacement)
 //	work       durable work queue (consumer groups) + stuck-work recovery
@@ -159,7 +159,7 @@ func reclaim(r *redis.Client, consumer string) error {
 
 // reconcile pairs open markers (disabled/unloading) with the next close
 // (enabled/loaded) to print bounded capture-gap windows. Marker IDs are ms
-// timestamps, usable directly as XRANGE bounds (see docs/loss-windows.md).
+// timestamps, usable directly as XRANGE bounds (see docs/src/reliability.md).
 func reconcile(r *redis.Client) error {
 	msgs, err := r.XRange(ctx, control, "-", "+").Result()
 	if err != nil {

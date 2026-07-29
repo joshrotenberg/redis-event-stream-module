@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Consumer examples for redis-event-stream-module (issue #110), redis-py.
 
-Three subcommands, mapping 1:1 to docs/consumer-patterns.md:
+Three subcommands, mapping to docs/src/consume.md:
     tail       live tail (pub/sub replacement)
     work       durable work queue (consumer groups) + stuck-work recovery
     reconcile  delimit capture gaps from the control stream's markers
@@ -127,7 +127,7 @@ def reclaim(r):
 def reconcile(r):
     """Pair open markers (disabled/unloading) with the next close (enabled/loaded)
     to print bounded capture-gap windows. Marker IDs are ms timestamps, so a
-    window is directly usable as an XRANGE bound (see docs/loss-windows.md)."""
+    window is directly usable as an XRANGE bound (see docs/src/reliability.md)."""
     entries = r.xrange(CONTROL, "-", "+")
     if not entries:
         print("no control stream yet (module never wrote a marker)")
@@ -156,7 +156,7 @@ def discover(r):
     names = r.execute_command("EVENTSTREAM.STREAMS")
     for name in names:
         # name is bytes; the control/firehose streams live under events:# and
-        # are not event data (docs/consumer-patterns.md, Discovery).
+        # are not event data (docs/src/consume.md, Discover streams).
         if name.startswith(b"events:#"):
             continue
         length = r.xlen(name)
