@@ -67,7 +67,8 @@ jobs:
             demos/liveview/README.md \
             examples/python/README.md \
             examples/go/README.md \
-            examples/node/README.md
+            examples/node/README.md \
+            examples/webhook-sink/README.md
           cd docs
           mdbook-lint lint \
             --config .mdbook-lint.toml \
@@ -86,7 +87,8 @@ jobs:
             demos/liveview/README.md \
             examples/python/README.md \
             examples/go/README.md \
-            examples/node/README.md
+            examples/node/README.md \
+            examples/webhook-sink/README.md
       - name: Build book
         run: mdbook build docs
       - name: Exercise the published-image quickstart

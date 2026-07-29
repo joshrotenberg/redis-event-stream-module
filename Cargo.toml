@@ -11,7 +11,7 @@ members = ["crates/eventstream-client"]
 # The cargo-fuzz crate (issue #131) is its own detached workspace: it needs
 # nightly + libFuzzer and links this crate as an rlib, so it must stay out of
 # the stable root workspace that CI builds/lints/tests.
-exclude = ["fuzz"]
+exclude = ["fuzz", "examples/webhook-sink"]
 # Both members are default, so a bare root command (cargo build/clippy/test)
 # spans the module (".") and the client. Without this, a root package that is
 # also the workspace root makes cargo default to the root package alone, which

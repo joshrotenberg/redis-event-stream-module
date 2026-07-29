@@ -1,4 +1,5 @@
 /target
+/examples/webhook-sink/target
 dump.rdb
 # mdBook build output (docs/book.toml sets build-dir = "../book")
 /book
