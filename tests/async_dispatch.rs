@@ -200,6 +200,40 @@ fn envelope_mode_reduces_xadds_but_preserves_logical_order_and_accounting() {
 }
 
 #[test]
+fn failed_envelope_counts_logical_loss_and_one_physical_drop() {
+    const BATCH_COUNT: i64 = 64;
+    let s = TestServer::start(&[
+        "events",
+        "set",
+        "maxlen",
+        "0",
+        "write-mode",
+        "envelope",
+        "async-queue-capacity",
+        "256",
+        "async-batch-size",
+        "64",
+        "async-max-wait-ms",
+        "60000",
+    ]);
+    let mut c = s.conn();
+    let _: () = c
+        .set("events:set", "wrong-type")
+        .expect("occupy destination with a string");
+
+    set_pipeline(&mut c, BATCH_COUNT);
+    wait_until(Duration::from_secs(15), "batch failure counted", || {
+        info_field(&mut c, "events_lost") == BATCH_COUNT
+    });
+
+    assert_eq!(info_field(&mut c, "async_enqueued"), BATCH_COUNT);
+    assert_eq!(info_field(&mut c, "async_fallbacks"), 0);
+    assert_eq!(info_field(&mut c, "dropped_xadd_error"), 1);
+    assert_eq!(info_field(&mut c, "dropped"), 1);
+    assert_eq!(info_field(&mut c, "forwarded"), 0);
+}
+
+#[test]
 fn unload_drains_accepted_backlog_without_waiting_for_batch_deadline() {
     let s = TestServer::start(&[
         "events",

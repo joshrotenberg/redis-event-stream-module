@@ -65,12 +65,39 @@ image pulls. It then executes one million `SET` requests in each scenario:
 |---|---|
 | `s0` | Same Redis binary from the module image, module not loaded |
 | `s1` | Module loaded with its default expiration-only filter |
-| `s2` | Module loaded with `events set`, so every request is captured |
+| `s2` | Module loaded with `events set`, so every request is captured through the stable default |
+| `s2-sync` | Explicit stable `write-mode sync` control |
+| `s2-individual` | Preview bounded worker, one `XADD` per event |
+| `s2-envelope` | Preview bounded worker with `batch-v1` envelopes |
 
 The default workload is 50 clients, two load-generator threads, 64-byte values,
 and a 100,000-key keyspace. Override it with `BENCH_REQUESTS`,
 `BENCH_CLIENTS`, `BENCH_THREADS`, `BENCH_PAYLOAD`, `BENCH_KEYSPACE`, or
 `BENCH_MAXLEN`.
+
+`BENCH_CAPTURE_SCENARIOS` replaces the default `s2` capture scenario with one
+or more whitespace-separated `s2*` variants. Preview worker tuning is supplied
+through `BENCH_ASYNC_QUEUE_CAPACITY`, `BENCH_ASYNC_BATCH_SIZE`, and
+`BENCH_ASYNC_MAX_WAIT_MS`.
+
+To benchmark code that has not yet shipped in the pinned image, set
+`BENCH_MODULE_SOURCE_COMMIT` to `HEAD` or a pushed Git commit. The server
+downloads that revision, builds the module in the repository's container build
+stage, and bind-mounts the resulting artifact into the otherwise pinned runtime
+image:
+
+```sh
+BENCH_MODULE_SOURCE_COMMIT=HEAD \
+BENCH_CAPTURE_SCENARIOS="s2-sync s2-envelope" \
+BENCH_ASYNC_QUEUE_CAPACITY=1048576 \
+BENCH_ASYNC_BATCH_SIZE=256 \
+BENCH_ASYNC_MAX_WAIT_MS=1 \
+./lab.sh run
+```
+
+The exact source commit and built artifact SHA-256 are recorded in
+`result.json`. The commit must be available from
+`BENCH_MODULE_SOURCE_REPO`, which defaults to this GitHub repository.
 
 For a repeated concurrency sweep, provide whitespace-separated client levels
 and repetition counts:
@@ -134,7 +161,8 @@ The runner fails unless:
 
 - `s0` has no module loaded;
 - `s1` loads the module and forwards no `SET` events;
-- `s2` forwards exactly one event per request; and
+- every selected `s2*` capture variant forwards exactly one logical event per
+  request; and
 - `events_lost`, `dropped`, and `handler_panics` remain zero.
 
 ## Observed runs
@@ -143,11 +171,13 @@ The runner fails unless:
 - [2026-07-30: higher-concurrency ramp probe][ramp]
 - [2026-07-30: instrumented single-node sweep][sweep]
 - [2026-07-30: full-capture CPU profile][capture-profile]
+- [2026-07-30: async and batch write spike][async-batch]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
 [sweep]: observations/2026-07-30-instrumented-sweep.md
 [capture-profile]: observations/2026-07-30-capture-profile.md
+[async-batch]: observations/2026-07-30-async-batch-spike.md
 
 ## Image pins
 

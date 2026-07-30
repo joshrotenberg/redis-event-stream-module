@@ -21,6 +21,39 @@ db
 The ID's millisecond component is the event time. `key` is binary-safe, and
 `db` is the database in which the source event occurred.
 
+## Decode Preview batch envelopes
+
+The stable default writes one fixed-format stream entry per logical event.
+Preview `eventstream.write-mode envelope` can combine a compatible run into
+one physical entry:
+
+```text
+1785349757949-0
+format
+batch-v1
+count
+2
+events
+[{"event":"set","key":"c2Vzc2lvbjo0Mg==","db":0,"class":"string"},{"event":"set","key":"Y2FjaGU6Nw==","db":0,"class":"string"}]
+```
+
+`events` is an ordered JSON array, and `key` is padded RFC 4648 base64 because
+Redis keys are arbitrary bytes. The natural identity of one logical event is:
+
+```text
+<stream name>/<entry ID>/<zero-based array index>
+```
+
+Queue-pressure fallback entries retain the default `event`/`key`/`db` shape,
+so an envelope-mode consumer must decode both shapes in the same stream.
+Consumer-group acknowledgement remains per physical entry: acknowledge an
+envelope only after every logical event in it has been handled durably and
+idempotently.
+
+Envelope mode is default-off Preview. It uses more Redis process CPU, relaxes
+command-unit atomicity, and makes `maxlen` count physical envelopes rather than
+logical events. Use the stable default unless that trade is intentional.
+
 ## Filter by the current value
 
 The module filters on event name, key name, and source database. It does not
@@ -102,7 +135,8 @@ XACK events:expired workers 1785349757949-0
 ```
 
 A crash between processing and `XACK` causes redelivery. Make the handler
-idempotent using the stream name and entry ID as the natural event identity.
+idempotent using the stream name and entry ID as the natural fixed-entry
+identity, or stream name, entry ID, and array index for a Preview envelope.
 
 Recover work abandoned by another consumer:
 

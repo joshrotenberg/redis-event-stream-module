@@ -307,22 +307,35 @@ pub(crate) fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool,
 }
 
 /// A canonical per-event loss (issue #218): the selected event produced no
-/// per-event entry, so it counts toward `events_lost` (the total-loss SLO) in
+/// canonical record, so it counts toward `events_lost` (the total-loss SLO) in
 /// addition to its per-reason counter. Bundles the `EVENTS_LOST` bump with
 /// [`count_drop`] so the two cannot drift: auxiliary failures (firehose copy,
 /// registry `SADD`, gap markers, auto-group) call `count_drop` directly and
-/// never reach `events_lost`, because their canonical entry was still written.
+/// never reach `events_lost`, because the canonical record was still written.
 pub(crate) fn count_event_lost(
     ctx: &Context,
     counter: &AtomicU64,
     latch: &AtomicBool,
     detail: &str,
 ) {
-    EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    count_events_lost(ctx, 1, counter, latch, detail);
+}
+
+/// Count several logical events lost through one failed physical destination
+/// write. Preview envelopes need this split: `events_lost` remains per logical
+/// event while `dropped_*` remains per failed write.
+pub(crate) fn count_events_lost(
+    ctx: &Context,
+    logical_count: u64,
+    counter: &AtomicU64,
+    latch: &AtomicBool,
+    detail: &str,
+) {
+    EVENTS_LOST.fetch_add(logical_count, Ordering::Relaxed);
     count_drop(ctx, counter, latch, detail);
 }
 
-/// A canonical per-event loss counted against its destination stream: the
+/// A canonical logical-event loss counted against its destination stream: the
 /// `EVENTS_LOST` bump (issue #218) plus [`count_stream_drop`]. See
 /// [`count_event_lost`] for why auxiliary failures stay out of `events_lost`.
 pub(crate) fn count_event_lost_stream(
@@ -331,7 +344,18 @@ pub(crate) fn count_event_lost_stream(
     counter: &AtomicU64,
     detail: &str,
 ) {
-    EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    count_events_lost_stream(ctx, 1, stream, counter, detail);
+}
+
+/// Stream-attributed counterpart of [`count_events_lost`].
+pub(crate) fn count_events_lost_stream(
+    ctx: &Context,
+    logical_count: u64,
+    stream: &str,
+    counter: &AtomicU64,
+    detail: &str,
+) {
+    EVENTS_LOST.fetch_add(logical_count, Ordering::Relaxed);
     count_stream_drop(ctx, stream, counter, detail);
 }
 

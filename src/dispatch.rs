@@ -38,7 +38,7 @@ static EVENT_QUEUE: OnceLock<Arc<EventQueue>> = OnceLock::new();
 static WORKER: Mutex<Option<JoinHandle<Vec<Arc<PendingEvent>>>>> = Mutex::new(None);
 static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_MODE: AtomicU8 = AtomicU8::new(WriteMode::sync as u8);
-static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(0);
 const QUEUE_LOCK_SPINS: usize = 64;
 
 struct QueuedEvent {
@@ -78,7 +78,7 @@ impl EventQueue {
     /// Spend only a small, fixed spin budget in the notification callback.
     /// Contention beyond that bound is treated exactly like a full queue and
     /// goes through the ordered fallback.
-    fn try_push(&self, event: Arc<PendingEvent>) -> Result<usize, Arc<PendingEvent>> {
+    fn try_push(&self, id: u64, event: Arc<PendingEvent>) -> Result<usize, Arc<PendingEvent>> {
         for _ in 0..QUEUE_LOCK_SPINS {
             match self.events.try_lock() {
                 Ok(mut events) => {
@@ -86,11 +86,14 @@ impl EventQueue {
                         return Err(event);
                     }
                     events.push_back(QueuedEvent {
-                        id: NEXT_QUEUE_ID.fetch_add(1, Ordering::Relaxed),
+                        id,
                         event,
                         enqueued_at: Instant::now(),
                     });
                     let depth = events.len();
+                    // Publish the metric before releasing the queue mutex so a
+                    // worker drain can never transiently drive it negative.
+                    ASYNC_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
                     drop(events);
                     self.ready.notify_one();
                     return Ok(depth);
@@ -142,6 +145,21 @@ impl EventQueue {
 
     fn drain_all(&self) -> Vec<Arc<PendingEvent>> {
         self.drain(usize::MAX)
+    }
+
+    /// Drain only events that arrived before a fallback event. Later callbacks
+    /// in the same command execution can enqueue before post-notification jobs
+    /// run; leaving their larger IDs in place prevents the fallback from
+    /// moving them ahead of its own event.
+    fn drain_before(&self, id: u64) -> Vec<Arc<PendingEvent>> {
+        let mut events = self.events.lock().unwrap();
+        let count = events.iter().take_while(|event| event.id < id).count();
+        let drained = events
+            .drain(..count)
+            .map(|queued| queued.event)
+            .collect::<Vec<_>>();
+        ASYNC_QUEUE_DEPTH.fetch_sub(count as i64, Ordering::Relaxed);
+        drained
     }
 
     /// Encode the current prefix while leaving it in the FIFO. A fallback can
@@ -337,15 +355,15 @@ pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
         defer_pending_event(ctx, event);
         return;
     };
-    match queue.try_push(Arc::new(event)) {
+    let id = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+    match queue.try_push(id, Arc::new(event)) {
         Ok(depth) => {
-            ASYNC_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
             ASYNC_ENQUEUED.fetch_add(1, Ordering::Relaxed);
             ASYNC_QUEUE_HIGH_WATER.fetch_max(depth as u64, Ordering::Relaxed);
         }
         Err(event) => {
             ASYNC_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-            defer_ordered_fallback(ctx, Arc::clone(queue), event);
+            defer_ordered_fallback(ctx, Arc::clone(queue), id, event);
         }
     }
 }
@@ -353,10 +371,15 @@ pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
 /// Redis runs this job before it releases the main-thread lock. The worker
 /// cannot own that lock concurrently, so draining the still-queued prefix and
 /// then the current event preserves notification order.
-fn defer_ordered_fallback(ctx: &Context, queue: Arc<EventQueue>, event: Arc<PendingEvent>) {
+fn defer_ordered_fallback(
+    ctx: &Context,
+    queue: Arc<EventQueue>,
+    id: u64,
+    event: Arc<PendingEvent>,
+) {
     let status = ctx.add_post_notification_job(move |ctx| {
         guard_job(move || {
-            let accepted = queue.drain_all();
+            let accepted = queue.drain_before(id);
             if !accepted.is_empty() {
                 ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
                 ASYNC_DRAIN_EVENTS.fetch_add(accepted.len() as u64, Ordering::Relaxed);
@@ -473,11 +496,48 @@ pub(crate) fn stop_dispatch_worker(ctx: &Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redis_module::NotifyEvent;
+
+    fn pending(key: &str) -> Arc<PendingEvent> {
+        let retention = crate::capture::Retention {
+            maxlen: 0,
+            retention_ms: 0,
+        };
+        Arc::new(PendingEvent {
+            prefix: "events:".to_owned(),
+            suffix: "set".to_owned(),
+            event: "set".to_owned(),
+            key: key.as_bytes().to_vec(),
+            db: 0,
+            class: NotifyEvent::STRING,
+            data_retention: retention,
+            control_retention: retention,
+            firehose_retention: retention,
+            max_streams: 0,
+            format: EntryFormat::fixed,
+            entry_seq: false,
+        })
+    }
 
     #[test]
     fn configured_defaults_are_bounded() {
         assert_eq!(ASYNC_QUEUE_CAPACITY.value.load(Ordering::Relaxed), 65_536);
         assert_eq!(ASYNC_BATCH_SIZE.value.load(Ordering::Relaxed), 64);
         assert_eq!(ASYNC_MAX_WAIT_MS.value.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn fallback_drains_only_earlier_events() {
+        let queue = EventQueue::new(4);
+        assert!(queue.try_push(10, pending("before")).is_ok());
+        assert!(queue.try_push(12, pending("after")).is_ok());
+
+        let drained = queue.drain_before(11);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].key, b"before");
+
+        let remaining = queue.drain_all();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].key, b"after");
     }
 }

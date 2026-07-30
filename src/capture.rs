@@ -757,14 +757,13 @@ pub(crate) fn process_pending_envelope(
 
     let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
     if rc != raw::REDISMODULE_OK as i32 {
-        for _ in 0..logical_count {
-            count_event_lost(
-                ctx,
-                &DROPPED_XADD_ERROR,
-                &LOGGED_XADD_ERROR,
-                "SelectDb(0) failed; batch entry dropped",
-            );
-        }
+        count_events_lost(
+            ctx,
+            logical_count,
+            &DROPPED_XADD_ERROR,
+            &LOGGED_XADD_ERROR,
+            "SelectDb(0) failed; batch entry dropped",
+        );
         return;
     }
     let seg = match tag_segment(ctx) {
@@ -797,62 +796,46 @@ pub(crate) fn process_pending_envelope(
             ASYNC_ENVELOPE_EVENTS.fetch_add(logical_count, Ordering::Relaxed);
         }
         MirrorOutcome::Oom { stream, msg } => {
-            for _ in 0..logical_count {
-                count_event_lost_stream(ctx, &stream, &DROPPED_OOM, &msg);
-            }
+            count_events_lost_stream(ctx, logical_count, &stream, &DROPPED_OOM, &msg)
         }
-        MirrorOutcome::SlotMigrated => {
-            for _ in 0..logical_count {
-                count_event_lost(
-                    ctx,
-                    &DROPPED_MIGRATING,
-                    &LOGGED_MIGRATING,
-                    "batch XADD refused as non-local (dropped_migrating)",
-                );
-            }
-        }
-        MirrorOutcome::Migrating(msg) => {
-            for _ in 0..logical_count {
-                count_event_lost(
-                    ctx,
-                    &DROPPED_MIGRATING,
-                    &LOGGED_MIGRATING,
-                    &format!("{msg}; batch dropped (dropped_migrating)"),
-                );
-            }
-        }
+        MirrorOutcome::SlotMigrated => count_events_lost(
+            ctx,
+            logical_count,
+            &DROPPED_MIGRATING,
+            &LOGGED_MIGRATING,
+            "batch XADD refused as non-local (dropped_migrating)",
+        ),
+        MirrorOutcome::Migrating(msg) => count_events_lost(
+            ctx,
+            logical_count,
+            &DROPPED_MIGRATING,
+            &LOGGED_MIGRATING,
+            &format!("{msg}; batch dropped (dropped_migrating)"),
+        ),
         MirrorOutcome::Failed { stream, msg } => {
-            for _ in 0..logical_count {
-                count_event_lost_stream(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
-            }
+            count_events_lost_stream(ctx, logical_count, &stream, &DROPPED_XADD_ERROR, &msg)
         }
-        MirrorOutcome::MaxStreams { stream } => {
-            for _ in 0..logical_count {
-                count_event_lost(
-                    ctx,
-                    &DROPPED_MAX_STREAMS,
-                    &LOGGED_MAX_STREAMS,
-                    &format!(
-                        "max-streams cap ({}) reached; new stream '{stream}' not created; \
-                         batched event dropped (dropped_max_streams)",
-                        first.max_streams
-                    ),
-                );
-            }
-        }
-        MirrorOutcome::EncodeError { stream, reason } => {
-            for _ in 0..logical_count {
-                count_event_lost(
-                    ctx,
-                    &DROPPED_ENCODE_ERROR,
-                    &LOGGED_ENCODE_ERROR,
-                    &format!(
-                        "batch encode failed for '{stream}': {reason}; \
-                         event dropped (dropped_encode_error)"
-                    ),
-                );
-            }
-        }
+        MirrorOutcome::MaxStreams { stream } => count_events_lost(
+            ctx,
+            logical_count,
+            &DROPPED_MAX_STREAMS,
+            &LOGGED_MAX_STREAMS,
+            &format!(
+                "max-streams cap ({}) reached; new stream '{stream}' not created; \
+                 batch dropped (dropped_max_streams)",
+                first.max_streams
+            ),
+        ),
+        MirrorOutcome::EncodeError { stream, reason } => count_events_lost(
+            ctx,
+            logical_count,
+            &DROPPED_ENCODE_ERROR,
+            &LOGGED_ENCODE_ERROR,
+            &format!(
+                "batch encode failed for '{stream}': {reason}; \
+                 batch dropped (dropped_encode_error)"
+            ),
+        ),
     }
 }
 
