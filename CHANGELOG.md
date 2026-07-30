@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.0](https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.4.0...v0.5.0) (2026-07-30)
 
+This release adds Preview asynchronous write modes while keeping `sync` as the
+stable default. Preview `envelope` mode can mix stable fixed-field entries with
+versioned `batch-v1` envelopes in the same stream, so consumers that opt in
+must decode both physical shapes. See the
+[consumer guide](https://joshrotenberg.github.io/redis-event-stream-module/consume.html#decode-preview-batch-envelopes)
+and [reliability guide](https://joshrotenberg.github.io/redis-event-stream-module/reliability.html)
+before enabling it.
 
 ### Performance
 
