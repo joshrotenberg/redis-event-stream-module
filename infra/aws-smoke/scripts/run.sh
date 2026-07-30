@@ -12,6 +12,7 @@ payload="${BENCH_PAYLOAD:-64}"
 keyspace="${BENCH_KEYSPACE:-100000}"
 maxlen="${BENCH_MAXLEN:-10000}"
 repetitions="${BENCH_REPETITIONS:-1}"
+baseline_repetitions="${BENCH_BASELINE_REPETITIONS:-$repetitions}"
 filtered_repetitions="${BENCH_FILTERED_REPETITIONS:-$repetitions}"
 capture_scenarios="${BENCH_CAPTURE_SCENARIOS:-s2}"
 order_seed="${BENCH_ORDER_SEED:-260}"
@@ -20,12 +21,22 @@ profile_frequency="${BENCH_PROFILE_FREQUENCY:-99}"
 async_queue_capacity="${BENCH_ASYNC_QUEUE_CAPACITY:-65536}"
 async_batch_size="${BENCH_ASYNC_BATCH_SIZE:-64}"
 async_max_wait_ms="${BENCH_ASYNC_MAX_WAIT_MS:-1}"
+async_configs="${BENCH_ASYNC_CONFIGS:-}"
 module_source_commit="${BENCH_MODULE_SOURCE_COMMIT:-}"
 module_source_repo="${BENCH_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
+plan_only="${BENCH_PLAN_ONLY:-no}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 results_dir="${RESULTS_DIR:-$root_dir/results/$run_id}"
 
-for tool in aws base64 cksum git gzip jq shasum sort terraform; do
+required_tools=(cksum git jq sort)
+if [[ "$plan_only" == "no" ]]; then
+  required_tools+=(aws base64 gzip shasum terraform)
+elif [[ "$plan_only" != "yes" ]]; then
+  echo "BENCH_PLAN_ONLY must be yes or no" >&2
+  exit 2
+fi
+
+for tool in "${required_tools[@]}"; do
   command -v "$tool" >/dev/null || {
     echo "missing required tool: $tool" >&2
     exit 1
@@ -36,12 +47,23 @@ positive_integer() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+non_negative_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 for value in \
   "$requests" "$threads" "$payload" "$keyspace" "$maxlen" \
-  "$repetitions" "$filtered_repetitions" "$async_queue_capacity" \
+  "$repetitions" "$async_queue_capacity" \
   "$async_batch_size" "$async_max_wait_ms"; do
   if ! positive_integer "$value"; then
     echo "benchmark values must be positive integers: $value" >&2
+    exit 2
+  fi
+done
+
+for value in "$baseline_repetitions" "$filtered_repetitions"; do
+  if ! non_negative_integer "$value"; then
+    echo "baseline and filtered repetitions must be non-negative integers: $value" >&2
     exit 2
   fi
 done
@@ -59,6 +81,24 @@ for capture_scenario in $capture_scenarios; do
     exit 2
   fi
 done
+
+seen_async_configs=" "
+for async_config in $async_configs; do
+  if ! [[ "$async_config" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]]; then
+    echo "BENCH_ASYNC_CONFIGS entries must be <batch-size>:<max-wait-ms>: $async_config" >&2
+    exit 2
+  fi
+  if [[ "$seen_async_configs" == *" $async_config "* ]]; then
+    echo "BENCH_ASYNC_CONFIGS contains a duplicate entry: $async_config" >&2
+    exit 2
+  fi
+  seen_async_configs+="$async_config "
+done
+
+if [[ -n "$async_configs" ]] && [[ " $capture_scenarios " != *" s2-envelope "* ]]; then
+  echo "BENCH_ASYNC_CONFIGS requires s2-envelope in BENCH_CAPTURE_SCENARIOS" >&2
+  exit 2
+fi
 
 for level in $client_levels; do
   if ! positive_integer "$level"; then
@@ -105,6 +145,76 @@ profile_requested() {
 }
 
 mkdir -p "$results_dir/raw"
+
+unsorted_plan="$results_dir/raw/trial-plan.unsorted.tsv"
+trial_plan="$results_dir/raw/trial-plan.tsv"
+: >"$unsorted_plan"
+
+add_trial() {
+  local scenario="$1"
+  local trial_clients="$2"
+  local repetition="$3"
+  local trial_batch_size="$4"
+  local trial_max_wait_ms="$5"
+  local order_key
+
+  order_key="$(
+    printf '%s' \
+      "$order_seed:$scenario:$trial_clients:$repetition:$trial_batch_size:$trial_max_wait_ms" |
+      cksum |
+      awk '{ print $1 }'
+  )"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$order_key" "$scenario" "$trial_clients" "$repetition" \
+    "$trial_batch_size" "$trial_max_wait_ms" >>"$unsorted_plan"
+}
+
+for trial_clients in $client_levels; do
+  if ((baseline_repetitions > 0)); then
+    for repetition in $(seq 1 "$baseline_repetitions"); do
+      add_trial \
+        s0 "$trial_clients" "$repetition" \
+        "$async_batch_size" "$async_max_wait_ms"
+    done
+  fi
+
+  for repetition in $(seq 1 "$repetitions"); do
+    for capture_scenario in $capture_scenarios; do
+      if [[ "$capture_scenario" == "s2-envelope" ]] &&
+        [[ -n "$async_configs" ]]; then
+        for async_config in $async_configs; do
+          trial_batch_size="${async_config%%:*}"
+          trial_max_wait_ms="${async_config##*:}"
+          add_trial \
+            "$capture_scenario" "$trial_clients" "$repetition" \
+            "$trial_batch_size" "$trial_max_wait_ms"
+        done
+      else
+        add_trial \
+          "$capture_scenario" "$trial_clients" "$repetition" \
+          "$async_batch_size" "$async_max_wait_ms"
+      fi
+    done
+  done
+
+  if ((filtered_repetitions > 0)); then
+    for repetition in $(seq 1 "$filtered_repetitions"); do
+      add_trial \
+        s1 "$trial_clients" "$repetition" \
+        "$async_batch_size" "$async_max_wait_ms"
+    done
+  fi
+done
+
+LC_ALL=C sort -n -k1,1 "$unsorted_plan" >"$trial_plan"
+
+if [[ "$plan_only" == "yes" ]]; then
+  echo "order scenario clients repetition batch-size max-wait-ms"
+  cat "$trial_plan"
+  echo
+  echo "trial plan: $trial_plan"
+  exit 0
+fi
 
 terraform_output="$(terraform -chdir="$root_dir" output -json)"
 printf '%s\n' "$terraform_output" >"$results_dir/raw/terraform-output.json"
@@ -302,49 +412,21 @@ server_script_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 benchmark_script_b64="$(encode_file "$root_dir/scripts/remote-benchmark.sh")"
 profile_script_b64="$(encode_file "$root_dir/scripts/remote-profile.sh")"
 
-unsorted_plan="$results_dir/raw/trial-plan.unsorted.tsv"
-trial_plan="$results_dir/raw/trial-plan.tsv"
-: >"$unsorted_plan"
-
-add_trial() {
-  local scenario="$1"
-  local trial_clients="$2"
-  local repetition="$3"
-  local order_key
-
-  order_key="$(
-    printf '%s' "$order_seed:$scenario:$trial_clients:$repetition" |
-      cksum |
-      awk '{ print $1 }'
-  )"
-  printf '%s\t%s\t%s\t%s\n' \
-    "$order_key" "$scenario" "$trial_clients" "$repetition" >>"$unsorted_plan"
-}
-
-for trial_clients in $client_levels; do
-  for repetition in $(seq 1 "$repetitions"); do
-    add_trial s0 "$trial_clients" "$repetition"
-    for capture_scenario in $capture_scenarios; do
-      add_trial "$capture_scenario" "$trial_clients" "$repetition"
-    done
-  done
-  for repetition in $(seq 1 "$filtered_repetitions"); do
-    add_trial s1 "$trial_clients" "$repetition"
-  done
-done
-
-LC_ALL=C sort -n -k1,1 "$unsorted_plan" >"$trial_plan"
-
 trial_files=()
 trial_number=0
-while IFS=$'\t' read -r _ scenario trial_clients repetition; do
+while IFS=$'\t' read -r _ scenario trial_clients repetition \
+  trial_batch_size trial_max_wait_ms; do
   trial_number=$((trial_number + 1))
-  trial_id="${scenario}-c${trial_clients}-r${repetition}"
+  if [[ "$scenario" == "s2-individual" || "$scenario" == "s2-envelope" ]]; then
+    trial_id="${scenario}-b${trial_batch_size}-w${trial_max_wait_ms}-c${trial_clients}-r${repetition}"
+  else
+    trial_id="${scenario}-c${trial_clients}-r${repetition}"
+  fi
   echo "running trial $trial_number: $trial_id..."
 
   server_command="printf '%s' '$server_script_b64' | base64 --decode > /tmp/eventstream-server.sh
 chmod 0700 /tmp/eventstream-server.sh
-/tmp/eventstream-server.sh '$scenario' '$module_image' '$maxlen' '$module_override' '$async_queue_capacity' '$async_batch_size' '$async_max_wait_ms'"
+/tmp/eventstream-server.sh '$scenario' '$module_image' '$maxlen' '$module_override' '$async_queue_capacity' '$trial_batch_size' '$trial_max_wait_ms'"
   run_remote \
     "$server_id" \
     "server-$trial_id" \
@@ -409,12 +491,24 @@ chmod 0700 /tmp/eventstream-profile.sh
       --arg trial_id "$trial_id" \
       --argjson repetition "$repetition" \
       --argjson order "$trial_number" \
+      --argjson async_queue_capacity "$async_queue_capacity" \
+      --argjson async_batch_size "$trial_batch_size" \
+      --argjson async_max_wait_ms "$trial_max_wait_ms" \
       --slurpfile profile_start "$results_dir/raw/profile-start-$trial_id.stdout" \
       --slurpfile profile_stop "$results_dir/raw/profile-stop-$trial_id.stdout" \
       '. + {
         trial_id: $trial_id,
         repetition: $repetition,
         order: $order,
+        async_configuration:
+          (if (.scenario == "s2-individual" or .scenario == "s2-envelope")
+           then {
+             queue_capacity: $async_queue_capacity,
+             batch_size: $async_batch_size,
+             max_wait_ms: $async_max_wait_ms
+           }
+           else null
+           end),
         profile: {
           start: $profile_start[0],
           stop: $profile_stop[0]
@@ -426,7 +520,23 @@ chmod 0700 /tmp/eventstream-profile.sh
       --arg trial_id "$trial_id" \
       --argjson repetition "$repetition" \
       --argjson order "$trial_number" \
-      '. + {trial_id: $trial_id, repetition: $repetition, order: $order}' \
+      --argjson async_queue_capacity "$async_queue_capacity" \
+      --argjson async_batch_size "$trial_batch_size" \
+      --argjson async_max_wait_ms "$trial_max_wait_ms" \
+      '. + {
+        trial_id: $trial_id,
+        repetition: $repetition,
+        order: $order,
+        async_configuration:
+          (if (.scenario == "s2-individual" or .scenario == "s2-envelope")
+           then {
+             queue_capacity: $async_queue_capacity,
+             batch_size: $async_batch_size,
+             max_wait_ms: $async_max_wait_ms
+           }
+           else null
+           end)
+      }' \
       "$benchmark_file" >"$trial_file"
   fi
   jq -e . "$trial_file" >/dev/null
@@ -484,13 +594,24 @@ jq '
       }
     end;
 
-  sort_by([.scenario, .workload.clients]) |
-  group_by([.scenario, .workload.clients]) |
+  sort_by([
+    .scenario,
+    .workload.clients,
+    (.async_configuration.batch_size // 0),
+    (.async_configuration.max_wait_ms // 0)
+  ]) |
+  group_by([
+    .scenario,
+    .workload.clients,
+    (.async_configuration.batch_size // 0),
+    (.async_configuration.max_wait_ms // 0)
+  ]) |
   map(
     . as $trials |
     {
       scenario: $trials[0].scenario,
       clients: $trials[0].workload.clients,
+      async_configuration: $trials[0].async_configuration,
       repetitions: ($trials | length),
       ops_per_sec:
         ($trials | map(.result.ops_per_sec) | distribution),
@@ -510,9 +631,38 @@ jq '
         ($trials | map(.load_generator.cpu_percent_avg) | distribution),
       load_generator_cpu_percent_max:
         ($trials | map(.load_generator.cpu_percent_max) | distribution),
+      async_queue_high_water:
+        ($trials | map(
+          if .async_configuration == null
+          then null
+          else .module.async_queue_high_water
+          end
+        ) | distribution),
+      achieved_envelope_size:
+        ($trials | map(
+          if .module.async_envelopes > 0
+          then .module.async_envelope_events / .module.async_envelopes
+          else null
+          end
+        ) | distribution),
+      envelope_event_percent:
+        ($trials | map(
+          if .module.async_envelope_events > 0
+          then (.module.async_envelope_events / .workload.requests) * 100
+          else null
+          end
+        ) | distribution),
+      fallback_percent:
+        ($trials | map(
+          if .async_configuration == null
+          then null
+          else (.module.async_fallbacks / .workload.requests) * 100
+          end
+        ) | distribution),
       events_lost: ($trials | map(.module.events_lost) | add),
       dropped: ($trials | map(.module.dropped) | add),
-      handler_panics: ($trials | map(.module.handler_panics) | add)
+      handler_panics: ($trials | map(.module.handler_panics) | add),
+      async_worker_errors: ($trials | map(.module.async_worker_errors) | add)
     }
   )
 ' "$results_dir/trials.json" >"$results_dir/summary.json"
@@ -520,7 +670,7 @@ jq '
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 jq -n \
-  --arg schema_version "3" \
+  --arg schema_version "4" \
   --arg run_id "$run_id" \
   --arg started_at "$started_at" \
   --arg completed_at "$completed_at" \
@@ -538,6 +688,7 @@ jq -n \
   --argjson async_queue_capacity "$async_queue_capacity" \
   --argjson async_batch_size "$async_batch_size" \
   --argjson async_max_wait_ms "$async_max_wait_ms" \
+  --arg async_configs "$async_configs" \
   --slurpfile trials "$results_dir/trials.json" \
   --slurpfile summary "$results_dir/summary.json" \
   '{
@@ -561,7 +712,16 @@ jq -n \
       scenarios: ($capture_scenarios | split(" ")),
       async_queue_capacity: $async_queue_capacity,
       async_batch_size: $async_batch_size,
-      async_max_wait_ms: $async_max_wait_ms
+      async_max_wait_ms: $async_max_wait_ms,
+      async_configs:
+        ($async_configs
+         | split(" ")
+         | map(select(length > 0)
+           | split(":")
+           | {
+             batch_size: (.[0] | tonumber),
+             max_wait_ms: (.[1] | tonumber)
+           }))
     },
     trials: $trials[0],
     summary: $summary[0]
@@ -569,17 +729,20 @@ jq -n \
 
 echo
 jq -r '
-  ["scenario", "clients", "reps", "client ops/s", "end-to-end ops/s", "p99", "main core %", "total core %", "settle s"],
+  ["scenario", "batch", "wait", "clients", "reps", "client ops/s", "end-to-end ops/s", "p99", "total core %", "settle s", "envelope", "fallback %"],
   (.summary[] | [
     .scenario,
+    ((.async_configuration.batch_size // "-") | tostring),
+    ((.async_configuration.max_wait_ms // "-") | tostring),
     (.clients | tostring),
     (.repetitions | tostring),
     (.ops_per_sec.median | tostring),
     (.end_to_end_ops_per_sec.median | tostring),
     (.p99_ms.median | tostring),
-    (.server_main_thread_core_percent.median | tostring),
     (.server_total_core_percent.median | tostring),
-    (.capture_settle_seconds.median | tostring)
+    (.capture_settle_seconds.median | tostring),
+    ((.achieved_envelope_size.median // "-") | tostring),
+    ((.fallback_percent.median // "-") | tostring)
   ]) | @tsv
 ' "$results_dir/result.json" | column -t -s $'\t'
 

@@ -80,6 +80,29 @@ or more whitespace-separated `s2*` variants. Preview worker tuning is supplied
 through `BENCH_ASYNC_QUEUE_CAPACITY`, `BENCH_ASYNC_BATCH_SIZE`, and
 `BENCH_ASYNC_MAX_WAIT_MS`.
 
+For an envelope tuning matrix, `BENCH_ASYNC_CONFIGS` accepts
+whitespace-separated `<batch-size>:<max-wait-ms>` pairs. Each pair becomes a
+separate randomized `s2-envelope` trial with a unique ID. Sync controls remain
+ordinary `s2-sync` trials:
+
+```sh
+BENCH_REQUESTS=5000000 \
+BENCH_CLIENT_LEVELS=100 \
+BENCH_THREADS=4 \
+BENCH_CAPTURE_SCENARIOS="s2-sync s2-envelope" \
+BENCH_ASYNC_CONFIGS="32:1 64:1 128:1 256:1 512:1 128:2 256:5" \
+BENCH_ASYNC_QUEUE_CAPACITY=1048576 \
+BENCH_REPETITIONS=1 \
+BENCH_BASELINE_REPETITIONS=0 \
+BENCH_FILTERED_REPETITIONS=0 \
+./lab.sh run
+```
+
+`BENCH_BASELINE_REPETITIONS` controls unloaded `s0` trials independently.
+Both baseline and filtered repetitions may be zero when a focused experiment
+needs only its explicit sync control. Set `BENCH_PLAN_ONLY=yes` to validate and
+print the randomized plan without reading Terraform state or contacting AWS.
+
 To benchmark code that has not yet shipped in the pinned image, set
 `BENCH_MODULE_SOURCE_COMMIT` to `HEAD` or a pushed Git commit. The server
 downloads that revision, builds the module in the repository's container build
@@ -157,6 +180,23 @@ Results land under `results/<UTC-run-id>/` and are ignored by Git:
 - `raw/*.invocation.json`: complete SSM command responses
 - `raw/*.stdout` and `raw/*.stderr`: raw command streams
 
+Matrix summaries are also grouped by batch size and maximum wait, and include
+achieved envelope size, percent of logical events written in envelopes,
+fallback rate, and queue high-water. Combine a coarse and focused run into a
+machine-readable analysis and Markdown table with:
+
+```sh
+infra/aws-smoke/scripts/analyze-tuning.sh \
+  /tmp/eventstream-tuning \
+  results/<coarse-run>/result.json \
+  results/<focused-run>/result.json
+```
+
+The analysis reports the three-dimensional Pareto frontier: maximize
+end-to-end throughput while minimizing p99 latency and total Redis-process CPU.
+It fails if any input configuration reports loss, drops, handler panics, or
+worker errors.
+
 The runner fails unless:
 
 - `s0` has no module loaded;
@@ -172,12 +212,14 @@ The runner fails unless:
 - [2026-07-30: instrumented single-node sweep][sweep]
 - [2026-07-30: full-capture CPU profile][capture-profile]
 - [2026-07-30: async and batch write spike][async-batch]
+- [2026-07-30: Preview envelope tuning][envelope-tuning]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
 [sweep]: observations/2026-07-30-instrumented-sweep.md
 [capture-profile]: observations/2026-07-30-capture-profile.md
 [async-batch]: observations/2026-07-30-async-batch-spike.md
+[envelope-tuning]: observations/2026-07-30-envelope-tuning.md
 
 ## Image pins
 

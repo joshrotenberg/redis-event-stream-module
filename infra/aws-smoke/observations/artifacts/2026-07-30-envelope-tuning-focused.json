@@ -1,0 +1,1705 @@
+{
+  "schema_version": 4,
+  "run_id": "20260730T2208Z-tuning-focused",
+  "started_at": "2026-07-30T22:09:25Z",
+  "completed_at": "2026-07-30T22:26:03Z",
+  "git_commit": "c8c80b348f9f0f5da8d400d604517bc78715cb13",
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "ami_id": "ami-0b76d82b547c3c077",
+    "server_instance_type": "c7i.large",
+    "loadgen_instance_type": "c7i.large",
+    "module_image": "ghcr.io/joshrotenberg/redis-event-stream-module:0.4.0@sha256:1466a273fd64321ca3eba4447db3a16e2eb231be2afdb3a620c5cb2229be4db2",
+    "module_artifact": {
+      "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/c8c80b348f9f0f5da8d400d604517bc78715cb13.tar.gz",
+      "path": "/var/lib/eventstream-smoke/libredis_event_stream_module.so",
+      "sha256": "1aa59cc7043f7a337c0e8e6fd9803040096437a47417a339182fc92a8a3cc25b",
+      "size_bytes": 2952352,
+      "git_commit": "c8c80b348f9f0f5da8d400d604517bc78715cb13"
+    },
+    "loadgen_image": "redis:8.8.0@sha256:234c902a2db49461a129e2d4aeff85b28cf20187ed274a67f6e50995fa713c7b",
+    "expires_at": "2026-07-31T01:52:35Z"
+  },
+  "capture_configuration": {
+    "scenarios": [
+      "s2-sync",
+      "s2-envelope"
+    ],
+    "async_queue_capacity": 1048576,
+    "async_batch_size": 64,
+    "async_max_wait_ms": 1,
+    "async_configs": [
+      {
+        "batch_size": 64,
+        "max_wait_ms": 1
+      },
+      {
+        "batch_size": 64,
+        "max_wait_ms": 5
+      },
+      {
+        "batch_size": 128,
+        "max_wait_ms": 1
+      },
+      {
+        "batch_size": 128,
+        "max_wait_ms": 2
+      },
+      {
+        "batch_size": 128,
+        "max_wait_ms": 10
+      }
+    ]
+  },
+  "trials": [
+    {
+      "scenario": "s2-sync",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 43.582640,
+        "benchmark_duration_seconds": 43.027001,
+        "capture_settle_seconds": 0.000000,
+        "capture_duration_seconds": 43.027001
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 21,
+        "cpu_percent_avg": 103.700,
+        "cpu_percent_max": 98.850,
+        "memory_peak_mib": 4.477
+      },
+      "server": {
+        "main_thread_cpu_seconds": 42.879643,
+        "main_thread_core_percent": 99.658,
+        "total_cpu_seconds": 42.879871,
+        "total_core_percent": 99.658,
+        "used_memory_bytes": 14886648,
+        "used_memory_rss_bytes": 23506944,
+        "used_memory_peak_bytes": 15147528
+      },
+      "result": {
+        "ops_per_sec": 116206.10,
+        "end_to_end_ops_per_sec": 116206.100,
+        "avg_ms": 0.809,
+        "min_ms": 0.080,
+        "p50_ms": 0.807,
+        "p95_ms": 1.031,
+        "p99_ms": 1.111,
+        "max_ms": 9.895
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 0,
+        "async_fallbacks": 0,
+        "async_queue_high_water": 0,
+        "async_drains": 0,
+        "async_drain_events": 0,
+        "async_envelopes": 0,
+        "async_envelope_events": 0,
+        "async_worker_errors": 0,
+        "stream_len": 10000
+      },
+      "trial_id": "s2-sync-c100-r3",
+      "repetition": 3,
+      "order": 1,
+      "async_configuration": null
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.908560,
+        "benchmark_duration_seconds": 39.272997,
+        "capture_settle_seconds": 0.242701,
+        "capture_duration_seconds": 39.515698
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 20,
+        "cpu_percent_avg": 119.192,
+        "cpu_percent_max": 127.500,
+        "memory_peak_mib": 4.527
+      },
+      "server": {
+        "main_thread_cpu_seconds": 37.874442,
+        "main_thread_core_percent": 95.847,
+        "total_cpu_seconds": 68.764328,
+        "total_core_percent": 174.018,
+        "used_memory_bytes": 62859792,
+        "used_memory_rss_bytes": 41975808,
+        "used_memory_peak_bytes": 65893064
+      },
+      "result": {
+        "ops_per_sec": 127313.94,
+        "end_to_end_ops_per_sec": 126531.992,
+        "avg_ms": 0.734,
+        "min_ms": 0.080,
+        "p50_ms": 0.727,
+        "p95_ms": 0.983,
+        "p99_ms": 1.183,
+        "max_ms": 11.895
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4995822,
+        "async_fallbacks": 4178,
+        "async_queue_high_water": 1443,
+        "async_drains": 79248,
+        "async_drain_events": 4995822,
+        "async_envelopes": 75073,
+        "async_envelope_events": 4804614,
+        "async_worker_errors": 0,
+        "stream_len": 10036
+      },
+      "trial_id": "s2-envelope-b64-w5-c100-r1",
+      "repetition": 1,
+      "order": 2,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 5
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 38.368468,
+        "benchmark_duration_seconds": 37.771000,
+        "capture_settle_seconds": 0.235047,
+        "capture_duration_seconds": 38.006047
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 120.557,
+        "cpu_percent_max": 131.610,
+        "memory_peak_mib": 4.074
+      },
+      "server": {
+        "main_thread_cpu_seconds": 36.721647,
+        "main_thread_core_percent": 96.621,
+        "total_cpu_seconds": 61.278375,
+        "total_core_percent": 161.233,
+        "used_memory_bytes": 56735312,
+        "used_memory_rss_bytes": 35807232,
+        "used_memory_peak_bytes": 59317088
+      },
+      "result": {
+        "ops_per_sec": 132376.69,
+        "end_to_end_ops_per_sec": 131558.012,
+        "avg_ms": 0.704,
+        "min_ms": 0.072,
+        "p50_ms": 0.687,
+        "p95_ms": 1.007,
+        "p99_ms": 1.335,
+        "max_ms": 14.599
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994630,
+        "async_fallbacks": 5370,
+        "async_queue_high_water": 1850,
+        "async_drains": 40897,
+        "async_drain_events": 4994630,
+        "async_envelopes": 35529,
+        "async_envelope_events": 4547366,
+        "async_worker_errors": 0,
+        "stream_len": 10096
+      },
+      "trial_id": "s2-envelope-b128-w2-c100-r1",
+      "repetition": 1,
+      "order": 3,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 2
+      }
+    },
+    {
+      "scenario": "s2-sync",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 43.311363,
+        "benchmark_duration_seconds": 42.777001,
+        "capture_settle_seconds": 0.000000,
+        "capture_duration_seconds": 42.777001
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 21,
+        "cpu_percent_avg": 101.280,
+        "cpu_percent_max": 98.620,
+        "memory_peak_mib": 4.191
+      },
+      "server": {
+        "main_thread_cpu_seconds": 42.492546,
+        "main_thread_core_percent": 99.335,
+        "total_cpu_seconds": 42.492768,
+        "total_core_percent": 99.336,
+        "used_memory_bytes": 14885592,
+        "used_memory_rss_bytes": 23502848,
+        "used_memory_peak_bytes": 15146440
+      },
+      "result": {
+        "ops_per_sec": 116885.24,
+        "end_to_end_ops_per_sec": 116885.239,
+        "avg_ms": 0.800,
+        "min_ms": 0.080,
+        "p50_ms": 0.799,
+        "p95_ms": 1.023,
+        "p99_ms": 1.103,
+        "max_ms": 11.831
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 0,
+        "async_fallbacks": 0,
+        "async_queue_high_water": 0,
+        "async_drains": 0,
+        "async_drain_events": 0,
+        "async_envelopes": 0,
+        "async_envelope_events": 0,
+        "async_worker_errors": 0,
+        "stream_len": 10000
+      },
+      "trial_id": "s2-sync-c100-r2",
+      "repetition": 2,
+      "order": 4,
+      "async_configuration": null
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.320647,
+        "benchmark_duration_seconds": 38.773997,
+        "capture_settle_seconds": 0.243462,
+        "capture_duration_seconds": 39.017459
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 115.458,
+        "cpu_percent_max": 125.650,
+        "memory_peak_mib": 4.867
+      },
+      "server": {
+        "main_thread_cpu_seconds": 37.468906,
+        "main_thread_core_percent": 96.031,
+        "total_cpu_seconds": 70.293108,
+        "total_core_percent": 180.158,
+        "used_memory_bytes": 61251312,
+        "used_memory_rss_bytes": 42307584,
+        "used_memory_peak_bytes": 65212832
+      },
+      "result": {
+        "ops_per_sec": 128952.40,
+        "end_to_end_ops_per_sec": 128147.761,
+        "avg_ms": 0.727,
+        "min_ms": 0.064,
+        "p50_ms": 0.719,
+        "p95_ms": 0.967,
+        "p99_ms": 1.167,
+        "max_ms": 11.103
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4995870,
+        "async_fallbacks": 4130,
+        "async_queue_high_water": 1829,
+        "async_drains": 79124,
+        "async_drain_events": 4995870,
+        "async_envelopes": 74992,
+        "async_envelope_events": 4799183,
+        "async_worker_errors": 0,
+        "stream_len": 10021
+      },
+      "trial_id": "s2-envelope-b64-w1-c100-r1",
+      "repetition": 1,
+      "order": 5,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 1
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 38.298957,
+        "benchmark_duration_seconds": 37.773997,
+        "capture_settle_seconds": 0.234208,
+        "capture_duration_seconds": 38.008205
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 121.447,
+        "cpu_percent_max": 135.380,
+        "memory_peak_mib": 4.754
+      },
+      "server": {
+        "main_thread_cpu_seconds": 36.454951,
+        "main_thread_core_percent": 95.913,
+        "total_cpu_seconds": 61.721861,
+        "total_core_percent": 162.391,
+        "used_memory_bytes": 56545296,
+        "used_memory_rss_bytes": 36782080,
+        "used_memory_peak_bytes": 59539232
+      },
+      "result": {
+        "ops_per_sec": 132366.19,
+        "end_to_end_ops_per_sec": 131550.543,
+        "avg_ms": 0.701,
+        "min_ms": 0.080,
+        "p50_ms": 0.679,
+        "p95_ms": 1.015,
+        "p99_ms": 1.335,
+        "max_ms": 14.687
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994812,
+        "async_fallbacks": 5188,
+        "async_queue_high_water": 1887,
+        "async_drains": 41079,
+        "async_drain_events": 4994812,
+        "async_envelopes": 35889,
+        "async_envelope_events": 4558739,
+        "async_worker_errors": 0,
+        "stream_len": 10069
+      },
+      "trial_id": "s2-envelope-b128-w1-c100-r1",
+      "repetition": 1,
+      "order": 6,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 1
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.880649,
+        "benchmark_duration_seconds": 39.272997,
+        "capture_settle_seconds": 0.224570,
+        "capture_duration_seconds": 39.497567
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 20,
+        "cpu_percent_avg": 113.958,
+        "cpu_percent_max": 124.770,
+        "memory_peak_mib": 4.512
+      },
+      "server": {
+        "main_thread_cpu_seconds": 38.009087,
+        "main_thread_core_percent": 96.231,
+        "total_cpu_seconds": 58.004471,
+        "total_core_percent": 146.856,
+        "used_memory_bytes": 54339320,
+        "used_memory_rss_bytes": 36069376,
+        "used_memory_peak_bytes": 58786528
+      },
+      "result": {
+        "ops_per_sec": 127313.94,
+        "end_to_end_ops_per_sec": 126590.076,
+        "avg_ms": 0.732,
+        "min_ms": 0.072,
+        "p50_ms": 0.711,
+        "p95_ms": 1.055,
+        "p99_ms": 1.375,
+        "max_ms": 13.943
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994410,
+        "async_fallbacks": 5590,
+        "async_queue_high_water": 1917,
+        "async_drains": 40973,
+        "async_drain_events": 4994410,
+        "async_envelopes": 35383,
+        "async_envelope_events": 4528995,
+        "async_worker_errors": 0,
+        "stream_len": 10081
+      },
+      "trial_id": "s2-envelope-b128-w10-c100-r3",
+      "repetition": 3,
+      "order": 7,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 10
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.552868,
+        "benchmark_duration_seconds": 39.022998,
+        "capture_settle_seconds": 0.211856,
+        "capture_duration_seconds": 39.234854
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 115.648,
+        "cpu_percent_max": 126.650,
+        "memory_peak_mib": 4.820
+      },
+      "server": {
+        "main_thread_cpu_seconds": 37.612184,
+        "main_thread_core_percent": 95.864,
+        "total_cpu_seconds": 70.438003,
+        "total_core_percent": 179.529,
+        "used_memory_bytes": 64311000,
+        "used_memory_rss_bytes": 42299392,
+        "used_memory_peak_bytes": 66281168
+      },
+      "result": {
+        "ops_per_sec": 128129.57,
+        "end_to_end_ops_per_sec": 127437.711,
+        "avg_ms": 0.731,
+        "min_ms": 0.072,
+        "p50_ms": 0.719,
+        "p95_ms": 0.967,
+        "p99_ms": 1.167,
+        "max_ms": 15.671
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4996215,
+        "async_fallbacks": 3785,
+        "async_queue_high_water": 1848,
+        "async_drains": 78972,
+        "async_drain_events": 4996215,
+        "async_envelopes": 75188,
+        "async_envelope_events": 4811510,
+        "async_worker_errors": 0,
+        "stream_len": 10068
+      },
+      "trial_id": "s2-envelope-b64-w1-c100-r2",
+      "repetition": 2,
+      "order": 8,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 1
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.573957,
+        "benchmark_duration_seconds": 39.025002,
+        "capture_settle_seconds": 0.205936,
+        "capture_duration_seconds": 39.230938
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 116.093,
+        "cpu_percent_max": 129.600,
+        "memory_peak_mib": 4.012
+      },
+      "server": {
+        "main_thread_cpu_seconds": 37.909091,
+        "main_thread_core_percent": 96.631,
+        "total_cpu_seconds": 57.802846,
+        "total_core_percent": 147.340,
+        "used_memory_bytes": 54979648,
+        "used_memory_rss_bytes": 33906688,
+        "used_memory_peak_bytes": 57831904
+      },
+      "result": {
+        "ops_per_sec": 128122.99,
+        "end_to_end_ops_per_sec": 127450.432,
+        "avg_ms": 0.729,
+        "min_ms": 0.072,
+        "p50_ms": 0.711,
+        "p95_ms": 1.047,
+        "p99_ms": 1.351,
+        "max_ms": 12.591
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994244,
+        "async_fallbacks": 5756,
+        "async_queue_high_water": 2160,
+        "async_drains": 41053,
+        "async_drain_events": 4994244,
+        "async_envelopes": 35301,
+        "async_envelope_events": 4518413,
+        "async_worker_errors": 0,
+        "stream_len": 10051
+      },
+      "trial_id": "s2-envelope-b128-w10-c100-r2",
+      "repetition": 2,
+      "order": 9,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 10
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 38.282326,
+        "benchmark_duration_seconds": 37.772998,
+        "capture_settle_seconds": 0.260778,
+        "capture_duration_seconds": 38.033776
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 119.011,
+        "cpu_percent_max": 131.500,
+        "memory_peak_mib": 4.184
+      },
+      "server": {
+        "main_thread_cpu_seconds": 36.504901,
+        "main_thread_core_percent": 95.980,
+        "total_cpu_seconds": 61.737068,
+        "total_core_percent": 162.322,
+        "used_memory_bytes": 54911888,
+        "used_memory_rss_bytes": 35356672,
+        "used_memory_peak_bytes": 59042328
+      },
+      "result": {
+        "ops_per_sec": 132369.69,
+        "end_to_end_ops_per_sec": 131462.098,
+        "avg_ms": 0.701,
+        "min_ms": 0.080,
+        "p50_ms": 0.679,
+        "p95_ms": 1.007,
+        "p99_ms": 1.335,
+        "max_ms": 16.415
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994583,
+        "async_fallbacks": 5417,
+        "async_queue_high_water": 1898,
+        "async_drains": 41177,
+        "async_drain_events": 4994583,
+        "async_envelopes": 35762,
+        "async_envelope_events": 4544385,
+        "async_worker_errors": 0,
+        "stream_len": 10052
+      },
+      "trial_id": "s2-envelope-b128-w1-c100-r2",
+      "repetition": 2,
+      "order": 10,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 1
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.895714,
+        "benchmark_duration_seconds": 39.522999,
+        "capture_settle_seconds": 0.201391,
+        "capture_duration_seconds": 39.724390
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 20,
+        "cpu_percent_avg": 115.961,
+        "cpu_percent_max": 128.470,
+        "memory_peak_mib": 3.945
+      },
+      "server": {
+        "main_thread_cpu_seconds": 38.091726,
+        "main_thread_core_percent": 95.890,
+        "total_cpu_seconds": 69.217886,
+        "total_core_percent": 174.245,
+        "used_memory_bytes": 61770984,
+        "used_memory_rss_bytes": 44310528,
+        "used_memory_peak_bytes": 67247504
+      },
+      "result": {
+        "ops_per_sec": 126508.62,
+        "end_to_end_ops_per_sec": 125867.257,
+        "avg_ms": 0.740,
+        "min_ms": 0.072,
+        "p50_ms": 0.727,
+        "p95_ms": 0.983,
+        "p99_ms": 1.175,
+        "max_ms": 9.951
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4995899,
+        "async_fallbacks": 4101,
+        "async_queue_high_water": 2138,
+        "async_drains": 79135,
+        "async_drain_events": 4995899,
+        "async_envelopes": 75040,
+        "async_envelope_events": 4802554,
+        "async_worker_errors": 0,
+        "stream_len": 10043
+      },
+      "trial_id": "s2-envelope-b64-w5-c100-r3",
+      "repetition": 3,
+      "order": 11,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 5
+      }
+    },
+    {
+      "scenario": "s2-sync",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 43.886395,
+        "benchmark_duration_seconds": 43.530001,
+        "capture_settle_seconds": 0.000000,
+        "capture_duration_seconds": 43.530001
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 22,
+        "cpu_percent_avg": 99.585,
+        "cpu_percent_max": 99.850,
+        "memory_peak_mib": 4.168
+      },
+      "server": {
+        "main_thread_cpu_seconds": 43.286066,
+        "main_thread_core_percent": 99.440,
+        "total_cpu_seconds": 43.286352,
+        "total_core_percent": 99.440,
+        "used_memory_bytes": 14886400,
+        "used_memory_rss_bytes": 23457792,
+        "used_memory_peak_bytes": 15147304
+      },
+      "result": {
+        "ops_per_sec": 114863.31,
+        "end_to_end_ops_per_sec": 114863.310,
+        "avg_ms": 0.819,
+        "min_ms": 0.088,
+        "p50_ms": 0.815,
+        "p95_ms": 1.039,
+        "p99_ms": 1.135,
+        "max_ms": 6.463
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 0,
+        "async_fallbacks": 0,
+        "async_queue_high_water": 0,
+        "async_drains": 0,
+        "async_drain_events": 0,
+        "async_envelopes": 0,
+        "async_envelope_events": 0,
+        "async_worker_errors": 0,
+        "stream_len": 10000
+      },
+      "trial_id": "s2-sync-c100-r1",
+      "repetition": 1,
+      "order": 12,
+      "async_configuration": null
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.573146,
+        "benchmark_duration_seconds": 39.026002,
+        "capture_settle_seconds": 0.205580,
+        "capture_duration_seconds": 39.231582
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 116.026,
+        "cpu_percent_max": 124.390,
+        "memory_peak_mib": 4.160
+      },
+      "server": {
+        "main_thread_cpu_seconds": 37.991248,
+        "main_thread_core_percent": 96.838,
+        "total_cpu_seconds": 57.948825,
+        "total_core_percent": 147.710,
+        "used_memory_bytes": 55437112,
+        "used_memory_rss_bytes": 34185216,
+        "used_memory_peak_bytes": 59240960
+      },
+      "result": {
+        "ops_per_sec": 128119.71,
+        "end_to_end_ops_per_sec": 127448.340,
+        "avg_ms": 0.732,
+        "min_ms": 0.080,
+        "p50_ms": 0.711,
+        "p95_ms": 1.063,
+        "p99_ms": 1.367,
+        "max_ms": 14.767
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994144,
+        "async_fallbacks": 5856,
+        "async_queue_high_water": 1838,
+        "async_drains": 41064,
+        "async_drain_events": 4994144,
+        "async_envelopes": 35208,
+        "async_envelope_events": 4506612,
+        "async_worker_errors": 0,
+        "stream_len": 10067
+      },
+      "trial_id": "s2-envelope-b128-w10-c100-r1",
+      "repetition": 1,
+      "order": 13,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 10
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 38.385049,
+        "benchmark_duration_seconds": 37.771999,
+        "capture_settle_seconds": 0.230542,
+        "capture_duration_seconds": 38.002541
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 118.127,
+        "cpu_percent_max": 128.930,
+        "memory_peak_mib": 4.957
+      },
+      "server": {
+        "main_thread_cpu_seconds": 36.537667,
+        "main_thread_core_percent": 96.145,
+        "total_cpu_seconds": 61.078267,
+        "total_core_percent": 160.722,
+        "used_memory_bytes": 56205704,
+        "used_memory_rss_bytes": 36458496,
+        "used_memory_peak_bytes": 60111680
+      },
+      "result": {
+        "ops_per_sec": 132373.19,
+        "end_to_end_ops_per_sec": 131570.149,
+        "avg_ms": 0.703,
+        "min_ms": 0.072,
+        "p50_ms": 0.687,
+        "p95_ms": 1.007,
+        "p99_ms": 1.335,
+        "max_ms": 11.967
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994867,
+        "async_fallbacks": 5133,
+        "async_queue_high_water": 1837,
+        "async_drains": 40810,
+        "async_drain_events": 4994867,
+        "async_envelopes": 35678,
+        "async_envelope_events": 4566492,
+        "async_worker_errors": 0,
+        "stream_len": 10000
+      },
+      "trial_id": "s2-envelope-b128-w2-c100-r3",
+      "repetition": 3,
+      "order": 14,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 2
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 39.877252,
+        "benchmark_duration_seconds": 39.272001,
+        "capture_settle_seconds": 0.215560,
+        "capture_duration_seconds": 39.487561
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 20,
+        "cpu_percent_avg": 117.525,
+        "cpu_percent_max": 135.780,
+        "memory_peak_mib": 4.129
+      },
+      "server": {
+        "main_thread_cpu_seconds": 37.849909,
+        "main_thread_core_percent": 95.853,
+        "total_cpu_seconds": 68.821452,
+        "total_core_percent": 174.286,
+        "used_memory_bytes": 62616208,
+        "used_memory_rss_bytes": 42352640,
+        "used_memory_peak_bytes": 66098496
+      },
+      "result": {
+        "ops_per_sec": 127317.17,
+        "end_to_end_ops_per_sec": 126622.153,
+        "avg_ms": 0.735,
+        "min_ms": 0.080,
+        "p50_ms": 0.727,
+        "p95_ms": 0.975,
+        "p99_ms": 1.167,
+        "max_ms": 21.295
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4995856,
+        "async_fallbacks": 4144,
+        "async_queue_high_water": 1849,
+        "async_drains": 79157,
+        "async_drain_events": 4995856,
+        "async_envelopes": 75014,
+        "async_envelope_events": 4800827,
+        "async_worker_errors": 0,
+        "stream_len": 10001
+      },
+      "trial_id": "s2-envelope-b64-w5-c100-r2",
+      "repetition": 2,
+      "order": 15,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 5
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 37.890222,
+        "benchmark_duration_seconds": 37.271997,
+        "capture_settle_seconds": 0.232671,
+        "capture_duration_seconds": 37.504668
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 122.452,
+        "cpu_percent_max": 137.380,
+        "memory_peak_mib": 4.875
+      },
+      "server": {
+        "main_thread_cpu_seconds": 35.956992,
+        "main_thread_core_percent": 95.873,
+        "total_cpu_seconds": 67.767948,
+        "total_core_percent": 180.692,
+        "used_memory_bytes": 62805536,
+        "used_memory_rss_bytes": 43552768,
+        "used_memory_peak_bytes": 66256744
+      },
+      "result": {
+        "ops_per_sec": 134148.97,
+        "end_to_end_ops_per_sec": 133316.738,
+        "avg_ms": 0.697,
+        "min_ms": 0.072,
+        "p50_ms": 0.687,
+        "p95_ms": 0.967,
+        "p99_ms": 1.175,
+        "max_ms": 15.271
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4995578,
+        "async_fallbacks": 4422,
+        "async_queue_high_water": 1739,
+        "async_drains": 79051,
+        "async_drain_events": 4995578,
+        "async_envelopes": 74632,
+        "async_envelope_events": 4776167,
+        "async_worker_errors": 0,
+        "stream_len": 10035
+      },
+      "trial_id": "s2-envelope-b64-w1-c100-r3",
+      "repetition": 3,
+      "order": 16,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 1
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 38.318598,
+        "benchmark_duration_seconds": 37.771999,
+        "capture_settle_seconds": 0.225214,
+        "capture_duration_seconds": 37.997213
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 120.947,
+        "cpu_percent_max": 129.180,
+        "memory_peak_mib": 4.535
+      },
+      "server": {
+        "main_thread_cpu_seconds": 36.479289,
+        "main_thread_core_percent": 96.005,
+        "total_cpu_seconds": 61.839871,
+        "total_core_percent": 162.748,
+        "used_memory_bytes": 55875880,
+        "used_memory_rss_bytes": 36413440,
+        "used_memory_peak_bytes": 60437744
+      },
+      "result": {
+        "ops_per_sec": 132373.19,
+        "end_to_end_ops_per_sec": 131588.598,
+        "avg_ms": 0.702,
+        "min_ms": 0.064,
+        "p50_ms": 0.687,
+        "p95_ms": 1.015,
+        "p99_ms": 1.343,
+        "max_ms": 18.463
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994771,
+        "async_fallbacks": 5229,
+        "async_queue_high_water": 1795,
+        "async_drains": 41095,
+        "async_drain_events": 4994771,
+        "async_envelopes": 35866,
+        "async_envelope_events": 4554252,
+        "async_worker_errors": 0,
+        "stream_len": 10098
+      },
+      "trial_id": "s2-envelope-b128-w1-c100-r3",
+      "repetition": 3,
+      "order": 17,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 1
+      }
+    },
+    {
+      "scenario": "s2-envelope",
+      "workload": {
+        "test": "SET",
+        "requests": 5000000,
+        "clients": 100,
+        "threads": 4,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "duration_seconds": 38.386659,
+        "benchmark_duration_seconds": 37.772998,
+        "capture_settle_seconds": 0.227850,
+        "capture_duration_seconds": 38.000848
+      },
+      "load_generator": {
+        "host_logical_cpus": 2,
+        "stats_samples": 19,
+        "cpu_percent_avg": 120.462,
+        "cpu_percent_max": 132.980,
+        "memory_peak_mib": 4.543
+      },
+      "server": {
+        "main_thread_cpu_seconds": 36.707128,
+        "main_thread_core_percent": 96.596,
+        "total_cpu_seconds": 61.322845,
+        "total_core_percent": 161.372,
+        "used_memory_bytes": 55995896,
+        "used_memory_rss_bytes": 36003840,
+        "used_memory_peak_bytes": 59476288
+      },
+      "result": {
+        "ops_per_sec": 132369.69,
+        "end_to_end_ops_per_sec": 131576.011,
+        "avg_ms": 0.706,
+        "min_ms": 0.072,
+        "p50_ms": 0.687,
+        "p95_ms": 1.015,
+        "p99_ms": 1.343,
+        "max_ms": 13.423
+      },
+      "module": {
+        "loaded": true,
+        "forwarded": 5000000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "skipped_filtered": 0,
+        "async_enqueued": 4994712,
+        "async_fallbacks": 5288,
+        "async_queue_high_water": 1901,
+        "async_drains": 40837,
+        "async_drain_events": 4994712,
+        "async_envelopes": 35550,
+        "async_envelope_events": 4550034,
+        "async_worker_errors": 0,
+        "stream_len": 10091
+      },
+      "trial_id": "s2-envelope-b128-w2-c100-r2",
+      "repetition": 2,
+      "order": 18,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 2
+      }
+    }
+  ],
+  "summary": [
+    {
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 1
+      },
+      "repetitions": 3,
+      "ops_per_sec": {
+        "min": 128129.57,
+        "median": 128952.40,
+        "max": 134148.97
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127437.711,
+        "median": 128147.761,
+        "max": 133316.738
+      },
+      "p99_ms": {
+        "min": 1.167,
+        "median": 1.167,
+        "max": 1.175
+      },
+      "max_ms": {
+        "min": 11.103,
+        "median": 15.271,
+        "max": 15.671
+      },
+      "server_main_thread_core_percent": {
+        "min": 95.864,
+        "median": 95.873,
+        "max": 96.031
+      },
+      "server_total_core_percent": {
+        "min": 179.529,
+        "median": 180.158,
+        "max": 180.692
+      },
+      "capture_settle_seconds": {
+        "min": 0.211856,
+        "median": 0.232671,
+        "max": 0.243462
+      },
+      "load_generator_cpu_percent_avg": {
+        "min": 115.458,
+        "median": 115.648,
+        "max": 122.452
+      },
+      "load_generator_cpu_percent_max": {
+        "min": 125.650,
+        "median": 126.650,
+        "max": 137.380
+      },
+      "async_queue_high_water": {
+        "min": 1739,
+        "median": 1829,
+        "max": 1848
+      },
+      "achieved_envelope_size": {
+        "min": 63.99305740277704,
+        "median": 63.99593289950928,
+        "max": 63.9962348590417
+      },
+      "envelope_event_percent": {
+        "min": 95.52334,
+        "median": 95.98366,
+        "max": 96.2302
+      },
+      "fallback_percent": {
+        "min": 0.0757,
+        "median": 0.0826,
+        "max": 0.08844
+      },
+      "events_lost": 0,
+      "dropped": 0,
+      "handler_panics": 0,
+      "async_worker_errors": 0
+    },
+    {
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 5
+      },
+      "repetitions": 3,
+      "ops_per_sec": {
+        "min": 126508.62,
+        "median": 127313.94,
+        "max": 127317.17
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 125867.257,
+        "median": 126531.992,
+        "max": 126622.153
+      },
+      "p99_ms": {
+        "min": 1.167,
+        "median": 1.175,
+        "max": 1.183
+      },
+      "max_ms": {
+        "min": 9.951,
+        "median": 11.895,
+        "max": 21.295
+      },
+      "server_main_thread_core_percent": {
+        "min": 95.847,
+        "median": 95.853,
+        "max": 95.890
+      },
+      "server_total_core_percent": {
+        "min": 174.018,
+        "median": 174.245,
+        "max": 174.286
+      },
+      "capture_settle_seconds": {
+        "min": 0.201391,
+        "median": 0.215560,
+        "max": 0.242701
+      },
+      "load_generator_cpu_percent_avg": {
+        "min": 115.961,
+        "median": 117.525,
+        "max": 119.192
+      },
+      "load_generator_cpu_percent_max": {
+        "min": 127.500,
+        "median": 128.470,
+        "max": 135.780
+      },
+      "async_queue_high_water": {
+        "min": 1443,
+        "median": 1849,
+        "max": 2138
+      },
+      "achieved_envelope_size": {
+        "min": 63.99908017170128,
+        "median": 63.99922741864585,
+        "max": 63.99992004264392
+      },
+      "envelope_event_percent": {
+        "min": 96.01653999999999,
+        "median": 96.05108,
+        "max": 96.09228
+      },
+      "fallback_percent": {
+        "min": 0.08202,
+        "median": 0.08288,
+        "max": 0.08356000000000001
+      },
+      "events_lost": 0,
+      "dropped": 0,
+      "handler_panics": 0,
+      "async_worker_errors": 0
+    },
+    {
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 1
+      },
+      "repetitions": 3,
+      "ops_per_sec": {
+        "min": 132366.19,
+        "median": 132369.69,
+        "max": 132373.19
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 131462.098,
+        "median": 131550.543,
+        "max": 131588.598
+      },
+      "p99_ms": {
+        "min": 1.335,
+        "median": 1.335,
+        "max": 1.343
+      },
+      "max_ms": {
+        "min": 14.687,
+        "median": 16.415,
+        "max": 18.463
+      },
+      "server_main_thread_core_percent": {
+        "min": 95.913,
+        "median": 95.980,
+        "max": 96.005
+      },
+      "server_total_core_percent": {
+        "min": 162.322,
+        "median": 162.391,
+        "max": 162.748
+      },
+      "capture_settle_seconds": {
+        "min": 0.225214,
+        "median": 0.234208,
+        "max": 0.260778
+      },
+      "load_generator_cpu_percent_avg": {
+        "min": 119.011,
+        "median": 120.947,
+        "max": 121.447
+      },
+      "load_generator_cpu_percent_max": {
+        "min": 129.180,
+        "median": 131.500,
+        "max": 135.380
+      },
+      "async_queue_high_water": {
+        "min": 1795,
+        "median": 1887,
+        "max": 1898
+      },
+      "achieved_envelope_size": {
+        "min": 126.97964646183014,
+        "median": 127.02329404552927,
+        "max": 127.07301045802808
+      },
+      "envelope_event_percent": {
+        "min": 90.88770000000001,
+        "median": 91.08503999999999,
+        "max": 91.17478
+      },
+      "fallback_percent": {
+        "min": 0.10376,
+        "median": 0.10457999999999999,
+        "max": 0.10833999999999999
+      },
+      "events_lost": 0,
+      "dropped": 0,
+      "handler_panics": 0,
+      "async_worker_errors": 0
+    },
+    {
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 2
+      },
+      "repetitions": 3,
+      "ops_per_sec": {
+        "min": 132369.69,
+        "median": 132373.19,
+        "max": 132376.69
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 131558.012,
+        "median": 131570.149,
+        "max": 131576.011
+      },
+      "p99_ms": {
+        "min": 1.335,
+        "median": 1.335,
+        "max": 1.343
+      },
+      "max_ms": {
+        "min": 11.967,
+        "median": 13.423,
+        "max": 14.599
+      },
+      "server_main_thread_core_percent": {
+        "min": 96.145,
+        "median": 96.596,
+        "max": 96.621
+      },
+      "server_total_core_percent": {
+        "min": 160.722,
+        "median": 161.233,
+        "max": 161.372
+      },
+      "capture_settle_seconds": {
+        "min": 0.227850,
+        "median": 0.230542,
+        "max": 0.235047
+      },
+      "load_generator_cpu_percent_avg": {
+        "min": 118.127,
+        "median": 120.462,
+        "max": 120.557
+      },
+      "load_generator_cpu_percent_max": {
+        "min": 128.930,
+        "median": 131.610,
+        "max": 132.980
+      },
+      "async_queue_high_water": {
+        "min": 1837,
+        "median": 1850,
+        "max": 1901
+      },
+      "achieved_envelope_size": {
+        "min": 127.98970464135022,
+        "median": 127.9902614765403,
+        "max": 127.9918156847357
+      },
+      "envelope_event_percent": {
+        "min": 90.94732,
+        "median": 91.00068,
+        "max": 91.32983999999999
+      },
+      "fallback_percent": {
+        "min": 0.10265999999999999,
+        "median": 0.10575999999999999,
+        "max": 0.10740000000000001
+      },
+      "events_lost": 0,
+      "dropped": 0,
+      "handler_panics": 0,
+      "async_worker_errors": 0
+    },
+    {
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 10
+      },
+      "repetitions": 3,
+      "ops_per_sec": {
+        "min": 127313.94,
+        "median": 128119.71,
+        "max": 128122.99
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 126590.076,
+        "median": 127448.340,
+        "max": 127450.432
+      },
+      "p99_ms": {
+        "min": 1.351,
+        "median": 1.367,
+        "max": 1.375
+      },
+      "max_ms": {
+        "min": 12.591,
+        "median": 13.943,
+        "max": 14.767
+      },
+      "server_main_thread_core_percent": {
+        "min": 96.231,
+        "median": 96.631,
+        "max": 96.838
+      },
+      "server_total_core_percent": {
+        "min": 146.856,
+        "median": 147.340,
+        "max": 147.710
+      },
+      "capture_settle_seconds": {
+        "min": 0.205580,
+        "median": 0.205936,
+        "max": 0.224570
+      },
+      "load_generator_cpu_percent_avg": {
+        "min": 113.958,
+        "median": 116.026,
+        "max": 116.093
+      },
+      "load_generator_cpu_percent_max": {
+        "min": 124.390,
+        "median": 124.770,
+        "max": 129.600
+      },
+      "async_queue_high_water": {
+        "min": 1838,
+        "median": 1917,
+        "max": 2160
+      },
+      "achieved_envelope_size": {
+        "min": 127.99674230191779,
+        "median": 127.99918039736596,
+        "max": 127.99965916837083
+      },
+      "envelope_event_percent": {
+        "min": 90.13224,
+        "median": 90.36826,
+        "max": 90.57990000000001
+      },
+      "fallback_percent": {
+        "min": 0.11180000000000001,
+        "median": 0.11512,
+        "max": 0.11712
+      },
+      "events_lost": 0,
+      "dropped": 0,
+      "handler_panics": 0,
+      "async_worker_errors": 0
+    },
+    {
+      "scenario": "s2-sync",
+      "clients": 100,
+      "async_configuration": null,
+      "repetitions": 3,
+      "ops_per_sec": {
+        "min": 114863.31,
+        "median": 116206.10,
+        "max": 116885.24
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 114863.310,
+        "median": 116206.100,
+        "max": 116885.239
+      },
+      "p99_ms": {
+        "min": 1.103,
+        "median": 1.111,
+        "max": 1.135
+      },
+      "max_ms": {
+        "min": 6.463,
+        "median": 9.895,
+        "max": 11.831
+      },
+      "server_main_thread_core_percent": {
+        "min": 99.335,
+        "median": 99.440,
+        "max": 99.658
+      },
+      "server_total_core_percent": {
+        "min": 99.336,
+        "median": 99.440,
+        "max": 99.658
+      },
+      "capture_settle_seconds": {
+        "min": 0.000000,
+        "median": 0.000000,
+        "max": 0.000000
+      },
+      "load_generator_cpu_percent_avg": {
+        "min": 99.585,
+        "median": 101.280,
+        "max": 103.700
+      },
+      "load_generator_cpu_percent_max": {
+        "min": 98.620,
+        "median": 98.850,
+        "max": 99.850
+      },
+      "async_queue_high_water": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "achieved_envelope_size": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "envelope_event_percent": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "fallback_percent": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "events_lost": 0,
+      "dropped": 0,
+      "handler_panics": 0,
+      "async_worker_errors": 0
+    }
+  ]
+}
