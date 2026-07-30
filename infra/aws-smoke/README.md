@@ -89,6 +89,7 @@ The runner fails unless:
 ## Observed runs
 
 - [2026-07-30: first AWS smoke run](observations/2026-07-30.md)
+- [2026-07-30: higher-concurrency ramp probe](observations/2026-07-30-ramp.md)
 
 ## Image pins
 
