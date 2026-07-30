@@ -28,7 +28,7 @@ locals {
   bootstrap_server = <<-USER_DATA
     #!/usr/bin/env bash
     set -euxo pipefail
-    dnf install -y docker jq
+    dnf install -y docker jq perf
     systemctl enable --now docker
     systemctl enable --now amazon-ssm-agent
     docker pull '${var.module_image}'
