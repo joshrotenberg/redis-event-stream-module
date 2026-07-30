@@ -54,6 +54,34 @@ Envelope mode is default-off Preview. It uses more Redis process CPU, relaxes
 command-unit atomicity, and makes `maxlen` count physical envelopes rather than
 logical events. Use the stable default unless that trade is intentional.
 
+### Decode both shapes in Rust
+
+The shipped `eventstream-client` library has one strict decoder for the stable
+fixed schema and Preview `batch-v1` envelopes:
+
+```rust
+let events = reader.poll_decoded(&mut connection, 200)?;
+for event in events {
+    println!(
+        "{} event={} db={} key={:?}",
+        event.source, event.event, event.db, event.key
+    );
+}
+```
+
+`LogicalEvent::key` remains binary bytes. `source.envelope_index` is `None` for
+a fixed entry and `Some(0)`, `Some(1)`, and so on for events in an envelope.
+`source.physical` contains the stream name and Redis entry ID shared by every
+logical event in that envelope. Group work by that physical position and
+`XACK` only after all of its logical events are durable and idempotent.
+
+Malformed counts, JSON, base64 keys, missing fields, and unknown format
+versions return a contextual `DecodeError` containing the stream and entry ID.
+The decoder deliberately fails rather than treating an unrecognized envelope
+as a fixed entry. Other opt-in `eventstream.entry-format` values keep their
+format-specific consumer contract; Preview envelope mode itself requires
+`entry-format fixed`.
+
 ## Filter by the current value
 
 The module filters on event name, key name, and source database. It does not

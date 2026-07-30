@@ -14,7 +14,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use redis::{Cmd, RedisResult};
+use redis::{Cmd, ErrorKind, RedisError, RedisResult};
 
 use eventstream_client::{
     counter_sum, discover_all, discover_streams, node_counters, Conn, MergedReader, Target,
@@ -64,7 +64,7 @@ enum Command {
         /// Start at the beginning (`0`) or only new entries (`$`, default).
         #[arg(long, default_value = "$")]
         from: String,
-        /// Stop after N entries (default: run until Ctrl-C).
+        /// Stop after N logical events (default: run until Ctrl-C).
         #[arg(long)]
         count: Option<i64>,
     },
@@ -379,7 +379,14 @@ fn cmd_consume(
     let mut last_discovery = Instant::now();
     let mut seen = 0i64;
     loop {
-        for e in reader.poll(&mut conn, 200) {
+        let events = reader.poll_decoded(&mut conn, 200).map_err(|error| {
+            RedisError::from((
+                ErrorKind::UnexpectedReturnType,
+                "failed to decode event stream entry",
+                error.to_string(),
+            ))
+        })?;
+        for e in events {
             println!("{e}");
             seen += 1;
             if seen >= limit {
