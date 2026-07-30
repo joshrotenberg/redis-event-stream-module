@@ -12,7 +12,8 @@
 //! without reordering a destination stream.
 
 use crate::capture::{
-    count_defer_failure, defer_pending_event, process_pending_event, PendingEvent,
+    count_defer_failure, defer_pending_event, encode_batch_fields, process_pending_envelope,
+    process_pending_event, PendingEvent,
 };
 use crate::config::{
     EntryFormat, WriteMode, ASYNC_BATCH_SIZE, ASYNC_MAX_WAIT_MS, ASYNC_QUEUE_CAPACITY,
@@ -27,7 +28,7 @@ use redis_module::{raw, Context, RedisLockIndicator, Status};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -36,10 +37,24 @@ static EVENT_QUEUE: OnceLock<Arc<EventQueue>> = OnceLock::new();
 static WORKER: Mutex<Option<JoinHandle<Vec<PendingEvent>>>> = Mutex::new(None);
 static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_MODE: AtomicU8 = AtomicU8::new(WriteMode::sync as u8);
+static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(0);
 
 struct QueuedEvent {
+    id: u64,
     event: PendingEvent,
     enqueued_at: Instant,
+}
+
+struct PreparedGroup {
+    len: usize,
+    fields: Vec<Vec<u8>>,
+}
+
+struct EnvelopeSnapshot {
+    first_id: u64,
+    last_id: u64,
+    count: usize,
+    groups: Vec<PreparedGroup>,
 }
 
 struct EventQueue {
@@ -68,6 +83,7 @@ impl EventQueue {
             return Err(event);
         }
         events.push_back(QueuedEvent {
+            id: NEXT_QUEUE_ID.fetch_add(1, Ordering::Relaxed),
             event,
             enqueued_at: Instant::now(),
         });
@@ -117,6 +133,64 @@ impl EventQueue {
 
     fn drain_all(&self) -> Vec<PendingEvent> {
         self.drain(usize::MAX)
+    }
+
+    /// Encode the current prefix while leaving it in the FIFO. A fallback can
+    /// still drain that prefix before the worker owns Redis's lock; IDs let the
+    /// worker detect that race and discard the now-stale encoding.
+    fn prepare_envelopes(&self, limit: usize) -> Option<EnvelopeSnapshot> {
+        let events = self.events.lock().unwrap();
+        let count = events.len().min(limit);
+        if count == 0 {
+            return None;
+        }
+        let selected = events.iter().take(count).collect::<Vec<_>>();
+        let first_id = selected.first().unwrap().id;
+        let last_id = selected.last().unwrap().id;
+        let mut groups = Vec::new();
+        let mut start = 0;
+        while start < selected.len() {
+            let mut end = start + 1;
+            while end < selected.len()
+                && envelope_compatible(&selected[start].event, &selected[end].event)
+            {
+                end += 1;
+            }
+            let refs = selected[start..end]
+                .iter()
+                .map(|queued| &queued.event)
+                .collect::<Vec<_>>();
+            groups.push(PreparedGroup {
+                len: refs.len(),
+                fields: encode_batch_fields(&refs),
+            });
+            start = end;
+        }
+        Some(EnvelopeSnapshot {
+            first_id,
+            last_id,
+            count,
+            groups,
+        })
+    }
+
+    fn drain_snapshot(&self, snapshot: &EnvelopeSnapshot) -> Option<Vec<PendingEvent>> {
+        let mut events = self.events.lock().unwrap();
+        let matches = events
+            .front()
+            .is_some_and(|event| event.id == snapshot.first_id)
+            && events
+                .get(snapshot.count.saturating_sub(1))
+                .is_some_and(|event| event.id == snapshot.last_id);
+        if !matches {
+            return None;
+        }
+        let drained = events
+            .drain(..snapshot.count)
+            .map(|queued| queued.event)
+            .collect::<Vec<_>>();
+        ASYNC_QUEUE_DEPTH.fetch_sub(snapshot.count as i64, Ordering::Relaxed);
+        Some(drained)
     }
 
     fn wake(&self) {
@@ -191,9 +265,6 @@ pub(crate) fn start_dispatch_worker(ctx: &Context) -> Result<(), String> {
         ACTIVE_MODE.store(WriteMode::sync as u8, Ordering::Release);
         return Ok(());
     }
-    if mode == WriteMode::envelope {
-        return Err("write-mode envelope is not implemented yet".to_owned());
-    }
     if ctx
         .get_flags()
         .contains(redis_module::ContextFlags::CLUSTER)
@@ -228,7 +299,7 @@ pub(crate) fn start_dispatch_worker(ctx: &Context) -> Result<(), String> {
     let worker_queue = Arc::clone(&queue);
     let handle = thread::Builder::new()
         .name("eventstream-writer".to_owned())
-        .spawn(move || worker_main(worker_queue, batch_size, max_wait))
+        .spawn(move || worker_main(worker_queue, batch_size, max_wait, mode))
         .map_err(|e| format!("failed to spawn async writer: {e}"))?;
     EVENT_QUEUE
         .set(queue)
@@ -285,7 +356,12 @@ fn defer_ordered_fallback(ctx: &Context, queue: Arc<EventQueue>, event: PendingE
     }
 }
 
-fn worker_main(queue: Arc<EventQueue>, batch_size: usize, max_wait: Duration) -> Vec<PendingEvent> {
+fn worker_main(
+    queue: Arc<EventQueue>,
+    batch_size: usize,
+    max_wait: Duration,
+    mode: WriteMode,
+) -> Vec<PendingEvent> {
     let thread_ctx = match RawThreadContext::new() {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -299,17 +375,33 @@ fn worker_main(queue: Arc<EventQueue>, batch_size: usize, max_wait: Duration) ->
             return queue.drain_all();
         }
 
+        let envelope = if mode == WriteMode::envelope {
+            queue.prepare_envelopes(batch_size)
+        } else {
+            None
+        };
         loop {
             if STOP_WORKER.load(Ordering::Acquire) {
                 return queue.drain_all();
             }
             if let Some(ctx) = thread_ctx.try_lock() {
-                let batch = queue.drain(batch_size);
+                let batch = match &envelope {
+                    Some(snapshot) => queue.drain_snapshot(snapshot).unwrap_or_default(),
+                    None => queue.drain(batch_size),
+                };
                 if !batch.is_empty() {
                     ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
                     ASYNC_DRAIN_EVENTS.fetch_add(batch.len() as u64, Ordering::Relaxed);
-                    for event in batch {
-                        guard_job(|| process_pending_event(&ctx, event));
+                    if let Some(snapshot) = envelope {
+                        let mut events = batch.into_iter();
+                        for group in snapshot.groups {
+                            let compatible = events.by_ref().take(group.len).collect::<Vec<_>>();
+                            guard_job(|| process_pending_envelope(&ctx, compatible, group.fields));
+                        }
+                    } else {
+                        for event in batch {
+                            guard_job(|| process_pending_event(&ctx, event));
+                        }
                     }
                 }
                 break;
@@ -317,6 +409,13 @@ fn worker_main(queue: Arc<EventQueue>, batch_size: usize, max_wait: Duration) ->
             thread::yield_now();
         }
     }
+}
+
+fn envelope_compatible(left: &PendingEvent, right: &PendingEvent) -> bool {
+    left.prefix == right.prefix
+        && left.suffix == right.suffix
+        && left.data_retention == right.data_retention
+        && left.max_streams == right.max_streams
 }
 
 /// Stop without deadlocking on the Redis lock, then finish every event the

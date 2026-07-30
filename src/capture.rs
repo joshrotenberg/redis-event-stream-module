@@ -84,7 +84,7 @@ pub(crate) fn server_now_ms() -> i64 {
 /// trims by `MAXLEN`. Redis accepts only one of the two clauses per `XADD`, so
 /// the two are mutually exclusive by construction (SPEC.md section 7). `Copy`,
 /// so it threads through the write helpers without borrow bookkeeping.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Retention {
     pub(crate) maxlen: i64,
     pub(crate) retention_ms: i64,
@@ -240,6 +240,38 @@ pub(crate) fn json_document(event: &str, key: &[u8], db: &str, seq: Option<u64>)
     }
     s.push('}');
     s
+}
+
+/// Encode a compatible run of logical events as the experimental `batch-v1`
+/// envelope. Encoding is pure and happens on the worker before it acquires the
+/// Redis lock. Keys remain arbitrary bytes through base64; event and class
+/// names are JSON escaped.
+pub(crate) fn encode_batch_fields(events: &[&PendingEvent]) -> Vec<Vec<u8>> {
+    let mut data = String::with_capacity(events.len().saturating_mul(80).saturating_add(2));
+    data.push('[');
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 {
+            data.push(',');
+        }
+        data.push_str("{\"event\":");
+        json_escape_into(&event.event, &mut data);
+        data.push_str(",\"key\":\"");
+        base64_into(&event.key, &mut data);
+        data.push_str("\",\"db\":");
+        data.push_str(&event.db.to_string());
+        data.push_str(",\"class\":");
+        json_escape_into(&class_names(event.class), &mut data);
+        data.push('}');
+    }
+    data.push(']');
+    vec![
+        b"format".to_vec(),
+        b"batch-v1".to_vec(),
+        b"count".to_vec(),
+        events.len().to_string().into_bytes(),
+        b"events".to_vec(),
+        data.into_bytes(),
+    ]
 }
 
 /// Build the field name/value pairs for one mirrored entry, in the stable order
@@ -416,6 +448,51 @@ pub(crate) fn mirror_entry(
     counter: &AtomicU64,
 ) -> MirrorOutcome {
     let stream = format!("{prefix}{seg}{suffix}");
+
+    // Build the format's field set (issues #60, #66) before the XADD. An
+    // unencodable entry (only `json`, on a non-UTF-8 event name) is refused
+    // here and counted in `dropped_encode_error`; it never reaches the server.
+    let fields = match encode_entry_fields(spec) {
+        Ok(f) => f,
+        Err(reason) => return MirrorOutcome::EncodeError { stream, reason },
+    };
+    let trace = format!(
+        "eventstream: {} key={} -> {}",
+        String::from_utf8_lossy(spec.event),
+        spec.key.escape_ascii(),
+        stream
+    );
+    mirror_fields(
+        ctx,
+        prefix,
+        seg,
+        suffix,
+        &fields,
+        retention,
+        max_streams,
+        counter,
+        1,
+        &trace,
+    )
+}
+
+/// Shared XADD/registry/accounting path for a normal one-event field set and a
+/// versioned batch envelope. `logical_count` deliberately decouples successful
+/// Redis writes from captured-event counters.
+#[allow(clippy::too_many_arguments)]
+fn mirror_fields(
+    ctx: &Context,
+    prefix: &str,
+    seg: &str,
+    suffix: &str,
+    fields: &[Vec<u8>],
+    retention: Retention,
+    max_streams: i64,
+    counter: &AtomicU64,
+    logical_count: u64,
+    trace: &str,
+) -> MirrorOutcome {
+    let stream = format!("{prefix}{seg}{suffix}");
     let registry = format!("{prefix}{seg}#streams");
 
     // Max-streams cap (issue #64): before the XADD, refuse to create a new
@@ -437,14 +514,6 @@ pub(crate) fn mirror_entry(
         }
     }
 
-    // Build the format's field set (issues #60, #66) before the XADD. An
-    // unencodable entry (only `json`, on a non-UTF-8 event name) is refused
-    // here and counted in `dropped_encode_error`; it never reaches the server.
-    let fields = match encode_entry_fields(spec) {
-        Ok(f) => f,
-        Err(reason) => return MirrorOutcome::EncodeError { stream, reason },
-    };
-
     // The inline trim clause (issues #62, #108): count-based `MAXLEN ~ <cap>`
     // with the per-event-resolved cap, or time-based `MINID ~ <now-window>` when
     // `retention-ms` is set (MINID wins). Held outside the args vec so its bytes
@@ -462,25 +531,18 @@ pub(crate) fn mirror_entry(
         args.push(threshold.as_bytes());
     }
     args.push(&b"*"[..]);
-    for f in &fields {
+    for f in fields {
         args.push(f.as_slice());
     }
 
-    // Per-event trace (SPEC.md section 13); the server filters by loglevel. Key
-    // bytes are ASCII-escaped: the wrapper's logger builds a CString and panics
-    // across the FFI boundary on interior NUL, so raw key bytes (which may
-    // contain NUL) must never reach it.
-    ctx.log_debug(&format!(
-        "eventstream: {} key={} -> {}",
-        String::from_utf8_lossy(spec.event),
-        spec.key.escape_ascii(),
-        stream
-    ));
+    // Per-write trace (SPEC.md section 13). The one-event wrapper renders its
+    // key safely; the batch wrapper reports only its logical count.
+    ctx.log_debug(trace);
 
     let res: CallResult = ctx.call_ext("XADD", &xadd_call_options(), args.as_slice());
     match res {
         Ok(_) => {
-            counter.fetch_add(1, Ordering::Relaxed);
+            counter.fetch_add(logical_count, Ordering::Relaxed);
             // A successful write proves current ownership, so reset the probe
             // budget: without this, a tag verified once (after an unrelated
             // transient failure) would never be re-probed, and a later
@@ -506,7 +568,7 @@ pub(crate) fn mirror_entry(
                 stats.insert(stream.clone(), StreamStats::default());
             }
             let entry = stats.get_mut(&stream).expect("inserted above");
-            entry.forwarded += 1;
+            entry.forwarded += logical_count;
             if let Some(drops) = entry.record_success() {
                 // Notice-level recovery line (issue #68): the stream was
                 // dropping and writes again.
@@ -677,6 +739,119 @@ pub(crate) fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, ret
             &LOGGED_ENCODE_ERROR,
             &format!("entry-format encode failed for firehose copy '{stream}': {reason}; copy dropped (dropped_encode_error)"),
         ),
+    }
+}
+
+/// Execute one fully-snapshotted event in a write-safe context. This is the
+/// canonical logical-event path for both the historical post-notification job
+/// and the experimental async worker (issue #265).
+pub(crate) fn process_pending_envelope(
+    ctx: &Context,
+    events: Vec<PendingEvent>,
+    fields: Vec<Vec<u8>>,
+) {
+    let Some(first) = events.first() else {
+        return;
+    };
+    let logical_count = events.len() as u64;
+
+    let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
+    if rc != raw::REDISMODULE_OK as i32 {
+        for _ in 0..logical_count {
+            count_event_lost(
+                ctx,
+                &DROPPED_XADD_ERROR,
+                &LOGGED_XADD_ERROR,
+                "SelectDb(0) failed; batch entry dropped",
+            );
+        }
+        return;
+    }
+    let seg = match tag_segment(ctx) {
+        Some(s) => s,
+        None => {
+            for _ in 0..logical_count {
+                count_no_slot_drop(ctx, true);
+            }
+            return;
+        }
+    };
+    let trace = format!(
+        "eventstream: batch-v1 count={} -> {}{}{}",
+        logical_count, first.prefix, seg, first.suffix
+    );
+    match mirror_fields(
+        ctx,
+        &first.prefix,
+        &seg,
+        &first.suffix,
+        &fields,
+        first.data_retention,
+        first.max_streams,
+        &FORWARDED,
+        logical_count,
+        &trace,
+    ) {
+        MirrorOutcome::Written => {
+            ASYNC_ENVELOPES.fetch_add(1, Ordering::Relaxed);
+        }
+        MirrorOutcome::Oom { stream, msg } => {
+            for _ in 0..logical_count {
+                count_event_lost_stream(ctx, &stream, &DROPPED_OOM, &msg);
+            }
+        }
+        MirrorOutcome::SlotMigrated => {
+            for _ in 0..logical_count {
+                count_event_lost(
+                    ctx,
+                    &DROPPED_MIGRATING,
+                    &LOGGED_MIGRATING,
+                    "batch XADD refused as non-local (dropped_migrating)",
+                );
+            }
+        }
+        MirrorOutcome::Migrating(msg) => {
+            for _ in 0..logical_count {
+                count_event_lost(
+                    ctx,
+                    &DROPPED_MIGRATING,
+                    &LOGGED_MIGRATING,
+                    &format!("{msg}; batch dropped (dropped_migrating)"),
+                );
+            }
+        }
+        MirrorOutcome::Failed { stream, msg } => {
+            for _ in 0..logical_count {
+                count_event_lost_stream(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
+            }
+        }
+        MirrorOutcome::MaxStreams { stream } => {
+            for _ in 0..logical_count {
+                count_event_lost(
+                    ctx,
+                    &DROPPED_MAX_STREAMS,
+                    &LOGGED_MAX_STREAMS,
+                    &format!(
+                        "max-streams cap ({}) reached; new stream '{stream}' not created; \
+                         batched event dropped (dropped_max_streams)",
+                        first.max_streams
+                    ),
+                );
+            }
+        }
+        MirrorOutcome::EncodeError { stream, reason } => {
+            for _ in 0..logical_count {
+                count_event_lost(
+                    ctx,
+                    &DROPPED_ENCODE_ERROR,
+                    &LOGGED_ENCODE_ERROR,
+                    &format!(
+                        "batch encode failed for '{stream}': {reason}; \
+                         event dropped (dropped_encode_error)"
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -1189,6 +1364,45 @@ mod tests {
             class: NotifyEvent::HASH,
             seq,
         }
+    }
+
+    fn pending(event: &str, key: &[u8], db: i32, class: NotifyEvent) -> PendingEvent {
+        let retention = Retention {
+            maxlen: 0,
+            retention_ms: 0,
+        };
+        PendingEvent {
+            prefix: "events:".to_owned(),
+            suffix: "set".to_owned(),
+            event: event.to_owned(),
+            key: key.to_vec(),
+            db,
+            class,
+            data_retention: retention,
+            control_retention: retention,
+            firehose_retention: retention,
+            max_streams: 0,
+            format: EntryFormat::fixed,
+            entry_seq: false,
+        }
+    }
+
+    #[test]
+    fn batch_v1_is_versioned_ordered_and_binary_safe() {
+        let first = pending("s\"et", &[b'a', 0, 0xff], 0, NotifyEvent::STRING);
+        let second = pending("hset", b"user:1", 3, NotifyEvent::HASH);
+        let fields = encode_batch_fields(&[&first, &second]);
+        assert_eq!(
+            pairs(&fields),
+            vec![
+                ("format".to_owned(), b"batch-v1".to_vec()),
+                ("count".to_owned(), b"2".to_vec()),
+                (
+                    "events".to_owned(),
+                    br#"[{"event":"s\"et","key":"YQD/","db":0,"class":"string"},{"event":"hset","key":"dXNlcjox","db":3,"class":"hash"}]"#.to_vec(),
+                ),
+            ]
+        );
     }
 
     #[test]
