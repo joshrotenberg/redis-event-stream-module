@@ -26,6 +26,14 @@ fn assert_lossless(conn: &mut redis::Connection, expected: i64) {
     assert_eq!(info_field(conn, "async_worker_errors"), 0);
 }
 
+fn assert_pipeline_order(conn: &mut redis::Connection, expected: i64) {
+    let keys = stream_field_strings(conn, "events:set", "key");
+    assert_eq!(keys.len(), expected as usize);
+    for (i, key) in keys.iter().enumerate() {
+        assert_eq!(key, &format!("async:{i}"), "event order changed at {i}");
+    }
+}
+
 #[test]
 fn individual_mode_preserves_every_logical_event() {
     let s = TestServer::start(&["events", "set", "maxlen", "0", "write-mode", "individual"]);
@@ -33,6 +41,7 @@ fn individual_mode_preserves_every_logical_event() {
 
     set_pipeline(&mut c, EVENT_COUNT);
     assert_lossless(&mut c, EVENT_COUNT);
+    assert_pipeline_order(&mut c, EVENT_COUNT);
 
     let enqueued = info_field(&mut c, "async_enqueued");
     let fallbacks = info_field(&mut c, "async_fallbacks");
@@ -62,6 +71,7 @@ fn full_queue_falls_back_without_losing_or_reordering_events() {
 
     set_pipeline(&mut c, EVENT_COUNT);
     assert_lossless(&mut c, EVENT_COUNT);
+    assert_pipeline_order(&mut c, EVENT_COUNT);
 
     let enqueued = info_field(&mut c, "async_enqueued");
     let fallbacks = info_field(&mut c, "async_fallbacks");

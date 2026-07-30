@@ -1,12 +1,19 @@
 //! Experimental bounded capture dispatch (issue #265).
 //!
 //! The default `sync` mode still registers the historical post-notification
-//! job. `individual` moves accepted events through a bounded channel to one
+//! job. `individual` moves accepted events through a bounded FIFO to one
 //! worker, drains several events under one thread-safe Redis lock, and retains
-//! one XADD per logical event. Queue-full/disconnected events fall back to the
-//! historical job, so enqueue pressure is observable but not event loss.
+//! one XADD per logical event.
+//!
+//! The worker deliberately does not remove events from the FIFO until it owns
+//! Redis's lock. If the FIFO is full (or briefly contended), the main-thread
+//! fallback job can therefore drain every earlier accepted event before it
+//! writes the current one. That makes the nonblocking fallback lossless
+//! without reordering a destination stream.
 
-use crate::capture::{defer_pending_event, process_pending_event, PendingEvent};
+use crate::capture::{
+    count_defer_failure, defer_pending_event, process_pending_event, PendingEvent,
+};
 use crate::config::{
     EntryFormat, WriteMode, ASYNC_BATCH_SIZE, ASYNC_MAX_WAIT_MS, ASYNC_QUEUE_CAPACITY,
     ENTRY_FORMAT, ENTRY_SEQ, FIREHOSE, MAXLEN_OVERRIDES, RETENTION_MS, WRITE_MODE,
@@ -16,20 +23,106 @@ use crate::stats::{
     ASYNC_DRAINS, ASYNC_DRAIN_EVENTS, ASYNC_ENQUEUED, ASYNC_FALLBACKS, ASYNC_QUEUE_DEPTH,
     ASYNC_QUEUE_HIGH_WATER, ASYNC_WORKER_ERRORS, EVENTS_LOST,
 };
-use redis_module::{raw, Context, RedisLockIndicator};
+use redis_module::{raw, Context, RedisLockIndicator, Status};
+use std::collections::VecDeque;
 use std::ops::Deref;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-static EVENT_SENDER: OnceLock<SyncSender<PendingEvent>> = OnceLock::new();
+static EVENT_QUEUE: OnceLock<Arc<EventQueue>> = OnceLock::new();
 static WORKER: Mutex<Option<JoinHandle<Vec<PendingEvent>>>> = Mutex::new(None);
 static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_MODE: AtomicU8 = AtomicU8::new(WriteMode::sync as u8);
-const STOP_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+struct QueuedEvent {
+    event: PendingEvent,
+    enqueued_at: Instant,
+}
+
+struct EventQueue {
+    capacity: usize,
+    events: Mutex<VecDeque<QueuedEvent>>,
+    ready: Condvar,
+}
+
+impl EventQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            events: Mutex::new(VecDeque::with_capacity(capacity)),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Never wait in the notification callback. A briefly contended queue is
+    /// treated exactly like a full queue and goes through the ordered fallback.
+    fn try_push(&self, event: PendingEvent) -> Result<usize, PendingEvent> {
+        let mut events = match self.events.try_lock() {
+            Ok(events) => events,
+            Err(TryLockError::Poisoned(_)) | Err(TryLockError::WouldBlock) => return Err(event),
+        };
+        if events.len() >= self.capacity {
+            return Err(event);
+        }
+        events.push_back(QueuedEvent {
+            event,
+            enqueued_at: Instant::now(),
+        });
+        let depth = events.len();
+        drop(events);
+        self.ready.notify_one();
+        Ok(depth)
+    }
+
+    /// Wait until a full batch is available or the oldest queued event reaches
+    /// its latency bound. Stop is checked after every notification.
+    fn wait_until_ready(&self, batch_size: usize, max_wait: Duration) -> bool {
+        let mut events = self.events.lock().unwrap();
+        loop {
+            if STOP_WORKER.load(Ordering::Acquire) {
+                return false;
+            }
+            if events.len() >= batch_size {
+                return true;
+            }
+            let Some(oldest) = events.front() else {
+                events = self.ready.wait(events).unwrap();
+                continue;
+            };
+            let remaining = max_wait.saturating_sub(oldest.enqueued_at.elapsed());
+            if remaining.is_zero() {
+                return true;
+            }
+            let (next, timeout) = self.ready.wait_timeout(events, remaining).unwrap();
+            events = next;
+            if timeout.timed_out() && !events.is_empty() {
+                return true;
+            }
+        }
+    }
+
+    fn drain(&self, limit: usize) -> Vec<PendingEvent> {
+        let mut events = self.events.lock().unwrap();
+        let count = events.len().min(limit);
+        let drained = events
+            .drain(..count)
+            .map(|queued| queued.event)
+            .collect::<Vec<_>>();
+        ASYNC_QUEUE_DEPTH.fetch_sub(count as i64, Ordering::Relaxed);
+        drained
+    }
+
+    fn drain_all(&self) -> Vec<PendingEvent> {
+        self.drain(usize::MAX)
+    }
+
+    fn wake(&self) {
+        self.ready.notify_all();
+    }
+}
 
 /// One detached Redis module context owned by the worker thread.
 struct RawThreadContext(*mut raw::RedisModuleCtx);
@@ -129,137 +222,101 @@ pub(crate) fn start_dispatch_worker(ctx: &Context) -> Result<(), String> {
     let capacity = ASYNC_QUEUE_CAPACITY.value.load(Ordering::Relaxed) as usize;
     let batch_size = ASYNC_BATCH_SIZE.value.load(Ordering::Relaxed) as usize;
     let max_wait = Duration::from_millis(ASYNC_MAX_WAIT_MS.value.load(Ordering::Relaxed) as u64);
-    let (sender, receiver) = mpsc::sync_channel(capacity);
+    let queue = Arc::new(EventQueue::new(capacity));
 
     STOP_WORKER.store(false, Ordering::Release);
+    let worker_queue = Arc::clone(&queue);
     let handle = thread::Builder::new()
         .name("eventstream-writer".to_owned())
-        .spawn(move || worker_main(receiver, batch_size, max_wait))
+        .spawn(move || worker_main(worker_queue, batch_size, max_wait))
         .map_err(|e| format!("failed to spawn async writer: {e}"))?;
-    EVENT_SENDER
-        .set(sender)
-        .map_err(|_| "async writer sender was already initialized".to_owned())?;
+    EVENT_QUEUE
+        .set(queue)
+        .map_err(|_| "async writer queue was already initialized".to_owned())?;
     *WORKER.lock().unwrap() = Some(handle);
     ACTIVE_MODE.store(mode as u8, Ordering::Release);
     Ok(())
 }
 
-/// Route one event through the selected dispatch. Increment depth before send
-/// so a very fast receiver cannot decrement the gauge before the producer's
-/// increment becomes visible.
+/// Route one event through the selected dispatch.
 pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
     if ACTIVE_MODE.load(Ordering::Acquire) == WriteMode::sync as u8 {
         defer_pending_event(ctx, event);
         return;
     }
 
-    ASYNC_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
-    let result = match EVENT_SENDER.get() {
-        Some(sender) => match sender.try_send(event) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(event) | TrySendError::Disconnected(event)) => Err(event),
-        },
-        None => Err(event),
+    let Some(queue) = EVENT_QUEUE.get() else {
+        ASYNC_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        defer_pending_event(ctx, event);
+        return;
     };
-    match result {
-        Ok(()) => {
+    match queue.try_push(event) {
+        Ok(depth) => {
+            ASYNC_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
             ASYNC_ENQUEUED.fetch_add(1, Ordering::Relaxed);
-            let depth = ASYNC_QUEUE_DEPTH.load(Ordering::Relaxed).max(0) as u64;
-            ASYNC_QUEUE_HIGH_WATER.fetch_max(depth, Ordering::Relaxed);
+            ASYNC_QUEUE_HIGH_WATER.fetch_max(depth as u64, Ordering::Relaxed);
         }
         Err(event) => {
-            ASYNC_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
             ASYNC_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-            defer_pending_event(ctx, event);
+            defer_ordered_fallback(ctx, Arc::clone(queue), event);
         }
     }
 }
 
-fn worker_main(
-    receiver: Receiver<PendingEvent>,
-    batch_size: usize,
-    max_wait: Duration,
-) -> Vec<PendingEvent> {
+/// Redis runs this job before it releases the main-thread lock. The worker
+/// cannot own that lock concurrently, so draining the still-queued prefix and
+/// then the current event preserves notification order.
+fn defer_ordered_fallback(ctx: &Context, queue: Arc<EventQueue>, event: PendingEvent) {
+    let status = ctx.add_post_notification_job(move |ctx| {
+        guard_job(move || {
+            let accepted = queue.drain_all();
+            if !accepted.is_empty() {
+                ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
+                ASYNC_DRAIN_EVENTS.fetch_add(accepted.len() as u64, Ordering::Relaxed);
+            }
+            for pending in accepted {
+                process_pending_event(ctx, pending);
+            }
+            process_pending_event(ctx, event);
+        });
+    });
+    if !matches!(status, Status::Ok) {
+        count_defer_failure(ctx);
+    }
+}
+
+fn worker_main(queue: Arc<EventQueue>, batch_size: usize, max_wait: Duration) -> Vec<PendingEvent> {
     let thread_ctx = match RawThreadContext::new() {
         Ok(ctx) => ctx,
         Err(_) => {
             ASYNC_WORKER_ERRORS.fetch_add(1, Ordering::Relaxed);
-            return collect_pending(&receiver, Vec::new());
+            return queue.drain_all();
         }
     };
 
     loop {
-        if STOP_WORKER.load(Ordering::Acquire) {
-            return collect_pending(&receiver, Vec::new());
-        }
-
-        let first = match receiver.recv_timeout(max_wait.min(STOP_POLL_INTERVAL)) {
-            Ok(event) => {
-                ASYNC_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-                event
-            }
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return Vec::new(),
-        };
-        let mut batch = Vec::with_capacity(batch_size);
-        batch.push(first);
-        let deadline = Instant::now() + max_wait;
-
-        while batch.len() < batch_size {
-            if STOP_WORKER.load(Ordering::Acquire) {
-                return collect_pending(&receiver, batch);
-            }
-            match receiver.try_recv() {
-                Ok(event) => {
-                    ASYNC_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-                    batch.push(event);
-                }
-                Err(TryRecvError::Empty) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        break;
-                    }
-                    let remaining = deadline.saturating_duration_since(now);
-                    match receiver.recv_timeout(remaining.min(STOP_POLL_INTERVAL)) {
-                        Ok(event) => {
-                            ASYNC_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-                            batch.push(event);
-                        }
-                        Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-                Err(TryRecvError::Disconnected) => break,
-            }
+        if !queue.wait_until_ready(batch_size, max_wait) {
+            return queue.drain_all();
         }
 
         loop {
             if STOP_WORKER.load(Ordering::Acquire) {
-                return collect_pending(&receiver, batch);
+                return queue.drain_all();
             }
             if let Some(ctx) = thread_ctx.try_lock() {
-                ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
-                ASYNC_DRAIN_EVENTS.fetch_add(batch.len() as u64, Ordering::Relaxed);
-                for event in batch {
-                    guard_job(|| process_pending_event(&ctx, event));
+                let batch = queue.drain(batch_size);
+                if !batch.is_empty() {
+                    ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
+                    ASYNC_DRAIN_EVENTS.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    for event in batch {
+                        guard_job(|| process_pending_event(&ctx, event));
+                    }
                 }
                 break;
             }
             thread::yield_now();
         }
     }
-}
-
-fn collect_pending(
-    receiver: &Receiver<PendingEvent>,
-    mut pending: Vec<PendingEvent>,
-) -> Vec<PendingEvent> {
-    while let Ok(event) = receiver.try_recv() {
-        ASYNC_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
-        pending.push(event);
-    }
-    pending
 }
 
 /// Stop without deadlocking on the Redis lock, then finish every event the
@@ -271,6 +328,9 @@ pub(crate) fn stop_dispatch_worker(ctx: &Context) {
 
     STOP_WORKER.store(true, Ordering::Release);
     ACTIVE_MODE.store(WriteMode::sync as u8, Ordering::Release);
+    if let Some(queue) = EVENT_QUEUE.get() {
+        queue.wake();
+    }
     let Some(handle) = WORKER.lock().unwrap().take() else {
         return;
     };

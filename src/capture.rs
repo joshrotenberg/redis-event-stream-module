@@ -801,13 +801,17 @@ pub(crate) fn defer_pending_event(ctx: &Context, event: PendingEvent) {
         guard_job(move || process_pending_event(ctx, event));
     });
     if !matches!(status, Status::Ok) {
-        count_event_lost(
-            ctx,
-            &DROPPED_DEFER_ERROR,
-            &LOGGED_DEFER_ERROR,
-            "failed to register post-notification job; event dropped",
-        );
+        count_defer_failure(ctx);
     }
+}
+
+pub(crate) fn count_defer_failure(ctx: &Context) {
+    count_event_lost(
+        ctx,
+        &DROPPED_DEFER_ERROR,
+        &LOGGED_DEFER_ERROR,
+        "failed to register post-notification job; event dropped",
+    );
 }
 
 /// Keyspace notification callback. Runs with the GIL held; keyspace writes are
