@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.4.0...v0.5.0) (2026-07-30)
+
+This release adds Preview asynchronous write modes while keeping `sync` as the
+stable default. Preview `envelope` mode can mix stable fixed-field entries with
+versioned `batch-v1` envelopes in the same stream, so consumers that opt in
+must decode both physical shapes. See the
+[consumer guide](https://joshrotenberg.github.io/redis-event-stream-module/consume.html#decode-preview-batch-envelopes)
+and [reliability guide](https://joshrotenberg.github.io/redis-event-stream-module/reliability.html)
+before enabling it.
+
+### Performance
+
+* add a minimal AWS smoke lab ([#261](https://github.com/joshrotenberg/redis-event-stream-module/issues/261)) ([fe0f854](https://github.com/joshrotenberg/redis-event-stream-module/commit/fe0f8548d7e554d97bee0a653460d3ff5b7a0b50))
+* profile the single-node capture hot path ([#264](https://github.com/joshrotenberg/redis-event-stream-module/issues/264)) ([f84c14a](https://github.com/joshrotenberg/redis-event-stream-module/commit/f84c14abc83d36455072c2a991963a4bafbf828b))
+* run a higher-concurrency AWS ramp probe ([#263](https://github.com/joshrotenberg/redis-event-stream-module/issues/263)) ([7c4cfd7](https://github.com/joshrotenberg/redis-event-stream-module/commit/7c4cfd777d5f03c697026583b22a0ab4c8d01a7a))
+* spike async capture and batched envelopes ([#266](https://github.com/joshrotenberg/redis-event-stream-module/issues/266)) ([34269ce](https://github.com/joshrotenberg/redis-event-stream-module/commit/34269cefa34f5114b681387cc51bbb2fe154d283))
+
+
+### Miscellaneous
+
+* prepare the 0.5.0 release ([#271](https://github.com/joshrotenberg/redis-event-stream-module/issues/271)) ([2ed7a38](https://github.com/joshrotenberg/redis-event-stream-module/commit/2ed7a38ab08372fec1c5cad030f70ba8e7ebe1be))
+
 ## [0.4.0](https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.3.0...v0.4.0) (2026-07-29)
 
 
