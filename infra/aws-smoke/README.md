@@ -139,9 +139,15 @@ The runner fails unless:
 
 ## Observed runs
 
-- [2026-07-30: first AWS smoke run](observations/2026-07-30.md)
-- [2026-07-30: higher-concurrency ramp probe](observations/2026-07-30-ramp.md)
-- [2026-07-30: instrumented single-node sweep](observations/2026-07-30-instrumented-sweep.md)
+- [2026-07-30: first AWS smoke run][first-run]
+- [2026-07-30: higher-concurrency ramp probe][ramp]
+- [2026-07-30: instrumented single-node sweep][sweep]
+- [2026-07-30: full-capture CPU profile][capture-profile]
+
+[first-run]: observations/2026-07-30.md
+[ramp]: observations/2026-07-30-ramp.md
+[sweep]: observations/2026-07-30-instrumented-sweep.md
+[capture-profile]: observations/2026-07-30-capture-profile.md
 
 ## Image pins
 
