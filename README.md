@@ -36,58 +36,10 @@ whatever the Redis persistence configuration provides.
 
 ## Try it in 60 seconds
 
-Start the published image with the module already loaded:
+Run the Phoenix LiveView observatory to configure capture, send real Redis
+commands, and watch each event type fill its stream in real time.
 
-```bash
-docker run --rm --name eventstream-quickstart \
-  -d -p 6379:6379 \
-  ghcr.io/joshrotenberg/redis-event-stream-module:latest
-```
-
-Create a short-lived key and force Redis to observe its expiration:
-
-```bash
-docker exec eventstream-quickstart \
-  redis-cli SET quickstart:session active PX 500
-sleep 1
-docker exec eventstream-quickstart \
-  redis-cli GET quickstart:session
-```
-
-Read the mirrored event:
-
-```bash
-docker exec eventstream-quickstart \
-  redis-cli XRANGE events:expired - +
-```
-
-The default entry contains the event name, binary-safe key, and origin
-database:
-
-```text
-1785349757949-0
-event
-expired
-key
-quickstart:session
-db
-0
-```
-
-Stop the container with:
-
-```bash
-docker stop eventstream-quickstart
-```
-
-See the [full Quickstart](docs/src/quickstart.md) for prebuilt artifacts, source
-builds, and health checks.
-
-## Open the live observatory
-
-The Phoenix LiveView observatory owns disposable Redis instances, lets you
-reconfigure capture, sends commands through a real Redis client, and shows each
-event type filling its stream in real time.
+![Redis Event Stream Observatory workflow](demos/liveview/screenshots/observatory-overview.jpg)
 
 ```bash
 docker build \
@@ -103,7 +55,8 @@ stream discovery, and merged event lanes.
 
 The image is a local evaluation environment, not a production Redis control
 plane. See the [observatory guide](docs/src/observatory.md) for architecture,
-security boundaries, and source setup.
+security boundaries, and source setup. Prefer a command-line walkthrough? See
+the [module quickstart](docs/src/quickstart.md).
 
 ## How capture is organized
 
