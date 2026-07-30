@@ -14,10 +14,12 @@ maxlen="${BENCH_MAXLEN:-10000}"
 repetitions="${BENCH_REPETITIONS:-1}"
 filtered_repetitions="${BENCH_FILTERED_REPETITIONS:-$repetitions}"
 order_seed="${BENCH_ORDER_SEED:-260}"
+profile_scenario="${BENCH_PROFILE_SCENARIO:-}"
+profile_frequency="${BENCH_PROFILE_FREQUENCY:-99}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 results_dir="${RESULTS_DIR:-$root_dir/results/$run_id}"
 
-for tool in aws base64 cksum git jq sort terraform; do
+for tool in aws base64 cksum git gzip jq shasum sort terraform; do
   command -v "$tool" >/dev/null || {
     echo "missing required tool: $tool" >&2
     exit 1
@@ -47,6 +49,20 @@ done
 if ! [[ "$order_seed" =~ ^[0-9]+$ ]]; then
   echo "BENCH_ORDER_SEED must be a non-negative integer" >&2
   exit 2
+fi
+
+if [[ -n "$profile_scenario" ]]; then
+  case "$profile_scenario" in
+    s0 | s1 | s2) ;;
+    *)
+      echo "BENCH_PROFILE_SCENARIO must be s0, s1, s2, or empty" >&2
+      exit 2
+      ;;
+  esac
+  if ! positive_integer "$profile_frequency"; then
+    echo "BENCH_PROFILE_FREQUENCY must be a positive integer" >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$results_dir/raw"
@@ -146,6 +162,60 @@ encode_file() {
   base64 <"$1" | tr -d '\n'
 }
 
+decode_base64() {
+  if base64 --decode </dev/null >/dev/null 2>&1; then
+    base64 --decode
+  else
+    base64 -D
+  fi
+}
+
+fetch_remote_file() {
+  local instance_id="$1"
+  local label="$2"
+  local remote_path="$3"
+  local local_path="$4"
+  local metadata_base metadata size expected_sha offset chunk_size chunk_base
+  local actual_sha
+
+  metadata_base="$results_dir/raw/fetch-$label-metadata"
+  run_remote \
+    "$instance_id" \
+    "fetch-$label-metadata" \
+    "stat -c '%s' '$remote_path'
+sha256sum '$remote_path' | awk '{ print \$1 }'" \
+    "$metadata_base"
+
+  metadata="$(cat "$metadata_base.stdout")"
+  size="$(sed -n '1p' <<<"$metadata")"
+  expected_sha="$(sed -n '2p' <<<"$metadata")"
+  if ! [[ "$size" =~ ^[0-9]+$ ]] ||
+    ! [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "invalid remote file metadata for $remote_path" >&2
+    exit 1
+  fi
+
+  : >"$local_path"
+  offset=0
+  chunk_size=15000
+  while ((offset < size)); do
+    chunk_base="$results_dir/raw/fetch-$label-$offset"
+    run_remote \
+      "$instance_id" \
+      "fetch-$label-$offset" \
+      "dd if='$remote_path' iflag=skip_bytes,count_bytes skip='$offset' count='$chunk_size' 2>/dev/null | base64 -w0" \
+      "$chunk_base"
+    decode_base64 <"$chunk_base.stdout" >>"$local_path"
+    offset=$((offset + chunk_size))
+  done
+
+  actual_sha="$(shasum -a 256 "$local_path" | awk '{ print $1 }')"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    echo "checksum mismatch fetching $remote_path" >&2
+    exit 1
+  fi
+}
+
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 git_commit="$(git -C "$repo_dir" rev-parse HEAD)"
 
@@ -163,6 +233,7 @@ run_remote "$loadgen_id" bootstrap-loadgen "$bootstrap_command" "$results_dir/ra
 
 server_script_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 benchmark_script_b64="$(encode_file "$root_dir/scripts/remote-benchmark.sh")"
+profile_script_b64="$(encode_file "$root_dir/scripts/remote-profile.sh")"
 
 unsorted_plan="$results_dir/raw/trial-plan.unsorted.tsv"
 trial_plan="$results_dir/raw/trial-plan.tsv"
@@ -211,6 +282,19 @@ chmod 0700 /tmp/eventstream-server.sh
     "$server_command" \
     "$results_dir/raw/server-$trial_id"
 
+  profiled=false
+  if [[ -n "$profile_scenario" && "$scenario" == "$profile_scenario" ]]; then
+    profiled=true
+    profile_start_command="printf '%s' '$profile_script_b64' | base64 --decode > /tmp/eventstream-profile.sh
+chmod 0700 /tmp/eventstream-profile.sh
+/tmp/eventstream-profile.sh start '$profile_frequency'"
+    run_remote \
+      "$server_id" \
+      "profile-start-$trial_id" \
+      "$profile_start_command" \
+      "$results_dir/raw/profile-start-$trial_id"
+  fi
+
   benchmark_command="printf '%s' '$benchmark_script_b64' | base64 --decode > /tmp/eventstream-benchmark.sh
 chmod 0700 /tmp/eventstream-benchmark.sh
 /tmp/eventstream-benchmark.sh '$scenario' '$server_ip' '$loadgen_image' '$requests' '$trial_clients' '$threads' '$payload' '$keyspace'"
@@ -223,13 +307,59 @@ chmod 0700 /tmp/eventstream-benchmark.sh
   benchmark_file="$results_dir/raw/benchmark-$trial_id.stdout"
   jq -e . "$benchmark_file" >/dev/null
 
+  if [[ "$profiled" == true ]]; then
+    profile_stop_command="printf '%s' '$profile_script_b64' | base64 --decode > /tmp/eventstream-profile.sh
+chmod 0700 /tmp/eventstream-profile.sh
+/tmp/eventstream-profile.sh stop"
+    run_remote \
+      "$server_id" \
+      "profile-stop-$trial_id" \
+      "$profile_stop_command" \
+      "$results_dir/raw/profile-stop-$trial_id"
+
+    profile_results_dir="$results_dir/profile/$trial_id"
+    mkdir -p "$profile_results_dir"
+    for artifact in \
+      perf-header.txt.gz \
+      perf-leaf.txt.gz \
+      perf-children.txt.gz \
+      perf-record.stderr.gz; do
+      fetch_remote_file \
+        "$server_id" \
+        "$trial_id-${artifact%.gz}" \
+        "/var/lib/eventstream-smoke/profile/$artifact" \
+        "$profile_results_dir/$artifact"
+      gzip -dc "$profile_results_dir/$artifact" \
+        >"$profile_results_dir/${artifact%.gz}"
+    done
+  fi
+
   trial_file="$results_dir/$trial_id.json"
-  jq \
-    --arg trial_id "$trial_id" \
-    --argjson repetition "$repetition" \
-    --argjson order "$trial_number" \
-    '. + {trial_id: $trial_id, repetition: $repetition, order: $order}' \
-    "$benchmark_file" >"$trial_file"
+  if [[ "$profiled" == true ]]; then
+    jq \
+      --arg trial_id "$trial_id" \
+      --argjson repetition "$repetition" \
+      --argjson order "$trial_number" \
+      --slurpfile profile_start "$results_dir/raw/profile-start-$trial_id.stdout" \
+      --slurpfile profile_stop "$results_dir/raw/profile-stop-$trial_id.stdout" \
+      '. + {
+        trial_id: $trial_id,
+        repetition: $repetition,
+        order: $order,
+        profile: {
+          start: $profile_start[0],
+          stop: $profile_stop[0]
+        }
+      }' \
+      "$benchmark_file" >"$trial_file"
+  else
+    jq \
+      --arg trial_id "$trial_id" \
+      --argjson repetition "$repetition" \
+      --argjson order "$trial_number" \
+      '. + {trial_id: $trial_id, repetition: $repetition, order: $order}' \
+      "$benchmark_file" >"$trial_file"
+  fi
   jq -e . "$trial_file" >/dev/null
   trial_files+=("$trial_file")
 done <"$trial_plan"
