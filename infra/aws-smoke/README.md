@@ -72,10 +72,39 @@ and a 100,000-key keyspace. Override it with `BENCH_REQUESTS`,
 `BENCH_CLIENTS`, `BENCH_THREADS`, `BENCH_PAYLOAD`, `BENCH_KEYSPACE`, or
 `BENCH_MAXLEN`.
 
+For a repeated concurrency sweep, provide whitespace-separated client levels
+and repetition counts:
+
+```sh
+BENCH_REQUESTS=3000000 \
+BENCH_THREADS=4 \
+BENCH_CLIENT_LEVELS="25 50 100 200" \
+BENCH_REPETITIONS=3 \
+BENCH_FILTERED_REPETITIONS=1 \
+BENCH_ORDER_SEED=260 \
+./lab.sh run
+```
+
+This runs three baseline (`s0`) and full-capture (`s2`) trials at each client
+level, plus one filtered control (`s1`). The runner mixes trial order
+deterministically from `BENCH_ORDER_SEED`, restarts Redis before every trial,
+and records:
+
+- Redis main-thread CPU seconds and estimated single-core utilization;
+- Redis current, resident, and peak memory;
+- sampled load-generator container CPU and peak memory; and
+- benchmark elapsed time, throughput, and latency percentiles.
+
+Redis utilization uses the benchmark's reported throughput to exclude
+container startup and telemetry teardown time. The CPU figures remain
+diagnostic estimates from Redis `INFO` and Docker sampling, not
+laboratory-grade hardware counters.
+
 Results land under `results/<UTC-run-id>/` and are ignored by Git:
 
-- `result.json`: normalized run manifest and scenario results
-- `scenarios.json`: normalized scenario results
+- `result.json`: normalized run manifest, raw trials, and grouped summaries
+- `trials.json`: normalized per-trial results
+- `summary.json`: min/median/max values grouped by scenario and client level
 - `raw/*.invocation.json`: complete SSM command responses
 - `raw/*.stdout` and `raw/*.stderr`: raw command streams
 
@@ -89,6 +118,8 @@ The runner fails unless:
 ## Observed runs
 
 - [2026-07-30: first AWS smoke run](observations/2026-07-30.md)
+- [2026-07-30: higher-concurrency ramp probe](observations/2026-07-30-ramp.md)
+- [2026-07-30: instrumented single-node sweep](observations/2026-07-30-instrumented-sweep.md)
 
 ## Image pins
 

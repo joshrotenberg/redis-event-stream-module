@@ -6,19 +6,48 @@ repo_dir="$(cd "$root_dir/../.." && pwd)"
 
 requests="${BENCH_REQUESTS:-1000000}"
 clients="${BENCH_CLIENTS:-50}"
+client_levels="${BENCH_CLIENT_LEVELS:-$clients}"
 threads="${BENCH_THREADS:-2}"
 payload="${BENCH_PAYLOAD:-64}"
 keyspace="${BENCH_KEYSPACE:-100000}"
 maxlen="${BENCH_MAXLEN:-10000}"
+repetitions="${BENCH_REPETITIONS:-1}"
+filtered_repetitions="${BENCH_FILTERED_REPETITIONS:-$repetitions}"
+order_seed="${BENCH_ORDER_SEED:-260}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 results_dir="${RESULTS_DIR:-$root_dir/results/$run_id}"
 
-for tool in aws base64 git jq terraform; do
+for tool in aws base64 cksum git jq sort terraform; do
   command -v "$tool" >/dev/null || {
     echo "missing required tool: $tool" >&2
     exit 1
   }
 done
+
+positive_integer() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+for value in \
+  "$requests" "$threads" "$payload" "$keyspace" "$maxlen" \
+  "$repetitions" "$filtered_repetitions"; do
+  if ! positive_integer "$value"; then
+    echo "benchmark values must be positive integers: $value" >&2
+    exit 2
+  fi
+done
+
+for level in $client_levels; do
+  if ! positive_integer "$level"; then
+    echo "client levels must be positive integers: $level" >&2
+    exit 2
+  fi
+done
+
+if ! [[ "$order_seed" =~ ^[0-9]+$ ]]; then
+  echo "BENCH_ORDER_SEED must be a non-negative integer" >&2
+  exit 2
+fi
 
 mkdir -p "$results_dir/raw"
 
@@ -135,51 +164,147 @@ run_remote "$loadgen_id" bootstrap-loadgen "$bootstrap_command" "$results_dir/ra
 server_script_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 benchmark_script_b64="$(encode_file "$root_dir/scripts/remote-benchmark.sh")"
 
-scenario_files=()
-for scenario in s0 s1 s2; do
-  echo "running $scenario..."
+unsorted_plan="$results_dir/raw/trial-plan.unsorted.tsv"
+trial_plan="$results_dir/raw/trial-plan.tsv"
+: >"$unsorted_plan"
+
+add_trial() {
+  local scenario="$1"
+  local trial_clients="$2"
+  local repetition="$3"
+  local order_key
+
+  order_key="$(
+    printf '%s' "$order_seed:$scenario:$trial_clients:$repetition" |
+      cksum |
+      awk '{ print $1 }'
+  )"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$order_key" "$scenario" "$trial_clients" "$repetition" >>"$unsorted_plan"
+}
+
+for trial_clients in $client_levels; do
+  for repetition in $(seq 1 "$repetitions"); do
+    add_trial s0 "$trial_clients" "$repetition"
+    add_trial s2 "$trial_clients" "$repetition"
+  done
+  for repetition in $(seq 1 "$filtered_repetitions"); do
+    add_trial s1 "$trial_clients" "$repetition"
+  done
+done
+
+LC_ALL=C sort -n -k1,1 "$unsorted_plan" >"$trial_plan"
+
+trial_files=()
+trial_number=0
+while IFS=$'\t' read -r _ scenario trial_clients repetition; do
+  trial_number=$((trial_number + 1))
+  trial_id="${scenario}-c${trial_clients}-r${repetition}"
+  echo "running trial $trial_number: $trial_id..."
 
   server_command="printf '%s' '$server_script_b64' | base64 --decode > /tmp/eventstream-server.sh
 chmod 0700 /tmp/eventstream-server.sh
 /tmp/eventstream-server.sh '$scenario' '$module_image' '$maxlen'"
   run_remote \
     "$server_id" \
-    "server-$scenario" \
+    "server-$trial_id" \
     "$server_command" \
-    "$results_dir/raw/server-$scenario"
+    "$results_dir/raw/server-$trial_id"
 
   benchmark_command="printf '%s' '$benchmark_script_b64' | base64 --decode > /tmp/eventstream-benchmark.sh
 chmod 0700 /tmp/eventstream-benchmark.sh
-/tmp/eventstream-benchmark.sh '$scenario' '$server_ip' '$loadgen_image' '$requests' '$clients' '$threads' '$payload' '$keyspace'"
+/tmp/eventstream-benchmark.sh '$scenario' '$server_ip' '$loadgen_image' '$requests' '$trial_clients' '$threads' '$payload' '$keyspace'"
   run_remote \
     "$loadgen_id" \
-    "benchmark-$scenario" \
+    "benchmark-$trial_id" \
     "$benchmark_command" \
-    "$results_dir/raw/benchmark-$scenario"
+    "$results_dir/raw/benchmark-$trial_id"
 
-  scenario_file="$results_dir/$scenario.json"
-  cp "$results_dir/raw/benchmark-$scenario.stdout" "$scenario_file"
-  jq -e . "$scenario_file" >/dev/null
-  scenario_files+=("$scenario_file")
-done
+  benchmark_file="$results_dir/raw/benchmark-$trial_id.stdout"
+  jq -e . "$benchmark_file" >/dev/null
 
-jq -s '.' "${scenario_files[@]}" >"$results_dir/scenarios.json"
+  trial_file="$results_dir/$trial_id.json"
+  jq \
+    --arg trial_id "$trial_id" \
+    --argjson repetition "$repetition" \
+    --argjson order "$trial_number" \
+    '. + {trial_id: $trial_id, repetition: $repetition, order: $order}' \
+    "$benchmark_file" >"$trial_file"
+  jq -e . "$trial_file" >/dev/null
+  trial_files+=("$trial_file")
+done <"$trial_plan"
+
+jq -s '.' "${trial_files[@]}" >"$results_dir/trials.json"
 
 jq -e '
-  (map(select(.scenario == "s0"))[0].module.loaded == false) and
-  (map(select(.scenario == "s1"))[0].module.loaded == true) and
-  (map(select(.scenario == "s1"))[0].module.forwarded == 0) and
-  (map(select(.scenario == "s2"))[0].module.loaded == true) and
-  (map(select(.scenario == "s2"))[0].module.forwarded == map(select(.scenario == "s2"))[0].workload.requests) and
-  (map(select(.scenario == "s2"))[0].module.events_lost == 0) and
-  (map(select(.scenario == "s2"))[0].module.dropped == 0) and
-  (map(select(.scenario == "s2"))[0].module.handler_panics == 0)
-' "$results_dir/scenarios.json" >/dev/null
+  all(.[];
+    (.module.events_lost == 0) and
+    (.module.dropped == 0) and
+    (.module.handler_panics == 0) and
+    (if .scenario == "s0"
+     then .module.loaded == false
+     elif .scenario == "s1"
+     then
+       (.module.loaded == true) and
+       (.module.forwarded == 0) and
+       (.module.skipped_filtered == .workload.requests)
+     else
+       (.module.loaded == true) and
+       (.module.forwarded == .workload.requests)
+     end))
+' "$results_dir/trials.json" >/dev/null
+
+jq '
+  def distribution:
+    map(select(. != null)) | sort |
+    if length == 0 then
+      {min: null, median: null, max: null}
+    else
+      . as $values |
+      {
+        min: $values[0],
+        median:
+          (if ($values | length) % 2 == 1
+           then $values[(($values | length) / 2 | floor)]
+           else
+             (($values[(($values | length) / 2) - 1] +
+               $values[($values | length) / 2]) / 2)
+           end),
+        max: $values[-1]
+      }
+    end;
+
+  sort_by([.scenario, .workload.clients]) |
+  group_by([.scenario, .workload.clients]) |
+  map(
+    . as $trials |
+    {
+      scenario: $trials[0].scenario,
+      clients: $trials[0].workload.clients,
+      repetitions: ($trials | length),
+      ops_per_sec:
+        ($trials | map(.result.ops_per_sec) | distribution),
+      p99_ms:
+        ($trials | map(.result.p99_ms) | distribution),
+      max_ms:
+        ($trials | map(.result.max_ms) | distribution),
+      server_main_thread_core_percent:
+        ($trials | map(.server.main_thread_core_percent) | distribution),
+      load_generator_cpu_percent_avg:
+        ($trials | map(.load_generator.cpu_percent_avg) | distribution),
+      load_generator_cpu_percent_max:
+        ($trials | map(.load_generator.cpu_percent_max) | distribution),
+      events_lost: ($trials | map(.module.events_lost) | add),
+      dropped: ($trials | map(.module.dropped) | add),
+      handler_panics: ($trials | map(.module.handler_panics) | add)
+    }
+  )
+' "$results_dir/trials.json" >"$results_dir/summary.json"
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 jq -n \
-  --arg schema_version "1" \
+  --arg schema_version "2" \
   --arg run_id "$run_id" \
   --arg started_at "$started_at" \
   --arg completed_at "$completed_at" \
@@ -192,7 +317,8 @@ jq -n \
   --arg module_image "$module_image" \
   --arg loadgen_image "$loadgen_image" \
   --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
-  --slurpfile scenarios "$results_dir/scenarios.json" \
+  --slurpfile trials "$results_dir/trials.json" \
+  --slurpfile summary "$results_dir/summary.json" \
   '{
     schema_version: ($schema_version | tonumber),
     run_id: $run_id,
@@ -209,20 +335,22 @@ jq -n \
       loadgen_image: $loadgen_image,
       expires_at: $expires_at
     },
-    scenarios: $scenarios[0]
+    trials: $trials[0],
+    summary: $summary[0]
   }' >"$results_dir/result.json"
 
 echo
 jq -r '
-  ["scenario", "ops/sec", "p50 ms", "p99 ms", "forwarded", "lost", "dropped"],
-  (.scenarios[] | [
+  ["scenario", "clients", "reps", "ops/s median", "ops/s range", "p99 median", "server core %", "loadgen CPU %"],
+  (.summary[] | [
     .scenario,
-    (.result.ops_per_sec | tostring),
-    (.result.p50_ms | tostring),
-    (.result.p99_ms | tostring),
-    (.module.forwarded | tostring),
-    (.module.events_lost | tostring),
-    (.module.dropped | tostring)
+    (.clients | tostring),
+    (.repetitions | tostring),
+    (.ops_per_sec.median | tostring),
+    "\(.ops_per_sec.min)-\(.ops_per_sec.max)",
+    (.p99_ms.median | tostring),
+    (.server_main_thread_core_percent.median | tostring),
+    (.load_generator_cpu_percent_avg.median | tostring)
   ]) | @tsv
 ' "$results_dir/result.json" | column -t -s $'\t'
 
