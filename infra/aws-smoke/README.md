@@ -95,8 +95,10 @@ and records:
 - sampled load-generator container CPU and peak memory; and
 - benchmark elapsed time, throughput, and latency percentiles.
 
-The CPU figures are diagnostic estimates from Redis `INFO` and Docker sampling,
-not laboratory-grade hardware counters.
+Redis utilization uses the benchmark's reported throughput to exclude
+container startup and telemetry teardown time. The CPU figures remain
+diagnostic estimates from Redis `INFO` and Docker sampling, not
+laboratory-grade hardware counters.
 
 Results land under `results/<UTC-run-id>/` and are ignored by Git:
 
@@ -117,6 +119,7 @@ The runner fails unless:
 
 - [2026-07-30: first AWS smoke run](observations/2026-07-30.md)
 - [2026-07-30: higher-concurrency ramp probe](observations/2026-07-30-ramp.md)
+- [2026-07-30: instrumented single-node sweep](observations/2026-07-30-instrumented-sweep.md)
 
 ## Image pins
 

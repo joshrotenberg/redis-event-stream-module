@@ -126,6 +126,13 @@ if [[ -z "${ops_per_sec:-}" || -z "${p99_ms:-}" ]]; then
   exit 1
 fi
 
+benchmark_duration_seconds="$(
+  awk \
+    -v requests="$requests" \
+    -v ops_per_sec="$ops_per_sec" \
+    'BEGIN { printf "%.6f", requests / ops_per_sec }'
+)"
+
 info="$("${redis_cli[@]}" INFO eventstream | tr -d '\r')"
 cpu_after="$("${redis_cli[@]}" INFO cpu | tr -d '\r')"
 memory_after="$("${redis_cli[@]}" INFO memory | tr -d '\r')"
@@ -168,7 +175,7 @@ main_thread_cpu_seconds="$(
 main_thread_core_percent="$(
   awk \
     -v cpu="$main_thread_cpu_seconds" \
-    -v duration="$duration_seconds" \
+    -v duration="$benchmark_duration_seconds" \
     'BEGIN {
       if (duration > 0) {
         printf "%.3f", (cpu / duration) * 100
@@ -193,6 +200,7 @@ jq -n \
   --argjson payload_bytes "$payload" \
   --argjson keyspace "$keyspace" \
   --argjson duration_seconds "$duration_seconds" \
+  --argjson benchmark_duration_seconds "$benchmark_duration_seconds" \
   --argjson host_logical_cpus "$(getconf _NPROCESSORS_ONLN)" \
   --argjson stats_samples "$stats_samples" \
   --argjson cpu_percent_avg "$cpu_percent_avg" \
@@ -229,7 +237,8 @@ jq -n \
       threads: $threads,
       payload_bytes: $payload_bytes,
       keyspace: $keyspace,
-      duration_seconds: $duration_seconds
+      duration_seconds: $duration_seconds,
+      benchmark_duration_seconds: $benchmark_duration_seconds
     },
     load_generator: {
       host_logical_cpus: $host_logical_cpus,
