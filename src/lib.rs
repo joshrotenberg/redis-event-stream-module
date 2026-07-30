@@ -30,13 +30,14 @@ mod cluster;
 #[cfg(not(test))]
 mod commands;
 mod config;
+mod dispatch;
 mod markers;
 mod stats;
 // `deinit` is compiled in every build (unlike `init`, which is gated out of
 // unit-test builds along with the `redis_module!` macro), so the cross-module
 // items and the `Context`/`Status` types it uses stay ungated; the imports only
 // the macro/`init` reach are `#[cfg(not(test))]`.
-use crate::{capture::*, cluster::*, config::*, markers::*, stats::*};
+use crate::{capture::*, cluster::*, config::*, dispatch::*, markers::*, stats::*};
 use redis_module::{Context, ContextFlags, Status};
 use std::sync::atomic::Ordering;
 
@@ -334,6 +335,13 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     }
     recheck_eviction_risk(ctx);
 
+    if let Err(message) = start_dispatch_worker(ctx) {
+        ctx.log_warning(&format!(
+            "eventstream: cannot start experimental write dispatch: {message}; refusing to load"
+        ));
+        return Status::Err;
+    }
+
     let prefix = PREFIX.value.lock(ctx).clone();
     let filter = FILTER.raw.lock(ctx).clone();
     let key_filter = KEY_FILTER.raw.lock(ctx).clone();
@@ -378,6 +386,12 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
 /// direct write is safe and no future notification exists to defer to. Writes
 /// the `unloading` gap marker and logs final counters (SPEC.md section 13).
 fn deinit(ctx: &Context) -> Status {
+    // The experimental worker uses try-lock rather than a blocking Redis lock,
+    // so it can observe this stop request while MODULE UNLOAD holds the lock.
+    // Accepted backlog is returned by the joined worker and drained through the
+    // canonical write path before the unloading marker closes the lifecycle.
+    stop_dispatch_worker(ctx);
+
     let flags = ctx.get_flags();
     if flags.contains(ContextFlags::MASTER) && !flags.contains(ContextFlags::LOADING) {
         // Drain pending markers and clear the dirty flag BEFORE any direct
@@ -485,6 +499,12 @@ redis_module! {
             // over `maxlen`. Same module-arg boundary-bypass re-validation as
             // `maxlen`/`max-streams`.
             ["retention-ms", &RETENTION_MS, 0, 0, i64::MAX, ConfigurationFlags::DEFAULT, None],
+            // Experimental issue #265 worker controls. Immutable so worker
+            // allocation, channel bounds, and flush cadence stay fixed for
+            // the lifetime of one loaded module.
+            ["async-queue-capacity", &ASYNC_QUEUE_CAPACITY, 65536, 1, 10000000, ConfigurationFlags::IMMUTABLE, None],
+            ["async-batch-size", &ASYNC_BATCH_SIZE, 64, 1, 10000, ConfigurationFlags::IMMUTABLE, None],
+            ["async-max-wait-ms", &ASYNC_MAX_WAIT_MS, 1, 1, 60000, ConfigurationFlags::IMMUTABLE, None],
         ],
         string: [
             ["stream-prefix", &*PREFIX, "events:", ConfigurationFlags::IMMUTABLE, None],
@@ -530,6 +550,7 @@ redis_module! {
         // the load-bearing weight for mixed-format streams (SPEC.md section 6).
         enum: [
             ["entry-format", &*ENTRY_FORMAT, EntryFormat::fixed, ConfigurationFlags::DEFAULT, None],
+            ["write-mode", &*WRITE_MODE, WriteMode::sync, ConfigurationFlags::IMMUTABLE, None],
         ],
         module_args_as_configuration: true,
     ]

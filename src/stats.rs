@@ -182,6 +182,18 @@ pub(crate) const LOG_WINDOW_SECS: u64 = 60;
 /// server.
 pub(crate) static HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
 
+/// Experimental bounded-dispatch telemetry (issue #265). These counters are
+/// logical events except `ASYNC_DRAINS`/`ASYNC_ENVELOPES`, which count worker
+/// flush units, and the two queue gauges.
+pub(crate) static ASYNC_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_QUEUE_DEPTH: AtomicI64 = AtomicI64::new(0);
+pub(crate) static ASYNC_QUEUE_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_DRAINS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_DRAIN_EVENTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_ENVELOPES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_WORKER_ERRORS: AtomicU64 = AtomicU64::new(0);
+
 /// Per-stream in-process state (issues #68 and #71), keyed by destination
 /// stream name in `STREAM_STATS`. One record carries the per-stream counters
 /// (the `EVENTSTREAM.STREAMS WITHSTATS` join, SPEC.md section 8), the
@@ -402,6 +414,17 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
         ("registry_errors", load(&REGISTRY_ERRORS)),
         ("control_markers", load(&CONTROL_MARKERS)),
         ("handler_panics", load(&HANDLER_PANICS)),
+        ("async_enqueued", load(&ASYNC_ENQUEUED)),
+        ("async_fallbacks", load(&ASYNC_FALLBACKS)),
+        (
+            "async_queue_depth",
+            Int(ASYNC_QUEUE_DEPTH.load(Ordering::Relaxed)),
+        ),
+        ("async_queue_high_water", load(&ASYNC_QUEUE_HIGH_WATER)),
+        ("async_drains", load(&ASYNC_DRAINS)),
+        ("async_drain_events", load(&ASYNC_DRAIN_EVENTS)),
+        ("async_envelopes", load(&ASYNC_ENVELOPES)),
+        ("async_worker_errors", load(&ASYNC_WORKER_ERRORS)),
         ("dropped_no_owned_slot", load(&DROPPED_NO_OWNED_SLOT)),
         ("dropped_migrating", load(&DROPPED_MIGRATING)),
         ("repins", load(&REPINS)),

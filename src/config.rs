@@ -73,6 +73,50 @@ pub(crate) static VERIFY_OOM: AtomicBool = AtomicBool::new(true);
 /// Default off, so existing deployments see no schema change.
 pub(crate) static ENTRY_SEQ: AtomicBool = AtomicBool::new(false);
 
+/// Positive, load-time-only integer used by the experimental async write path
+/// (issue #265). Redis validates normal config sources against the registered
+/// range; `set` repeats the boundary because module arguments can bypass it.
+pub(crate) struct AsyncPositiveConfig {
+    pub(crate) value: AtomicI64,
+    name: &'static str,
+    max: i64,
+}
+
+impl ConfigurationValue<i64> for AsyncPositiveConfig {
+    fn get(&self, _ctx: &ConfigurationContext) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, _ctx: &ConfigurationContext, val: i64) -> Result<(), RedisError> {
+        if !(1..=self.max).contains(&val) {
+            return Err(RedisError::String(format!(
+                "{} must be between 1 and {}, got {val}",
+                self.name, self.max
+            )));
+        }
+        self.value.store(val, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+pub(crate) static ASYNC_QUEUE_CAPACITY: AsyncPositiveConfig = AsyncPositiveConfig {
+    value: AtomicI64::new(65_536),
+    name: "async-queue-capacity",
+    max: 10_000_000,
+};
+
+pub(crate) static ASYNC_BATCH_SIZE: AsyncPositiveConfig = AsyncPositiveConfig {
+    value: AtomicI64::new(64),
+    name: "async-batch-size",
+    max: 10_000,
+};
+
+pub(crate) static ASYNC_MAX_WAIT_MS: AsyncPositiveConfig = AsyncPositiveConfig {
+    value: AtomicI64::new(1),
+    name: "async-max-wait-ms",
+    max: 60_000,
+};
+
 pub(crate) static MAXLEN: MaxlenConfig = MaxlenConfig {
     value: AtomicI64::new(10_000),
 };
@@ -826,6 +870,28 @@ pub(crate) fn enabled_changed(
     }
 }
 
+mod write_mode {
+    use redis_module::enum_configuration;
+
+    enum_configuration! {
+        /// Experimental write dispatch for issue #265. `sync` is the historical
+        /// post-notification implementation and remains the default.
+        /// `individual` hands events to a bounded worker but retains one XADD
+        /// per event; `envelope` groups compatible logical events into one
+        /// versioned stream entry. Immutable so queue/worker lifecycle never
+        /// changes underneath a loaded module.
+        #[allow(non_camel_case_types)]
+        #[derive(Copy, PartialEq, Eq, Debug)]
+        pub(crate) enum WriteMode {
+            sync = 0,
+            individual = 1,
+            envelope = 2,
+        }
+    }
+}
+
+pub(crate) use write_mode::WriteMode;
+
 enum_configuration! {
     /// `eventstream.entry-format` values (issue #60), the module's first enum
     /// config. Variant names are the byte-exact config strings (`stringify!`
@@ -908,6 +974,9 @@ lazy_static! {
     /// (SPEC.md section 6).
     pub(crate) static ref ENTRY_FORMAT: RedisGILGuard<EntryFormat> =
         RedisGILGuard::new(EntryFormat::fixed);
+
+    pub(crate) static ref WRITE_MODE: RedisGILGuard<WriteMode> =
+        RedisGILGuard::new(WriteMode::sync);
 }
 
 #[cfg(test)]
@@ -921,6 +990,13 @@ mod tests {
         use redis_module::configuration::EnumConfigurationValue;
         let (names, _vals) = EntryFormat::fixed.get_options();
         assert_eq!(names, vec!["fixed", "minimal", "verbose", "json"]);
+    }
+
+    #[test]
+    fn write_mode_config_strings_are_stable() {
+        use redis_module::configuration::EnumConfigurationValue;
+        let (names, _vals) = WriteMode::sync.get_options();
+        assert_eq!(names, vec!["sync", "individual", "envelope"]);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use crate::cluster::*;
 use crate::config::*;
+use crate::dispatch::dispatch_pending_event;
 use crate::markers::*;
 use crate::stats::*;
 use redis_module::{
@@ -127,6 +128,25 @@ pub(crate) struct EntrySpec<'a> {
     pub(crate) db: &'a str,
     pub(crate) class: NotifyEvent,
     pub(crate) seq: Option<u64>,
+}
+
+/// Owned capture inputs snapshotted in the notification callback and consumed
+/// later in a write-safe context. Keeping this boundary explicit lets the
+/// default post-notification path and the experimental bounded worker share
+/// the exact same per-event write semantics (issue #265).
+pub(crate) struct PendingEvent {
+    pub(crate) prefix: String,
+    pub(crate) suffix: String,
+    pub(crate) event: String,
+    pub(crate) key: Vec<u8>,
+    pub(crate) db: i32,
+    pub(crate) class: NotifyEvent,
+    pub(crate) data_retention: Retention,
+    pub(crate) control_retention: Retention,
+    pub(crate) firehose_retention: Retention,
+    pub(crate) max_streams: i64,
+    pub(crate) format: EntryFormat,
+    pub(crate) entry_seq: bool,
 }
 
 /// Human-readable class name(s) for the `verbose` format's `class` field (issue
@@ -660,6 +680,136 @@ pub(crate) fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, ret
     }
 }
 
+/// Execute one fully-snapshotted event in a write-safe context. This is the
+/// canonical logical-event path for both the historical post-notification job
+/// and the experimental async worker (issue #265).
+pub(crate) fn process_pending_event(ctx: &Context, event: PendingEvent) {
+    // All destination streams are consolidated in db 0.
+    let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
+    if rc != raw::REDISMODULE_OK as i32 {
+        count_event_lost(
+            ctx,
+            &DROPPED_XADD_ERROR,
+            &LOGGED_XADD_ERROR,
+            "SelectDb(0) failed; entry dropped",
+        );
+        return;
+    }
+    let db_s = event.db.to_string();
+
+    // In per-node cluster mode, `{tag}` co-locates this node's streams on an
+    // owned slot; empty otherwise. `None` means no owned slot yet.
+    let seg = match tag_segment(ctx) {
+        Some(s) => s,
+        None => {
+            count_no_slot_drop(ctx, true);
+            return;
+        }
+    };
+    // One `seq` per captured event (issue #66), assigned after the slot check
+    // so a no-owned-slot drop does not burn a number, and reused by the
+    // firehose copy so both writes carry the same value.
+    let seq = if event.entry_seq {
+        Some(SEQ.fetch_add(1, Ordering::Relaxed))
+    } else {
+        None
+    };
+    let spec = EntrySpec {
+        format: event.format,
+        event: event.event.as_bytes(),
+        key: &event.key,
+        db: &db_s,
+        class: event.class,
+        seq,
+    };
+    match mirror_entry(
+        ctx,
+        &event.prefix,
+        &seg,
+        &event.suffix,
+        &spec,
+        event.data_retention,
+        event.max_streams,
+        &FORWARDED,
+    ) {
+        MirrorOutcome::Written => {}
+        MirrorOutcome::Oom { stream, msg } => {
+            count_event_lost_stream(ctx, &stream, &DROPPED_OOM, &msg)
+        }
+        // The pinned slot migrated away in a reshard (issue #46) or is
+        // mid-migration (issue #75): re-pin and retry once.
+        MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => repin_and_retry(
+            ctx,
+            &event.prefix,
+            &event.suffix,
+            &spec,
+            event.data_retention,
+            event.control_retention,
+            event.max_streams,
+        ),
+        MirrorOutcome::Failed { stream, msg } => {
+            // The re-pin trigger is an empirically observed error string, so
+            // verify ownership before accepting an unclassified failure.
+            if pinned_tag_lost_by_probe(ctx) {
+                REPINS_PROBE_DETECTED.fetch_add(1, Ordering::Relaxed);
+                repin_and_retry(
+                    ctx,
+                    &event.prefix,
+                    &event.suffix,
+                    &spec,
+                    event.data_retention,
+                    event.control_retention,
+                    event.max_streams,
+                );
+            } else {
+                count_event_lost_stream(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
+            }
+        }
+        MirrorOutcome::MaxStreams { stream } => count_event_lost(
+            ctx,
+            &DROPPED_MAX_STREAMS,
+            &LOGGED_MAX_STREAMS,
+            &format!(
+                "max-streams cap ({}) reached; new stream '{stream}' not created; \
+                 entry dropped (dropped_max_streams)",
+                event.max_streams
+            ),
+        ),
+        MirrorOutcome::EncodeError { stream, reason } => count_event_lost(
+            ctx,
+            &DROPPED_ENCODE_ERROR,
+            &LOGGED_ENCODE_ERROR,
+            &format!(
+                "entry-format encode failed for '{stream}': {reason}; \
+                 entry dropped (dropped_encode_error)"
+            ),
+        ),
+    }
+    // Firehose remains runtime-mutable on the synchronous default path. The
+    // experimental worker rejects firehose at load until its batch semantics
+    // are deliberately defined.
+    if FIREHOSE.load(Ordering::Relaxed) {
+        mirror_firehose(ctx, &event.prefix, &spec, event.firehose_retention);
+    }
+}
+
+/// Register the canonical event processor as a post-notification job. Async
+/// enqueue failures call this same helper, so the fallback is behaviorally the
+/// historical path rather than an alternate write implementation.
+pub(crate) fn defer_pending_event(ctx: &Context, event: PendingEvent) {
+    let status = ctx.add_post_notification_job(move |ctx| {
+        guard_job(move || process_pending_event(ctx, event));
+    });
+    if !matches!(status, Status::Ok) {
+        count_event_lost(
+            ctx,
+            &DROPPED_DEFER_ERROR,
+            &LOGGED_DEFER_ERROR,
+            "failed to register post-notification job; event dropped",
+        );
+    }
+}
+
 /// Keyspace notification callback. Runs with the GIL held; keyspace writes are
 /// unsafe here, so the XADD is deferred to a post-notification job. Gate order
 /// follows the SPEC.md section 4 diagram.
@@ -755,8 +905,6 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
         )
     };
     let max_streams = MAX_STREAMS.value.load(Ordering::Relaxed);
-    let event_owned = event.to_owned();
-    let key_owned = key.to_vec();
     // Entry-shaping config snapshotted here so a mid-stream change lands on
     // whole events, and so the per-event write and its firehose copy share one
     // format (issue #60). `entry-seq` (issue #66) is IMMUTABLE, but reading it
@@ -766,139 +914,23 @@ pub(crate) fn on_keyspace_event(ctx: &Context, event_type: NotifyEvent, event: &
     let entry_seq = ENTRY_SEQ.load(Ordering::Relaxed);
 
     // 8. Deferred write, atomic with the notification.
-    let status = ctx.add_post_notification_job(move |ctx| {
-        guard_job(move || {
-            // All destination streams are consolidated in db 0.
-            let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
-            if rc != raw::REDISMODULE_OK as i32 {
-                count_event_lost(
-                    ctx,
-                    &DROPPED_XADD_ERROR,
-                    &LOGGED_XADD_ERROR,
-                    "SelectDb(0) failed; entry dropped",
-                );
-                return;
-            }
-            let db_s = db.to_string();
-
-            // In per-node cluster mode, `{tag}` co-locates this node's streams on
-            // an owned slot; empty otherwise. `None` means no owned slot yet.
-            let seg = match tag_segment(ctx) {
-                Some(s) => s,
-                None => {
-                    count_no_slot_drop(ctx, true);
-                    return;
-                }
-            };
-            // One `seq` per captured event (issue #66), assigned after the slot
-            // check so a no-owned-slot drop does not burn a number, and reused
-            // by the firehose copy so both writes carry the same value. Only
-            // consumed when `entry-seq` is on; otherwise the field is absent.
-            let seq = if entry_seq {
-                Some(SEQ.fetch_add(1, Ordering::Relaxed))
-            } else {
-                None
-            };
-            let spec = EntrySpec {
-                format,
-                event: event_owned.as_bytes(),
-                key: &key_owned,
-                db: &db_s,
-                class: event_type,
-                seq,
-            };
-            // Resolve the trim policy per destination now the suffix is final
-            // (issues #62, #108): `data_ret`/`control_ret`/`firehose_ret` were
-            // resolved before the job was enqueued (the suffix was already
-            // final), so nothing per-event needs recomputing here.
-            match mirror_entry(
-                ctx,
-                &prefix_owned,
-                &seg,
-                &suffix,
-                &spec,
-                data_ret,
-                max_streams,
-                &FORWARDED,
-            ) {
-                MirrorOutcome::Written => {}
-                MirrorOutcome::Oom { stream, msg } => {
-                    count_event_lost_stream(ctx, &stream, &DROPPED_OOM, &msg)
-                }
-                // The pinned slot migrated away in a reshard (issue #46) or is
-                // mid-migration (issue #75): re-pin and retry once.
-                MirrorOutcome::SlotMigrated | MirrorOutcome::Migrating(_) => repin_and_retry(
-                    ctx,
-                    &prefix_owned,
-                    &suffix,
-                    &spec,
-                    data_ret,
-                    control_ret,
-                    max_streams,
-                ),
-                MirrorOutcome::Failed { stream, msg } => {
-                    // The re-pin trigger is an empirically observed error
-                    // string, so an unclassified failure could be the
-                    // local-refusal in a reworded message. Re-verify ownership
-                    // of the pinned tag before counting the drop (issue #76);
-                    // a failing probe re-pins exactly as if the text had
-                    // matched, counted in `repins_probe_detected`.
-                    if pinned_tag_lost_by_probe(ctx) {
-                        REPINS_PROBE_DETECTED.fetch_add(1, Ordering::Relaxed);
-                        repin_and_retry(
-                            ctx,
-                            &prefix_owned,
-                            &suffix,
-                            &spec,
-                            data_ret,
-                            control_ret,
-                            max_streams,
-                        );
-                    } else {
-                        count_event_lost_stream(ctx, &stream, &DROPPED_XADD_ERROR, &msg);
-                    }
-                }
-                // Max-streams cap reached (issue #64): the new stream was never
-                // created. First-failure-per-reason log, then counted silently.
-                MirrorOutcome::MaxStreams { stream } => count_event_lost(
-                    ctx,
-                    &DROPPED_MAX_STREAMS,
-                    &LOGGED_MAX_STREAMS,
-                    &format!(
-                        "max-streams cap ({max_streams}) reached; new stream '{stream}' \
-                         not created; entry dropped (dropped_max_streams)"
-                    ),
-                ),
-                // The configured entry-format could not encode this event
-                // (issue #60): dropped before any XADD, counted, first failure
-                // logged once per process.
-                MirrorOutcome::EncodeError { stream, reason } => count_event_lost(
-                    ctx,
-                    &DROPPED_ENCODE_ERROR,
-                    &LOGGED_ENCODE_ERROR,
-                    &format!(
-                        "entry-format encode failed for '{stream}': {reason}; \
-                         entry dropped (dropped_encode_error)"
-                    ),
-                ),
-            }
-            // The firehose copy runs after the per-event outcome is settled,
-            // gated on the runtime-mutable config; the two writes succeed or
-            // fail independently (issue #58). It reuses `spec`, so its field set
-            // and `seq` match the per-event entry (issues #60, #66).
-            if FIREHOSE.load(Ordering::Relaxed) {
-                mirror_firehose(ctx, &prefix_owned, &spec, firehose_ret);
-            }
-        });
-    });
-    if !matches!(status, Status::Ok) {
-        count_event_lost(
-            ctx,
-            &DROPPED_DEFER_ERROR,
-            &LOGGED_DEFER_ERROR,
-            "failed to register post-notification job; event dropped",
-        );
-    }
+    dispatch_pending_event(
+        ctx,
+        PendingEvent {
+            prefix: prefix_owned,
+            suffix,
+            event: event.to_owned(),
+            key: key.to_vec(),
+            db,
+            class: event_type,
+            data_retention: data_ret,
+            control_retention: control_ret,
+            firehose_retention: firehose_ret,
+            max_streams,
+            format,
+            entry_seq,
+        },
+    );
 }
 
 /// Raw keyspace-notification callback, registered directly rather than through
