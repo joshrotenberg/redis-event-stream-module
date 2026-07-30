@@ -747,7 +747,7 @@ pub(crate) fn mirror_firehose(ctx: &Context, prefix: &str, spec: &EntrySpec, ret
 /// and the experimental async worker (issue #265).
 pub(crate) fn process_pending_envelope(
     ctx: &Context,
-    events: Vec<PendingEvent>,
+    events: &[&PendingEvent],
     fields: Vec<Vec<u8>>,
 ) {
     let Some(first) = events.first() else {
@@ -858,7 +858,7 @@ pub(crate) fn process_pending_envelope(
 /// Execute one fully-snapshotted event in a write-safe context. This is the
 /// canonical logical-event path for both the historical post-notification job
 /// and the experimental async worker (issue #265).
-pub(crate) fn process_pending_event(ctx: &Context, event: PendingEvent) {
+pub(crate) fn process_pending_event(ctx: &Context, event: &PendingEvent) {
     // All destination streams are consolidated in db 0.
     let rc = unsafe { raw::RedisModule_SelectDb.unwrap()(ctx.ctx, 0) };
     if rc != raw::REDISMODULE_OK as i32 {
@@ -973,7 +973,7 @@ pub(crate) fn process_pending_event(ctx: &Context, event: PendingEvent) {
 /// historical path rather than an alternate write implementation.
 pub(crate) fn defer_pending_event(ctx: &Context, event: PendingEvent) {
     let status = ctx.add_post_notification_job(move |ctx| {
-        guard_job(move || process_pending_event(ctx, event));
+        guard_job(move || process_pending_event(ctx, &event));
     });
     if !matches!(status, Status::Ok) {
         count_defer_failure(ctx);

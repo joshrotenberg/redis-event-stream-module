@@ -34,14 +34,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 static EVENT_QUEUE: OnceLock<Arc<EventQueue>> = OnceLock::new();
-static WORKER: Mutex<Option<JoinHandle<Vec<PendingEvent>>>> = Mutex::new(None);
+static WORKER: Mutex<Option<JoinHandle<Vec<Arc<PendingEvent>>>>> = Mutex::new(None);
 static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_MODE: AtomicU8 = AtomicU8::new(WriteMode::sync as u8);
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(0);
 
 struct QueuedEvent {
     id: u64,
-    event: PendingEvent,
+    event: Arc<PendingEvent>,
     enqueued_at: Instant,
 }
 
@@ -54,6 +54,7 @@ struct EnvelopeSnapshot {
     first_id: u64,
     last_id: u64,
     count: usize,
+    events: Vec<Arc<PendingEvent>>,
     groups: Vec<PreparedGroup>,
 }
 
@@ -74,7 +75,7 @@ impl EventQueue {
 
     /// Never wait in the notification callback. A briefly contended queue is
     /// treated exactly like a full queue and goes through the ordered fallback.
-    fn try_push(&self, event: PendingEvent) -> Result<usize, PendingEvent> {
+    fn try_push(&self, event: Arc<PendingEvent>) -> Result<usize, Arc<PendingEvent>> {
         let mut events = match self.events.try_lock() {
             Ok(events) => events,
             Err(TryLockError::Poisoned(_)) | Err(TryLockError::WouldBlock) => return Err(event),
@@ -120,7 +121,7 @@ impl EventQueue {
         }
     }
 
-    fn drain(&self, limit: usize) -> Vec<PendingEvent> {
+    fn drain(&self, limit: usize) -> Vec<Arc<PendingEvent>> {
         let mut events = self.events.lock().unwrap();
         let count = events.len().min(limit);
         let drained = events
@@ -131,7 +132,7 @@ impl EventQueue {
         drained
     }
 
-    fn drain_all(&self) -> Vec<PendingEvent> {
+    fn drain_all(&self) -> Vec<Arc<PendingEvent>> {
         self.drain(usize::MAX)
     }
 
@@ -139,26 +140,35 @@ impl EventQueue {
     /// still drain that prefix before the worker owns Redis's lock; IDs let the
     /// worker detect that race and discard the now-stale encoding.
     fn prepare_envelopes(&self, limit: usize) -> Option<EnvelopeSnapshot> {
-        let events = self.events.lock().unwrap();
-        let count = events.len().min(limit);
-        if count == 0 {
-            return None;
-        }
-        let selected = events.iter().take(count).collect::<Vec<_>>();
-        let first_id = selected.first().unwrap().id;
-        let last_id = selected.last().unwrap().id;
+        let (count, first_id, last_id, selected) = {
+            let events = self.events.lock().unwrap();
+            let count = events.len().min(limit);
+            if count == 0 {
+                return None;
+            }
+            let first_id = events.front().unwrap().id;
+            let last_id = events.get(count - 1).unwrap().id;
+            let selected = events
+                .iter()
+                .take(count)
+                .map(|queued| Arc::clone(&queued.event))
+                .collect::<Vec<_>>();
+            (count, first_id, last_id, selected)
+        };
+
+        // The queue mutex is intentionally released before JSON/base64 work.
         let mut groups = Vec::new();
         let mut start = 0;
         while start < selected.len() {
             let mut end = start + 1;
             while end < selected.len()
-                && envelope_compatible(&selected[start].event, &selected[end].event)
+                && envelope_compatible(selected[start].as_ref(), selected[end].as_ref())
             {
                 end += 1;
             }
             let refs = selected[start..end]
                 .iter()
-                .map(|queued| &queued.event)
+                .map(Arc::as_ref)
                 .collect::<Vec<_>>();
             groups.push(PreparedGroup {
                 len: refs.len(),
@@ -170,11 +180,12 @@ impl EventQueue {
             first_id,
             last_id,
             count,
+            events: selected,
             groups,
         })
     }
 
-    fn drain_snapshot(&self, snapshot: &EnvelopeSnapshot) -> Option<Vec<PendingEvent>> {
+    fn drain_snapshot(&self, snapshot: &EnvelopeSnapshot) -> bool {
         let mut events = self.events.lock().unwrap();
         let matches = events
             .front()
@@ -183,14 +194,11 @@ impl EventQueue {
                 .get(snapshot.count.saturating_sub(1))
                 .is_some_and(|event| event.id == snapshot.last_id);
         if !matches {
-            return None;
+            return false;
         }
-        let drained = events
-            .drain(..snapshot.count)
-            .map(|queued| queued.event)
-            .collect::<Vec<_>>();
+        events.drain(..snapshot.count);
         ASYNC_QUEUE_DEPTH.fetch_sub(snapshot.count as i64, Ordering::Relaxed);
-        Some(drained)
+        true
     }
 
     fn wake(&self) {
@@ -321,7 +329,7 @@ pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
         defer_pending_event(ctx, event);
         return;
     };
-    match queue.try_push(event) {
+    match queue.try_push(Arc::new(event)) {
         Ok(depth) => {
             ASYNC_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
             ASYNC_ENQUEUED.fetch_add(1, Ordering::Relaxed);
@@ -337,7 +345,7 @@ pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
 /// Redis runs this job before it releases the main-thread lock. The worker
 /// cannot own that lock concurrently, so draining the still-queued prefix and
 /// then the current event preserves notification order.
-fn defer_ordered_fallback(ctx: &Context, queue: Arc<EventQueue>, event: PendingEvent) {
+fn defer_ordered_fallback(ctx: &Context, queue: Arc<EventQueue>, event: Arc<PendingEvent>) {
     let status = ctx.add_post_notification_job(move |ctx| {
         guard_job(move || {
             let accepted = queue.drain_all();
@@ -346,9 +354,9 @@ fn defer_ordered_fallback(ctx: &Context, queue: Arc<EventQueue>, event: PendingE
                 ASYNC_DRAIN_EVENTS.fetch_add(accepted.len() as u64, Ordering::Relaxed);
             }
             for pending in accepted {
-                process_pending_event(ctx, pending);
+                process_pending_event(ctx, pending.as_ref());
             }
-            process_pending_event(ctx, event);
+            process_pending_event(ctx, event.as_ref());
         });
     });
     if !matches!(status, Status::Ok) {
@@ -361,7 +369,7 @@ fn worker_main(
     batch_size: usize,
     max_wait: Duration,
     mode: WriteMode,
-) -> Vec<PendingEvent> {
+) -> Vec<Arc<PendingEvent>> {
     let thread_ctx = match RawThreadContext::new() {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -385,22 +393,28 @@ fn worker_main(
                 return queue.drain_all();
             }
             if let Some(ctx) = thread_ctx.try_lock() {
-                let batch = match &envelope {
-                    Some(snapshot) => queue.drain_snapshot(snapshot).unwrap_or_default(),
-                    None => queue.drain(batch_size),
-                };
-                if !batch.is_empty() {
-                    ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
-                    ASYNC_DRAIN_EVENTS.fetch_add(batch.len() as u64, Ordering::Relaxed);
-                    if let Some(snapshot) = envelope {
-                        let mut events = batch.into_iter();
+                if let Some(snapshot) = envelope {
+                    if queue.drain_snapshot(&snapshot) {
+                        ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
+                        ASYNC_DRAIN_EVENTS.fetch_add(snapshot.count as u64, Ordering::Relaxed);
+                        let mut start = 0;
                         for group in snapshot.groups {
-                            let compatible = events.by_ref().take(group.len).collect::<Vec<_>>();
-                            guard_job(|| process_pending_envelope(&ctx, compatible, group.fields));
+                            let end = start + group.len;
+                            let compatible = snapshot.events[start..end]
+                                .iter()
+                                .map(Arc::as_ref)
+                                .collect::<Vec<_>>();
+                            guard_job(|| process_pending_envelope(&ctx, &compatible, group.fields));
+                            start = end;
                         }
-                    } else {
+                    }
+                } else {
+                    let batch = queue.drain(batch_size);
+                    if !batch.is_empty() {
+                        ASYNC_DRAINS.fetch_add(1, Ordering::Relaxed);
+                        ASYNC_DRAIN_EVENTS.fetch_add(batch.len() as u64, Ordering::Relaxed);
                         for event in batch {
-                            guard_job(|| process_pending_event(&ctx, event));
+                            guard_job(|| process_pending_event(&ctx, event.as_ref()));
                         }
                     }
                 }
@@ -437,7 +451,7 @@ pub(crate) fn stop_dispatch_worker(ctx: &Context) {
         Ok(pending) => {
             ASYNC_QUEUE_DEPTH.store(0, Ordering::Relaxed);
             for event in pending {
-                guard_job(|| process_pending_event(ctx, event));
+                guard_job(|| process_pending_event(ctx, event.as_ref()));
             }
         }
         Err(_) => {
