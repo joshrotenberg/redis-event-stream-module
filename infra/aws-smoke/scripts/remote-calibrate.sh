@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for clients in 1 2 4 8; do
+for clients in 1 2 4 8 16 32 64 100; do
   threads="$clients"
   if ((threads > 4)); then
     threads=4
