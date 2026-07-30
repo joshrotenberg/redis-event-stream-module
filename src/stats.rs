@@ -192,6 +192,7 @@ pub(crate) static ASYNC_QUEUE_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_DRAINS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_DRAIN_EVENTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_ENVELOPES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_ENVELOPE_EVENTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_WORKER_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-stream in-process state (issues #68 and #71), keyed by destination
@@ -424,6 +425,7 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
         ("async_drains", load(&ASYNC_DRAINS)),
         ("async_drain_events", load(&ASYNC_DRAIN_EVENTS)),
         ("async_envelopes", load(&ASYNC_ENVELOPES)),
+        ("async_envelope_events", load(&ASYNC_ENVELOPE_EVENTS)),
         ("async_worker_errors", load(&ASYNC_WORKER_ERRORS)),
         ("dropped_no_owned_slot", load(&DROPPED_NO_OWNED_SLOT)),
         ("dropped_migrating", load(&DROPPED_MIGRATING)),

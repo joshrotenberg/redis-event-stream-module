@@ -26,6 +26,7 @@ use crate::stats::{
 };
 use redis_module::{raw, Context, RedisLockIndicator, Status};
 use std::collections::VecDeque;
+use std::hint::spin_loop;
 use std::ops::Deref;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -38,6 +39,7 @@ static WORKER: Mutex<Option<JoinHandle<Vec<Arc<PendingEvent>>>>> = Mutex::new(No
 static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_MODE: AtomicU8 = AtomicU8::new(WriteMode::sync as u8);
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(0);
+const QUEUE_LOCK_SPINS: usize = 64;
 
 struct QueuedEvent {
     id: u64,
@@ -73,25 +75,31 @@ impl EventQueue {
         }
     }
 
-    /// Never wait in the notification callback. A briefly contended queue is
-    /// treated exactly like a full queue and goes through the ordered fallback.
+    /// Spend only a small, fixed spin budget in the notification callback.
+    /// Contention beyond that bound is treated exactly like a full queue and
+    /// goes through the ordered fallback.
     fn try_push(&self, event: Arc<PendingEvent>) -> Result<usize, Arc<PendingEvent>> {
-        let mut events = match self.events.try_lock() {
-            Ok(events) => events,
-            Err(TryLockError::Poisoned(_)) | Err(TryLockError::WouldBlock) => return Err(event),
-        };
-        if events.len() >= self.capacity {
-            return Err(event);
+        for _ in 0..QUEUE_LOCK_SPINS {
+            match self.events.try_lock() {
+                Ok(mut events) => {
+                    if events.len() >= self.capacity {
+                        return Err(event);
+                    }
+                    events.push_back(QueuedEvent {
+                        id: NEXT_QUEUE_ID.fetch_add(1, Ordering::Relaxed),
+                        event,
+                        enqueued_at: Instant::now(),
+                    });
+                    let depth = events.len();
+                    drop(events);
+                    self.ready.notify_one();
+                    return Ok(depth);
+                }
+                Err(TryLockError::Poisoned(_)) => return Err(event),
+                Err(TryLockError::WouldBlock) => spin_loop(),
+            }
         }
-        events.push_back(QueuedEvent {
-            id: NEXT_QUEUE_ID.fetch_add(1, Ordering::Relaxed),
-            event,
-            enqueued_at: Instant::now(),
-        });
-        let depth = events.len();
-        drop(events);
-        self.ready.notify_one();
-        Ok(depth)
+        Err(event)
     }
 
     /// Wait until a full batch is available or the oldest queued event reaches

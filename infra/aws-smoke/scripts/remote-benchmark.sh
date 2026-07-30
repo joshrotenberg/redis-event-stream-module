@@ -307,6 +307,7 @@ jq -n \
   --argjson async_drains "$(info_field async_drains)" \
   --argjson async_drain_events "$(info_field async_drain_events)" \
   --argjson async_envelopes "$(info_field async_envelopes)" \
+  --argjson async_envelope_events "$(info_field async_envelope_events)" \
   --argjson async_worker_errors "$(info_field async_worker_errors)" \
   --argjson stream_len "${stream_len:-0}" \
   '{
@@ -362,6 +363,7 @@ jq -n \
       async_drains: $async_drains,
       async_drain_events: $async_drain_events,
       async_envelopes: $async_envelopes,
+      async_envelope_events: $async_envelope_events,
       async_worker_errors: $async_worker_errors,
       stream_len: $stream_len
     }

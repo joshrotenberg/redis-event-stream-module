@@ -794,6 +794,7 @@ pub(crate) fn process_pending_envelope(
     ) {
         MirrorOutcome::Written => {
             ASYNC_ENVELOPES.fetch_add(1, Ordering::Relaxed);
+            ASYNC_ENVELOPE_EVENTS.fetch_add(logical_count, Ordering::Relaxed);
         }
         MirrorOutcome::Oom { stream, msg } => {
             for _ in 0..logical_count {

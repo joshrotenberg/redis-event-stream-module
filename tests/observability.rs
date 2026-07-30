@@ -48,6 +48,7 @@ fn info_section_has_all_fields() {
         "async_drains",
         "async_drain_events",
         "async_envelopes",
+        "async_envelope_events",
         "async_worker_errors",
         "dropped_no_owned_slot",
         "dropped_migrating",

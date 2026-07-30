@@ -184,6 +184,10 @@ fn envelope_mode_reduces_xadds_but_preserves_logical_order_and_accounting() {
         "at least one batch-v1 entry should be written"
     );
     assert_eq!(info_field(&mut c, "async_envelopes"), envelopes as i64);
+    assert_eq!(
+        info_field(&mut c, "async_envelope_events"),
+        logical_in_envelopes
+    );
     assert!(logical_in_envelopes > envelopes as i64);
     assert!(
         xlen(&mut c, "events:set") < EVENT_COUNT,
