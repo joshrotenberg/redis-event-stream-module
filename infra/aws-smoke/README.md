@@ -86,6 +86,10 @@ The runner fails unless:
 - `s2` forwards exactly one event per request; and
 - `events_lost`, `dropped`, and `handler_panics` remain zero.
 
+## Observed runs
+
+- [2026-07-30: first AWS smoke run](observations/2026-07-30.md)
+
 ## Image pins
 
 The defaults use manifest digests, not moving tags:
