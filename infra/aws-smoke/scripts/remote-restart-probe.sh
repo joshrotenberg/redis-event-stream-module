@@ -176,61 +176,63 @@ else
 fi
 
 prefix="probe:${mode}:"
-attempted=0
-acknowledged=0
+attempted=$((events_per_batch * max_batches))
+output_file="$result_dir/producer.stdout"
+error_file="$result_dir/producer.stderr"
 threshold_reached=false
-printf '[]\n' >"$result_dir/batches.json"
+module_snapshot >"$result_dir/module-before.json"
+best_depth=0
 
-for batch in $(seq 1 "$max_batches"); do
-  output_file="$result_dir/batch-${batch}.stdout"
-  error_file="$result_dir/batch-${batch}.stderr"
-  offset="$attempted"
-  set +e
-  produce_batch "$prefix" "$offset" "$events_per_batch" \
-    >"$output_file" 2>"$error_file"
-  pipe_status="$?"
-  set -e
-  replies="$(
-    sed -n 's/.*replies: \([0-9][0-9]*\).*/\1/p' "$output_file" |
-      tail -n 1
-  )"
-  errors="$(
-    sed -n 's/.*errors: \([0-9][0-9]*\).*/\1/p' "$output_file" |
-      tail -n 1
-  )"
-  replies="${replies:-0}"
-  errors="${errors:-0}"
-  attempted=$((attempted + events_per_batch))
-  acknowledged=$((acknowledged + replies))
+set +e
+produce_batch "$prefix" 0 "$attempted" \
+  >"$output_file" 2>"$error_file" &
+producer_pid="$!"
+set -e
+
+while kill -0 "$producer_pid" 2>/dev/null; do
   snapshot="$(module_snapshot)"
   depth="$(jq -r '.async_queue_depth' <<<"$snapshot")"
-  jq \
-    --argjson batch "$batch" \
-    --argjson offset "$offset" \
-    --argjson attempted "$events_per_batch" \
-    --argjson replies "$replies" \
-    --argjson errors "$errors" \
-    --argjson pipe_status "$pipe_status" \
-    --argjson module "$snapshot" \
-    '. + [{
-      batch: $batch,
-      offset: $offset,
-      attempted: $attempted,
-      replies: $replies,
-      errors: $errors,
-      pipe_status: $pipe_status,
-      module: $module
-    }]' "$result_dir/batches.json" >"$result_dir/batches.next.json"
-  mv "$result_dir/batches.next.json" "$result_dir/batches.json"
+  if ((depth > best_depth)); then
+    best_depth="$depth"
+    printf '%s\n' "$snapshot" >"$result_dir/module-before.json"
+  fi
   if ((depth >= depth_threshold)); then
     threshold_reached=true
     break
   fi
+  sleep 0.001
 done
 
-module_snapshot >"$result_dir/module-before.json"
+if [[ "$threshold_reached" == "true" ]]; then
+  if [[ "$mode" == "graceful" ]]; then
+    docker exec "$container" pkill -TERM redis-cli >/dev/null 2>&1 || true
+  else
+    docker kill --signal KILL "$container" >/dev/null
+  fi
+fi
+
+set +e
+wait "$producer_pid"
+pipe_status="$?"
+set -e
+
+replies="$(
+  sed -n 's/.*replies: \([0-9][0-9]*\).*/\1/p' "$output_file" |
+    tail -n 1
+)"
+errors="$(
+  sed -n 's/.*errors: \([0-9][0-9]*\).*/\1/p' "$output_file" |
+    tail -n 1
+)"
+replies="${replies:-0}"
+errors="${errors:-0}"
+
+if [[ "$threshold_reached" != "true" ]]; then
+  module_snapshot >"$result_dir/module-before.json"
+fi
 depth_before="$(jq -r '.async_queue_depth' "$result_dir/module-before.json")"
 high_water_before="$(jq -r '.async_queue_high_water' "$result_dir/module-before.json")"
+forwarded_before="$(jq -r '.forwarded' "$result_dir/module-before.json")"
 
 if [[ "$mode" == "graceful" ]]; then
   unload_started_ns="$(date +%s%N)"
@@ -253,7 +255,9 @@ if [[ "$mode" == "graceful" ]]; then
   process_restarted=false
   persistence="none"
 else
-  docker kill --signal KILL "$container" >/dev/null
+  if [[ "$threshold_reached" != "true" ]]; then
+    docker kill --signal KILL "$container" >/dev/null
+  fi
   docker rm "$container" >/dev/null
   start_server yes
   durable_source_keys="$(source_count "$prefix")"
@@ -262,6 +266,30 @@ else
   process_restarted=true
   persistence="aof-everysec"
 fi
+
+acknowledged="$forwarded_before"
+if ((durable_source_keys > acknowledged)); then
+  acknowledged="$durable_source_keys"
+fi
+if ((replies > acknowledged)); then
+  acknowledged="$replies"
+fi
+
+jq -n \
+  --argjson attempted "$attempted" \
+  --argjson replies "$replies" \
+  --argjson errors "$errors" \
+  --argjson pipe_status "$pipe_status" \
+  --slurpfile module "$result_dir/module-before.json" \
+  '[{
+    batch: 1,
+    offset: 0,
+    attempted: $attempted,
+    replies: $replies,
+    errors: $errors,
+    pipe_status: $pipe_status,
+    module: $module[0]
+  }]' >"$result_dir/batches.json"
 
 stream_memory="$(
   redis_raw MEMORY USAGE events:set 2>/dev/null |
