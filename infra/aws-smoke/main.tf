@@ -21,7 +21,6 @@ locals {
       ManagedBy   = "terraform"
       Owner       = var.owner
       Project     = "redis-event-stream-module"
-      owner       = var.owner
     },
     var.extra_tags,
   )
