@@ -356,6 +356,10 @@ main_remote_archive="/var/lib/eventstream-smoke/main-$run_id.tar.gz"
 workload_command="printf '%s' '$workload_script_b64' | base64 --decode > /tmp/eventstream-soak-workload.sh
 chmod 0700 /tmp/eventstream-soak-workload.sh
 /tmp/eventstream-soak-workload.sh '$server_ip' '$loadgen_image' '$client_image' '$soak_seconds' '$base_clients' '$base_rps' '$payload' '$keyspace' '$main_remote_dir'
+workload_status=\$?
+if [ \"\$workload_status\" -ne 0 ]; then
+  exit \"\$workload_status\"
+fi
 tar -C '$main_remote_dir' -czf '$main_remote_archive' ."
 run_remote \
   "$loadgen_id" \

@@ -105,7 +105,7 @@ requests_for_rate() {
   local rate="$1"
   local seconds="$2"
   awk -v rate="$rate" -v seconds="$seconds" \
-    'BEGIN { value = int((rate * seconds) + 0.5); print value > 0 ? value : 1 }'
+    'BEGIN { value = int((rate * seconds) + 0.5); print (value > 0 ? value : 1) }'
 }
 
 steady_one=$((soak_seconds * 27 / 100))
