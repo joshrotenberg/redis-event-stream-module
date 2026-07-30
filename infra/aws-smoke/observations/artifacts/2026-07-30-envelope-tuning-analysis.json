@@ -1,0 +1,2181 @@
+{
+  "schema_version": 1,
+  "source_runs": [
+    {
+      "run_id": "20260730T2153Z-tuning-coarse",
+      "git_commit": "c8c80b348f9f0f5da8d400d604517bc78715cb13",
+      "started_at": "2026-07-30T21:53:23Z",
+      "completed_at": "2026-07-30T22:08:22Z",
+      "environment": {
+        "region": "us-west-2",
+        "availability_zone": "us-west-2a",
+        "ami_id": "ami-0b76d82b547c3c077",
+        "server_instance_type": "c7i.large",
+        "loadgen_instance_type": "c7i.large",
+        "module_image": "ghcr.io/joshrotenberg/redis-event-stream-module:0.4.0@sha256:1466a273fd64321ca3eba4447db3a16e2eb231be2afdb3a620c5cb2229be4db2",
+        "module_artifact": {
+          "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/c8c80b348f9f0f5da8d400d604517bc78715cb13.tar.gz",
+          "path": "/var/lib/eventstream-smoke/libredis_event_stream_module.so",
+          "sha256": "1aa59cc7043f7a337c0e8e6fd9803040096437a47417a339182fc92a8a3cc25b",
+          "size_bytes": 2952352,
+          "git_commit": "c8c80b348f9f0f5da8d400d604517bc78715cb13"
+        },
+        "loadgen_image": "redis:8.8.0@sha256:234c902a2db49461a129e2d4aeff85b28cf20187ed274a67f6e50995fa713c7b",
+        "expires_at": "2026-07-31T01:52:35Z"
+      },
+      "capture_configuration": {
+        "scenarios": [
+          "s2-sync",
+          "s2-envelope"
+        ],
+        "async_queue_capacity": 1048576,
+        "async_batch_size": 64,
+        "async_max_wait_ms": 1,
+        "async_configs": [
+          {
+            "batch_size": 32,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 32,
+            "max_wait_ms": 2
+          },
+          {
+            "batch_size": 32,
+            "max_wait_ms": 5
+          },
+          {
+            "batch_size": 32,
+            "max_wait_ms": 10
+          },
+          {
+            "batch_size": 64,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 64,
+            "max_wait_ms": 2
+          },
+          {
+            "batch_size": 64,
+            "max_wait_ms": 5
+          },
+          {
+            "batch_size": 64,
+            "max_wait_ms": 10
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 2
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 5
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 10
+          },
+          {
+            "batch_size": 256,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 256,
+            "max_wait_ms": 2
+          },
+          {
+            "batch_size": 256,
+            "max_wait_ms": 5
+          },
+          {
+            "batch_size": 256,
+            "max_wait_ms": 10
+          },
+          {
+            "batch_size": 512,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 512,
+            "max_wait_ms": 2
+          },
+          {
+            "batch_size": 512,
+            "max_wait_ms": 5
+          },
+          {
+            "batch_size": 512,
+            "max_wait_ms": 10
+          }
+        ]
+      }
+    },
+    {
+      "run_id": "20260730T2208Z-tuning-focused",
+      "git_commit": "c8c80b348f9f0f5da8d400d604517bc78715cb13",
+      "started_at": "2026-07-30T22:09:25Z",
+      "completed_at": "2026-07-30T22:26:03Z",
+      "environment": {
+        "region": "us-west-2",
+        "availability_zone": "us-west-2a",
+        "ami_id": "ami-0b76d82b547c3c077",
+        "server_instance_type": "c7i.large",
+        "loadgen_instance_type": "c7i.large",
+        "module_image": "ghcr.io/joshrotenberg/redis-event-stream-module:0.4.0@sha256:1466a273fd64321ca3eba4447db3a16e2eb231be2afdb3a620c5cb2229be4db2",
+        "module_artifact": {
+          "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/c8c80b348f9f0f5da8d400d604517bc78715cb13.tar.gz",
+          "path": "/var/lib/eventstream-smoke/libredis_event_stream_module.so",
+          "sha256": "1aa59cc7043f7a337c0e8e6fd9803040096437a47417a339182fc92a8a3cc25b",
+          "size_bytes": 2952352,
+          "git_commit": "c8c80b348f9f0f5da8d400d604517bc78715cb13"
+        },
+        "loadgen_image": "redis:8.8.0@sha256:234c902a2db49461a129e2d4aeff85b28cf20187ed274a67f6e50995fa713c7b",
+        "expires_at": "2026-07-31T01:52:35Z"
+      },
+      "capture_configuration": {
+        "scenarios": [
+          "s2-sync",
+          "s2-envelope"
+        ],
+        "async_queue_capacity": 1048576,
+        "async_batch_size": 64,
+        "async_max_wait_ms": 1,
+        "async_configs": [
+          {
+            "batch_size": 64,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 64,
+            "max_wait_ms": 5
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 1
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 2
+          },
+          {
+            "batch_size": 128,
+            "max_wait_ms": 10
+          }
+        ]
+      }
+    }
+  ],
+  "trial_count": 39,
+  "summaries": [
+    {
+      "id": "b32-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 32,
+        "max_wait_ms": 1
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 103815.21,
+        "median": 103815.21,
+        "max": 103815.21
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 102610.930,
+        "median": 102610.930,
+        "max": 102610.930
+      },
+      "p99_ms": {
+        "min": 3.639,
+        "median": 3.639,
+        "max": 3.639
+      },
+      "max_ms": {
+        "min": 74.367,
+        "median": 74.367,
+        "max": 74.367
+      },
+      "server_total_core_percent": {
+        "min": 193.733,
+        "median": 193.733,
+        "max": 193.733
+      },
+      "capture_settle_seconds": {
+        "min": 0.226101,
+        "median": 0.226101,
+        "max": 0.226101
+      },
+      "async_queue_high_water": {
+        "min": 15648,
+        "median": 15648,
+        "max": 15648
+      },
+      "achieved_envelope_size": {
+        "min": 31.99536144137106,
+        "median": 31.99536144137106,
+        "max": 31.99536144137106
+      },
+      "envelope_event_percent": {
+        "min": 65.5281,
+        "median": 65.5281,
+        "max": 65.5281
+      },
+      "fallback_percent": {
+        "min": 0.01155,
+        "median": 0.01155,
+        "max": 0.01155
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b32-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 32,
+        "max_wait_ms": 2
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 103793.66,
+        "median": 103793.66,
+        "max": 103793.66
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 102618.896,
+        "median": 102618.896,
+        "max": 102618.896
+      },
+      "p99_ms": {
+        "min": 1.551,
+        "median": 1.551,
+        "max": 1.551
+      },
+      "max_ms": {
+        "min": 97.471,
+        "median": 97.471,
+        "max": 97.471
+      },
+      "server_total_core_percent": {
+        "min": 193.511,
+        "median": 193.511,
+        "max": 193.511
+      },
+      "capture_settle_seconds": {
+        "min": 0.220588,
+        "median": 0.220588,
+        "max": 0.220588
+      },
+      "async_queue_high_water": {
+        "min": 21033,
+        "median": 21033,
+        "max": 21033
+      },
+      "achieved_envelope_size": {
+        "min": 31.998490124929987,
+        "median": 31.998490124929987,
+        "max": 31.998490124929987
+      },
+      "envelope_event_percent": {
+        "min": 65.6977,
+        "median": 65.6977,
+        "max": 65.6977
+      },
+      "fallback_percent": {
+        "min": 0.009399999999999999,
+        "median": 0.009399999999999999,
+        "max": 0.009399999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b32-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 32,
+        "max_wait_ms": 5
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 102453.77,
+        "median": 102453.77,
+        "max": 102453.77
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 101195.959,
+        "median": 101195.959,
+        "max": 101195.959
+      },
+      "p99_ms": {
+        "min": 4.999,
+        "median": 4.999,
+        "max": 4.999
+      },
+      "max_ms": {
+        "min": 67.391,
+        "median": 67.391,
+        "max": 67.391
+      },
+      "server_total_core_percent": {
+        "min": 192.819,
+        "median": 192.819,
+        "max": 192.819
+      },
+      "capture_settle_seconds": {
+        "min": 0.242635,
+        "median": 0.242635,
+        "max": 0.242635
+      },
+      "async_queue_high_water": {
+        "min": 13189,
+        "median": 13189,
+        "max": 13189
+      },
+      "achieved_envelope_size": {
+        "min": 31.99997503183441,
+        "median": 31.99997503183441,
+        "max": 31.99997503183441
+      },
+      "envelope_event_percent": {
+        "min": 64.08155,
+        "median": 64.08155,
+        "max": 64.08155
+      },
+      "fallback_percent": {
+        "min": 0.012549999999999999,
+        "median": 0.012549999999999999,
+        "max": 0.012549999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b32-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 32,
+        "max_wait_ms": 10
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 103788.27,
+        "median": 103788.27,
+        "max": 103788.27
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 102587.856,
+        "median": 102587.856,
+        "max": 102587.856
+      },
+      "p99_ms": {
+        "min": 2.743,
+        "median": 2.743,
+        "max": 2.743
+      },
+      "max_ms": {
+        "min": 112.319,
+        "median": 112.319,
+        "max": 112.319
+      },
+      "server_total_core_percent": {
+        "min": 193.631,
+        "median": 193.631,
+        "max": 193.631
+      },
+      "capture_settle_seconds": {
+        "min": 0.225485,
+        "median": 0.225485,
+        "max": 0.225485
+      },
+      "async_queue_high_water": {
+        "min": 24484,
+        "median": 24484,
+        "max": 24484
+      },
+      "achieved_envelope_size": {
+        "min": 31.999441454250025,
+        "median": 31.999441454250025,
+        "max": 31.999441454250025
+      },
+      "envelope_event_percent": {
+        "min": 63.0197,
+        "median": 63.0197,
+        "max": 63.0197
+      },
+      "fallback_percent": {
+        "min": 0.0113,
+        "median": 0.0113,
+        "max": 0.0113
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 1
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 128129.57,
+        "median": 128954.89,
+        "max": 134148.97
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127186.624,
+        "median": 127792.736,
+        "max": 133316.738
+      },
+      "p99_ms": {
+        "min": 1.167,
+        "median": 1.171,
+        "max": 1.175
+      },
+      "max_ms": {
+        "min": 11.103,
+        "median": 13.751000000000001,
+        "max": 15.671
+      },
+      "server_total_core_percent": {
+        "min": 179.196,
+        "median": 179.8435,
+        "max": 180.692
+      },
+      "capture_settle_seconds": {
+        "min": 0.211856,
+        "median": 0.22429749999999998,
+        "max": 0.243462
+      },
+      "async_queue_high_water": {
+        "min": 1531,
+        "median": 1784,
+        "max": 1848
+      },
+      "achieved_envelope_size": {
+        "min": 63.9925,
+        "median": 63.994495151143155,
+        "max": 63.9962348590417
+      },
+      "envelope_event_percent": {
+        "min": 95.52334,
+        "median": 95.986205,
+        "max": 96.2302
+      },
+      "fallback_percent": {
+        "min": 0.0757,
+        "median": 0.082675,
+        "max": 0.08844
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 2
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128957.38,
+        "median": 128957.38,
+        "max": 128957.38
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 126951.805,
+        "median": 126951.805,
+        "max": 126951.805
+      },
+      "p99_ms": {
+        "min": 1.159,
+        "median": 1.159,
+        "max": 1.159
+      },
+      "max_ms": {
+        "min": 12.831,
+        "median": 12.831,
+        "max": 12.831
+      },
+      "server_total_core_percent": {
+        "min": 176.867,
+        "median": 176.867,
+        "max": 176.867
+      },
+      "capture_settle_seconds": {
+        "min": 0.245010,
+        "median": 0.245010,
+        "max": 0.245010
+      },
+      "async_queue_high_water": {
+        "min": 1512,
+        "median": 1512,
+        "max": 1512
+      },
+      "achieved_envelope_size": {
+        "min": 63.997537765355695,
+        "median": 63.997537765355695,
+        "max": 63.997537765355695
+      },
+      "envelope_event_percent": {
+        "min": 96.1691,
+        "median": 96.1691,
+        "max": 96.1691
+      },
+      "fallback_percent": {
+        "min": 0.07984999999999999,
+        "median": 0.07984999999999999,
+        "max": 0.07984999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 5
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 126508.62,
+        "median": 127315.555,
+        "max": 128949.06
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 125867.257,
+        "median": 126577.07250000001,
+        "max": 127289.460
+      },
+      "p99_ms": {
+        "min": 1.167,
+        "median": 1.171,
+        "max": 1.183
+      },
+      "max_ms": {
+        "min": 9.503,
+        "median": 10.923,
+        "max": 21.295
+      },
+      "server_total_core_percent": {
+        "min": 173.731,
+        "median": 174.13150000000002,
+        "max": 174.286
+      },
+      "capture_settle_seconds": {
+        "min": 0.201391,
+        "median": 0.2088895,
+        "max": 0.242701
+      },
+      "async_queue_high_water": {
+        "min": 1435,
+        "median": 1646,
+        "max": 2138
+      },
+      "achieved_envelope_size": {
+        "min": 63.99862586721185,
+        "median": 63.99915379517357,
+        "max": 63.99992004264392
+      },
+      "envelope_event_percent": {
+        "min": 95.47635,
+        "median": 96.03380999999999,
+        "max": 96.09228
+      },
+      "fallback_percent": {
+        "min": 0.08202,
+        "median": 0.08322,
+        "max": 0.09179999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 10
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 124929.72,
+        "median": 124929.72,
+        "max": 124929.72
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 123068.653,
+        "median": 123068.653,
+        "max": 123068.653
+      },
+      "p99_ms": {
+        "min": 1.175,
+        "median": 1.175,
+        "max": 1.175
+      },
+      "max_ms": {
+        "min": 11.599,
+        "median": 11.599,
+        "max": 11.599
+      },
+      "server_total_core_percent": {
+        "min": 165.492,
+        "median": 165.492,
+        "max": 165.492
+      },
+      "capture_settle_seconds": {
+        "min": 0.242091,
+        "median": 0.242091,
+        "max": 0.242091
+      },
+      "async_queue_high_water": {
+        "min": 1370,
+        "median": 1370,
+        "max": 1370
+      },
+      "achieved_envelope_size": {
+        "min": 63.999532398129595,
+        "median": 63.999532398129595,
+        "max": 63.999532398129595
+      },
+      "envelope_event_percent": {
+        "min": 95.8073,
+        "median": 95.8073,
+        "max": 95.8073
+      },
+      "fallback_percent": {
+        "min": 0.0892,
+        "median": 0.0892,
+        "max": 0.0892
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 1
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 131070.19,
+        "median": 132367.94,
+        "max": 132373.19
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 129097.523,
+        "median": 131506.3205,
+        "max": 131588.598
+      },
+      "p99_ms": {
+        "min": 1.335,
+        "median": 1.339,
+        "max": 1.367
+      },
+      "max_ms": {
+        "min": 14.687,
+        "median": 17.439,
+        "max": 20.207
+      },
+      "server_total_core_percent": {
+        "min": 160.655,
+        "median": 162.35649999999998,
+        "max": 162.748
+      },
+      "capture_settle_seconds": {
+        "min": 0.225214,
+        "median": 0.233686,
+        "max": 0.260778
+      },
+      "async_queue_high_water": {
+        "min": 1795,
+        "median": 1878,
+        "max": 1898
+      },
+      "achieved_envelope_size": {
+        "min": 126.97964646183014,
+        "median": 127.02640652353591,
+        "max": 127.07301045802808
+      },
+      "envelope_event_percent": {
+        "min": 90.58475,
+        "median": 90.98637,
+        "max": 91.17478
+      },
+      "fallback_percent": {
+        "min": 0.10376,
+        "median": 0.10646,
+        "max": 0.1087
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 2
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 131061.59,
+        "median": 132371.44,
+        "max": 132376.69
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 129156.148,
+        "median": 131564.08049999998,
+        "max": 131576.011
+      },
+      "p99_ms": {
+        "min": 1.319,
+        "median": 1.335,
+        "max": 1.343
+      },
+      "max_ms": {
+        "min": 10.583,
+        "median": 12.695,
+        "max": 14.599
+      },
+      "server_total_core_percent": {
+        "min": 157.515,
+        "median": 160.97750000000002,
+        "max": 161.372
+      },
+      "capture_settle_seconds": {
+        "min": 0.225131,
+        "median": 0.229196,
+        "max": 0.235047
+      },
+      "async_queue_high_water": {
+        "min": 1755,
+        "median": 1843.5,
+        "max": 1901
+      },
+      "achieved_envelope_size": {
+        "min": 127.98754809373906,
+        "median": 127.98998305894526,
+        "max": 127.9918156847357
+      },
+      "envelope_event_percent": {
+        "min": 90.94732,
+        "median": 91.16525999999999,
+        "max": 91.4791
+      },
+      "fallback_percent": {
+        "min": 0.1003,
+        "median": 0.10421,
+        "max": 0.10740000000000001
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 5
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128949.06,
+        "median": 128949.06,
+        "max": 128949.06
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127162.574,
+        "median": 127162.574,
+        "max": 127162.574
+      },
+      "p99_ms": {
+        "min": 1.367,
+        "median": 1.367,
+        "max": 1.367
+      },
+      "max_ms": {
+        "min": 10.135,
+        "median": 10.135,
+        "max": 10.135
+      },
+      "server_total_core_percent": {
+        "min": 153.515,
+        "median": 153.515,
+        "max": 153.515
+      },
+      "capture_settle_seconds": {
+        "min": 0.217897,
+        "median": 0.217897,
+        "max": 0.217897
+      },
+      "async_queue_high_water": {
+        "min": 1581,
+        "median": 1581,
+        "max": 1581
+      },
+      "achieved_envelope_size": {
+        "min": 127.99141417725112,
+        "median": 127.99141417725112,
+        "max": 127.99141417725112
+      },
+      "envelope_event_percent": {
+        "min": 90.18915,
+        "median": 90.18915,
+        "max": 90.18915
+      },
+      "fallback_percent": {
+        "min": 0.11499999999999999,
+        "median": 0.11499999999999999,
+        "max": 0.11499999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 10
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 126895.51,
+        "median": 127716.82500000001,
+        "max": 128122.99
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 125207.720,
+        "median": 127019.208,
+        "max": 127450.432
+      },
+      "p99_ms": {
+        "min": 1.351,
+        "median": 1.367,
+        "max": 1.375
+      },
+      "max_ms": {
+        "min": 10.607,
+        "median": 13.267,
+        "max": 14.767
+      },
+      "server_total_core_percent": {
+        "min": 145.486,
+        "median": 147.098,
+        "max": 147.710
+      },
+      "capture_settle_seconds": {
+        "min": 0.205580,
+        "median": 0.2091965,
+        "max": 0.224570
+      },
+      "async_queue_high_water": {
+        "min": 1548,
+        "median": 1877.5,
+        "max": 2160
+      },
+      "achieved_envelope_size": {
+        "min": 127.99224199288257,
+        "median": 127.99796134964188,
+        "max": 127.99965916837083
+      },
+      "envelope_event_percent": {
+        "min": 89.91455,
+        "median": 90.25025,
+        "max": 90.57990000000001
+      },
+      "fallback_percent": {
+        "min": 0.11180000000000001,
+        "median": 0.11612,
+        "max": 0.1204
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b256-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 256,
+        "max_wait_ms": 1
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128940.76,
+        "median": 128940.76,
+        "max": 128940.76
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127023.387,
+        "median": 127023.387,
+        "max": 127023.387
+      },
+      "p99_ms": {
+        "min": 1.503,
+        "median": 1.503,
+        "max": 1.503
+      },
+      "max_ms": {
+        "min": 12.519,
+        "median": 12.519,
+        "max": 12.519
+      },
+      "server_total_core_percent": {
+        "min": 157.943,
+        "median": 157.943,
+        "max": 157.943
+      },
+      "capture_settle_seconds": {
+        "min": 0.234133,
+        "median": 0.234133,
+        "max": 0.234133
+      },
+      "async_queue_high_water": {
+        "min": 1706,
+        "median": 1706,
+        "max": 1706
+      },
+      "achieved_envelope_size": {
+        "min": 149.12051015096304,
+        "median": 149.12051015096304,
+        "max": 149.12051015096304
+      },
+      "envelope_event_percent": {
+        "min": 85.93815000000001,
+        "median": 85.93815000000001,
+        "max": 85.93815000000001
+      },
+      "fallback_percent": {
+        "min": 0.12985,
+        "median": 0.12985,
+        "max": 0.12985
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b256-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 256,
+        "max_wait_ms": 2
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 115834.59,
+        "median": 115834.59,
+        "max": 115834.59
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 114228.143,
+        "median": 114228.143,
+        "max": 114228.143
+      },
+      "p99_ms": {
+        "min": 2.047,
+        "median": 2.047,
+        "max": 2.047
+      },
+      "max_ms": {
+        "min": 10.879,
+        "median": 10.879,
+        "max": 10.879
+      },
+      "server_total_core_percent": {
+        "min": 154.718,
+        "median": 154.718,
+        "max": 154.718
+      },
+      "capture_settle_seconds": {
+        "min": 0.242820,
+        "median": 0.242820,
+        "max": 0.242820
+      },
+      "async_queue_high_water": {
+        "min": 1624,
+        "median": 1624,
+        "max": 1624
+      },
+      "achieved_envelope_size": {
+        "min": 253.0832310838446,
+        "median": 253.0832310838446,
+        "max": 253.0832310838446
+      },
+      "envelope_event_percent": {
+        "min": 61.87885,
+        "median": 61.87885,
+        "max": 61.87885
+      },
+      "fallback_percent": {
+        "min": 0.20235,
+        "median": 0.20235,
+        "max": 0.20235
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b256-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 256,
+        "max_wait_ms": 5
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 112593.59,
+        "median": 112593.59,
+        "max": 112593.59
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 111141.922,
+        "median": 111141.922,
+        "max": 111141.922
+      },
+      "p99_ms": {
+        "min": 2.079,
+        "median": 2.079,
+        "max": 2.079
+      },
+      "max_ms": {
+        "min": 9.671,
+        "median": 9.671,
+        "max": 9.671
+      },
+      "server_total_core_percent": {
+        "min": 148.558,
+        "median": 148.558,
+        "max": 148.558
+      },
+      "capture_settle_seconds": {
+        "min": 0.232009,
+        "median": 0.232009,
+        "max": 0.232009
+      },
+      "async_queue_high_water": {
+        "min": 1313,
+        "median": 1313,
+        "max": 1313
+      },
+      "achieved_envelope_size": {
+        "min": 255.98685061435654,
+        "median": 255.98685061435654,
+        "max": 255.98685061435654
+      },
+      "envelope_event_percent": {
+        "min": 59.37615,
+        "median": 59.37615,
+        "max": 59.37615
+      },
+      "fallback_percent": {
+        "min": 0.21575000000000003,
+        "median": 0.21575000000000003,
+        "max": 0.21575000000000003
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b256-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 256,
+        "max_wait_ms": 10
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 106575.72,
+        "median": 106575.72,
+        "max": 106575.72
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 105448.297,
+        "median": 105448.297,
+        "max": 105448.297
+      },
+      "p99_ms": {
+        "min": 2.143,
+        "median": 2.143,
+        "max": 2.143
+      },
+      "max_ms": {
+        "min": 17.407,
+        "median": 17.407,
+        "max": 17.407
+      },
+      "server_total_core_percent": {
+        "min": 141.605,
+        "median": 141.605,
+        "max": 141.605
+      },
+      "capture_settle_seconds": {
+        "min": 0.200641,
+        "median": 0.200641,
+        "max": 0.200641
+      },
+      "async_queue_high_water": {
+        "min": 1779,
+        "median": 1779,
+        "max": 1779
+      },
+      "achieved_envelope_size": {
+        "min": 255.9789164010787,
+        "median": 255.9789164010787,
+        "max": 255.9789164010787
+      },
+      "envelope_event_percent": {
+        "min": 52.2069,
+        "median": 52.2069,
+        "max": 52.2069
+      },
+      "fallback_percent": {
+        "min": 0.25275,
+        "median": 0.25275,
+        "max": 0.25275
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b512-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 512,
+        "max_wait_ms": 1
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128932.44,
+        "median": 128932.44,
+        "max": 128932.44
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127246.829,
+        "median": 127246.829,
+        "max": 127246.829
+      },
+      "p99_ms": {
+        "min": 1.503,
+        "median": 1.503,
+        "max": 1.503
+      },
+      "max_ms": {
+        "min": 20.495,
+        "median": 20.495,
+        "max": 20.495
+      },
+      "server_total_core_percent": {
+        "min": 158.308,
+        "median": 158.308,
+        "max": 158.308
+      },
+      "capture_settle_seconds": {
+        "min": 0.205484,
+        "median": 0.205484,
+        "max": 0.205484
+      },
+      "async_queue_high_water": {
+        "min": 1580,
+        "median": 1580,
+        "max": 1580
+      },
+      "achieved_envelope_size": {
+        "min": 149.0934146132051,
+        "median": 149.0934146132051,
+        "max": 149.0934146132051
+      },
+      "envelope_event_percent": {
+        "min": 86.82455,
+        "median": 86.82455,
+        "max": 86.82455
+      },
+      "fallback_percent": {
+        "min": 0.12329999999999999,
+        "median": 0.12329999999999999,
+        "max": 0.12329999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b512-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 512,
+        "max_wait_ms": 2
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 110993.95,
+        "median": 110993.95,
+        "max": 110993.95
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 109402.613,
+        "median": 109402.613,
+        "max": 109402.613
+      },
+      "p99_ms": {
+        "min": 2.239,
+        "median": 2.239,
+        "max": 2.239
+      },
+      "max_ms": {
+        "min": 11.615,
+        "median": 11.615,
+        "max": 11.615
+      },
+      "server_total_core_percent": {
+        "min": 153.620,
+        "median": 153.620,
+        "max": 153.620
+      },
+      "capture_settle_seconds": {
+        "min": 0.262099,
+        "median": 0.262099,
+        "max": 0.262099
+      },
+      "async_queue_high_water": {
+        "min": 1477,
+        "median": 1477,
+        "max": 1477
+      },
+      "achieved_envelope_size": {
+        "min": 286.11161548731644,
+        "median": 286.11161548731644,
+        "max": 286.11161548731644
+      },
+      "envelope_event_percent": {
+        "min": 53.5744,
+        "median": 53.5744,
+        "max": 53.5744
+      },
+      "fallback_percent": {
+        "min": 0.21525,
+        "median": 0.21525,
+        "max": 0.21525
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b512-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 512,
+        "max_wait_ms": 5
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 94020.31,
+        "median": 94020.31,
+        "max": 94020.31
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 93031.945,
+        "median": 93031.945,
+        "max": 93031.945
+      },
+      "p99_ms": {
+        "min": 3.319,
+        "median": 3.319,
+        "max": 3.319
+      },
+      "max_ms": {
+        "min": 14.759,
+        "median": 14.759,
+        "max": 14.759
+      },
+      "server_total_core_percent": {
+        "min": 148.460,
+        "median": 148.460,
+        "max": 148.460
+      },
+      "capture_settle_seconds": {
+        "min": 0.225992,
+        "median": 0.225992,
+        "max": 0.225992
+      },
+      "async_queue_high_water": {
+        "min": 2061,
+        "median": 2061,
+        "max": 2061
+      },
+      "achieved_envelope_size": {
+        "min": 511.2068376068376,
+        "median": 511.2068376068376,
+        "max": 511.2068376068376
+      },
+      "envelope_event_percent": {
+        "min": 14.9528,
+        "median": 14.9528,
+        "max": 14.9528
+      },
+      "fallback_percent": {
+        "min": 0.24405,
+        "median": 0.24405,
+        "max": 0.24405
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b512-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 512,
+        "max_wait_ms": 10
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 91856.88,
+        "median": 91856.88,
+        "max": 91856.88
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 90938.278,
+        "median": 90938.278,
+        "max": 90938.278
+      },
+      "p99_ms": {
+        "min": 3.359,
+        "median": 3.359,
+        "max": 3.359
+      },
+      "max_ms": {
+        "min": 11.959,
+        "median": 11.959,
+        "max": 11.959
+      },
+      "server_total_core_percent": {
+        "min": 141.772,
+        "median": 141.772,
+        "max": 141.772
+      },
+      "capture_settle_seconds": {
+        "min": 0.219937,
+        "median": 0.219937,
+        "max": 0.219937
+      },
+      "async_queue_high_water": {
+        "min": 1984,
+        "median": 1984,
+        "max": 1984
+      },
+      "achieved_envelope_size": {
+        "min": 511.6910891089109,
+        "median": 511.6910891089109,
+        "max": 511.6910891089109
+      },
+      "envelope_event_percent": {
+        "min": 12.920200000000001,
+        "median": 12.920200000000001,
+        "max": 12.920200000000001
+      },
+      "fallback_percent": {
+        "min": 0.24785,
+        "median": 0.24785,
+        "max": 0.24785
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "s2-sync",
+      "scenario": "s2-sync",
+      "clients": 100,
+      "async_configuration": null,
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 114863.31,
+        "median": 116033.77,
+        "max": 116885.24
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 114863.310,
+        "median": 116033.7715,
+        "max": 116885.239
+      },
+      "p99_ms": {
+        "min": 1.103,
+        "median": 1.115,
+        "max": 1.135
+      },
+      "max_ms": {
+        "min": 6.463,
+        "median": 10.863,
+        "max": 17.311
+      },
+      "server_total_core_percent": {
+        "min": 99.319,
+        "median": 99.388,
+        "max": 99.658
+      },
+      "capture_settle_seconds": {
+        "min": 0.000000,
+        "median": 0,
+        "max": 0.000000
+      },
+      "async_queue_high_water": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "achieved_envelope_size": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "envelope_event_percent": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "fallback_percent": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    }
+  ],
+  "pareto_frontier": [
+    {
+      "id": "b64-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 1
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 128129.57,
+        "median": 128954.89,
+        "max": 134148.97
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127186.624,
+        "median": 127792.736,
+        "max": 133316.738
+      },
+      "p99_ms": {
+        "min": 1.167,
+        "median": 1.171,
+        "max": 1.175
+      },
+      "max_ms": {
+        "min": 11.103,
+        "median": 13.751000000000001,
+        "max": 15.671
+      },
+      "server_total_core_percent": {
+        "min": 179.196,
+        "median": 179.8435,
+        "max": 180.692
+      },
+      "capture_settle_seconds": {
+        "min": 0.211856,
+        "median": 0.22429749999999998,
+        "max": 0.243462
+      },
+      "async_queue_high_water": {
+        "min": 1531,
+        "median": 1784,
+        "max": 1848
+      },
+      "achieved_envelope_size": {
+        "min": 63.9925,
+        "median": 63.994495151143155,
+        "max": 63.9962348590417
+      },
+      "envelope_event_percent": {
+        "min": 95.52334,
+        "median": 95.986205,
+        "max": 96.2302
+      },
+      "fallback_percent": {
+        "min": 0.0757,
+        "median": 0.082675,
+        "max": 0.08844
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 2
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128957.38,
+        "median": 128957.38,
+        "max": 128957.38
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 126951.805,
+        "median": 126951.805,
+        "max": 126951.805
+      },
+      "p99_ms": {
+        "min": 1.159,
+        "median": 1.159,
+        "max": 1.159
+      },
+      "max_ms": {
+        "min": 12.831,
+        "median": 12.831,
+        "max": 12.831
+      },
+      "server_total_core_percent": {
+        "min": 176.867,
+        "median": 176.867,
+        "max": 176.867
+      },
+      "capture_settle_seconds": {
+        "min": 0.245010,
+        "median": 0.245010,
+        "max": 0.245010
+      },
+      "async_queue_high_water": {
+        "min": 1512,
+        "median": 1512,
+        "max": 1512
+      },
+      "achieved_envelope_size": {
+        "min": 63.997537765355695,
+        "median": 63.997537765355695,
+        "max": 63.997537765355695
+      },
+      "envelope_event_percent": {
+        "min": 96.1691,
+        "median": 96.1691,
+        "max": 96.1691
+      },
+      "fallback_percent": {
+        "min": 0.07984999999999999,
+        "median": 0.07984999999999999,
+        "max": 0.07984999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 5
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 126508.62,
+        "median": 127315.555,
+        "max": 128949.06
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 125867.257,
+        "median": 126577.07250000001,
+        "max": 127289.460
+      },
+      "p99_ms": {
+        "min": 1.167,
+        "median": 1.171,
+        "max": 1.183
+      },
+      "max_ms": {
+        "min": 9.503,
+        "median": 10.923,
+        "max": 21.295
+      },
+      "server_total_core_percent": {
+        "min": 173.731,
+        "median": 174.13150000000002,
+        "max": 174.286
+      },
+      "capture_settle_seconds": {
+        "min": 0.201391,
+        "median": 0.2088895,
+        "max": 0.242701
+      },
+      "async_queue_high_water": {
+        "min": 1435,
+        "median": 1646,
+        "max": 2138
+      },
+      "achieved_envelope_size": {
+        "min": 63.99862586721185,
+        "median": 63.99915379517357,
+        "max": 63.99992004264392
+      },
+      "envelope_event_percent": {
+        "min": 95.47635,
+        "median": 96.03380999999999,
+        "max": 96.09228
+      },
+      "fallback_percent": {
+        "min": 0.08202,
+        "median": 0.08322,
+        "max": 0.09179999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b64-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 64,
+        "max_wait_ms": 10
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 124929.72,
+        "median": 124929.72,
+        "max": 124929.72
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 123068.653,
+        "median": 123068.653,
+        "max": 123068.653
+      },
+      "p99_ms": {
+        "min": 1.175,
+        "median": 1.175,
+        "max": 1.175
+      },
+      "max_ms": {
+        "min": 11.599,
+        "median": 11.599,
+        "max": 11.599
+      },
+      "server_total_core_percent": {
+        "min": 165.492,
+        "median": 165.492,
+        "max": 165.492
+      },
+      "capture_settle_seconds": {
+        "min": 0.242091,
+        "median": 0.242091,
+        "max": 0.242091
+      },
+      "async_queue_high_water": {
+        "min": 1370,
+        "median": 1370,
+        "max": 1370
+      },
+      "achieved_envelope_size": {
+        "min": 63.999532398129595,
+        "median": 63.999532398129595,
+        "max": 63.999532398129595
+      },
+      "envelope_event_percent": {
+        "min": 95.8073,
+        "median": 95.8073,
+        "max": 95.8073
+      },
+      "fallback_percent": {
+        "min": 0.0892,
+        "median": 0.0892,
+        "max": 0.0892
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w2",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 2
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 131061.59,
+        "median": 132371.44,
+        "max": 132376.69
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 129156.148,
+        "median": 131564.08049999998,
+        "max": 131576.011
+      },
+      "p99_ms": {
+        "min": 1.319,
+        "median": 1.335,
+        "max": 1.343
+      },
+      "max_ms": {
+        "min": 10.583,
+        "median": 12.695,
+        "max": 14.599
+      },
+      "server_total_core_percent": {
+        "min": 157.515,
+        "median": 160.97750000000002,
+        "max": 161.372
+      },
+      "capture_settle_seconds": {
+        "min": 0.225131,
+        "median": 0.229196,
+        "max": 0.235047
+      },
+      "async_queue_high_water": {
+        "min": 1755,
+        "median": 1843.5,
+        "max": 1901
+      },
+      "achieved_envelope_size": {
+        "min": 127.98754809373906,
+        "median": 127.98998305894526,
+        "max": 127.9918156847357
+      },
+      "envelope_event_percent": {
+        "min": 90.94732,
+        "median": 91.16525999999999,
+        "max": 91.4791
+      },
+      "fallback_percent": {
+        "min": 0.1003,
+        "median": 0.10421,
+        "max": 0.10740000000000001
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w5",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 5
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128949.06,
+        "median": 128949.06,
+        "max": 128949.06
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127162.574,
+        "median": 127162.574,
+        "max": 127162.574
+      },
+      "p99_ms": {
+        "min": 1.367,
+        "median": 1.367,
+        "max": 1.367
+      },
+      "max_ms": {
+        "min": 10.135,
+        "median": 10.135,
+        "max": 10.135
+      },
+      "server_total_core_percent": {
+        "min": 153.515,
+        "median": 153.515,
+        "max": 153.515
+      },
+      "capture_settle_seconds": {
+        "min": 0.217897,
+        "median": 0.217897,
+        "max": 0.217897
+      },
+      "async_queue_high_water": {
+        "min": 1581,
+        "median": 1581,
+        "max": 1581
+      },
+      "achieved_envelope_size": {
+        "min": 127.99141417725112,
+        "median": 127.99141417725112,
+        "max": 127.99141417725112
+      },
+      "envelope_event_percent": {
+        "min": 90.18915,
+        "median": 90.18915,
+        "max": 90.18915
+      },
+      "fallback_percent": {
+        "min": 0.11499999999999999,
+        "median": 0.11499999999999999,
+        "max": 0.11499999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b128-w10",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 128,
+        "max_wait_ms": 10
+      },
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 126895.51,
+        "median": 127716.82500000001,
+        "max": 128122.99
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 125207.720,
+        "median": 127019.208,
+        "max": 127450.432
+      },
+      "p99_ms": {
+        "min": 1.351,
+        "median": 1.367,
+        "max": 1.375
+      },
+      "max_ms": {
+        "min": 10.607,
+        "median": 13.267,
+        "max": 14.767
+      },
+      "server_total_core_percent": {
+        "min": 145.486,
+        "median": 147.098,
+        "max": 147.710
+      },
+      "capture_settle_seconds": {
+        "min": 0.205580,
+        "median": 0.2091965,
+        "max": 0.224570
+      },
+      "async_queue_high_water": {
+        "min": 1548,
+        "median": 1877.5,
+        "max": 2160
+      },
+      "achieved_envelope_size": {
+        "min": 127.99224199288257,
+        "median": 127.99796134964188,
+        "max": 127.99965916837083
+      },
+      "envelope_event_percent": {
+        "min": 89.91455,
+        "median": 90.25025,
+        "max": 90.57990000000001
+      },
+      "fallback_percent": {
+        "min": 0.11180000000000001,
+        "median": 0.11612,
+        "max": 0.1204
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "b512-w1",
+      "scenario": "s2-envelope",
+      "clients": 100,
+      "async_configuration": {
+        "queue_capacity": 1048576,
+        "batch_size": 512,
+        "max_wait_ms": 1
+      },
+      "repetitions": 1,
+      "ops_per_sec": {
+        "min": 128932.44,
+        "median": 128932.44,
+        "max": 128932.44
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 127246.829,
+        "median": 127246.829,
+        "max": 127246.829
+      },
+      "p99_ms": {
+        "min": 1.503,
+        "median": 1.503,
+        "max": 1.503
+      },
+      "max_ms": {
+        "min": 20.495,
+        "median": 20.495,
+        "max": 20.495
+      },
+      "server_total_core_percent": {
+        "min": 158.308,
+        "median": 158.308,
+        "max": 158.308
+      },
+      "capture_settle_seconds": {
+        "min": 0.205484,
+        "median": 0.205484,
+        "max": 0.205484
+      },
+      "async_queue_high_water": {
+        "min": 1580,
+        "median": 1580,
+        "max": 1580
+      },
+      "achieved_envelope_size": {
+        "min": 149.0934146132051,
+        "median": 149.0934146132051,
+        "max": 149.0934146132051
+      },
+      "envelope_event_percent": {
+        "min": 86.82455,
+        "median": 86.82455,
+        "max": 86.82455
+      },
+      "fallback_percent": {
+        "min": 0.12329999999999999,
+        "median": 0.12329999999999999,
+        "max": 0.12329999999999999
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "id": "s2-sync",
+      "scenario": "s2-sync",
+      "clients": 100,
+      "async_configuration": null,
+      "repetitions": 4,
+      "ops_per_sec": {
+        "min": 114863.31,
+        "median": 116033.77,
+        "max": 116885.24
+      },
+      "end_to_end_ops_per_sec": {
+        "min": 114863.310,
+        "median": 116033.7715,
+        "max": 116885.239
+      },
+      "p99_ms": {
+        "min": 1.103,
+        "median": 1.115,
+        "max": 1.135
+      },
+      "max_ms": {
+        "min": 6.463,
+        "median": 10.863,
+        "max": 17.311
+      },
+      "server_total_core_percent": {
+        "min": 99.319,
+        "median": 99.388,
+        "max": 99.658
+      },
+      "capture_settle_seconds": {
+        "min": 0.000000,
+        "median": 0,
+        "max": 0.000000
+      },
+      "async_queue_high_water": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "achieved_envelope_size": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "envelope_event_percent": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "fallback_percent": {
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "correctness": {
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    }
+  ],
+  "all_healthy": true
+}
