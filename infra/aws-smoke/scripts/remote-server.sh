@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: remote-server.sh <s0|s1|s2> <module-image> <maxlen>" >&2
+if [[ $# -ne 7 ]]; then
+  echo "usage: remote-server.sh <scenario> <module-image> <maxlen> <module-so|-> <queue-capacity> <batch-size> <max-wait-ms>" >&2
   exit 2
 fi
 
 scenario="$1"
 module_image="$2"
 maxlen="$3"
+module_override="$4"
+queue_capacity="$5"
+batch_size="$6"
+max_wait_ms="$7"
 module_path="/usr/local/lib/redis/modules/libredis_event_stream_module.so"
 
 docker rm -f eventstream-server >/dev/null 2>&1 || true
@@ -34,16 +38,44 @@ case "$scenario" in
       maxlen "$maxlen"
     )
     ;;
+  s2-sync)
+    server_args+=(
+      --loadmodule "$module_path"
+      events set
+      maxlen "$maxlen"
+      write-mode sync
+    )
+    ;;
+  s2-individual | s2-envelope)
+    write_mode="${scenario#s2-}"
+    server_args+=(
+      --loadmodule "$module_path"
+      events set
+      maxlen "$maxlen"
+      write-mode "$write_mode"
+      async-queue-capacity "$queue_capacity"
+      async-batch-size "$batch_size"
+      async-max-wait-ms "$max_wait_ms"
+    )
+    ;;
   *)
     echo "unknown scenario: $scenario" >&2
     exit 2
     ;;
 esac
 
+docker_args=(
+  --detach
+  --name eventstream-server
+  --network host
+)
+if [[ "$module_override" != "-" ]]; then
+  test -f "$module_override"
+  docker_args+=(--volume "$module_override:$module_path:ro")
+fi
+
 docker run \
-  --detach \
-  --name eventstream-server \
-  --network host \
+  "${docker_args[@]}" \
   "$module_image" \
   "${server_args[@]}" >/dev/null
 
