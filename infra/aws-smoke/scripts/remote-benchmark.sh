@@ -133,6 +133,45 @@ benchmark_duration_seconds="$(
     'BEGIN { printf "%.6f", requests / ops_per_sec }'
 )"
 
+capture_settle_seconds="0.000000"
+if [[ "$scenario" == "s2-individual" || "$scenario" == "s2-envelope" ]]; then
+  settle_started_ns="$(date +%s%N)"
+  settled=false
+  for _ in $(seq 1 2400); do
+    settle_info="$("${redis_cli[@]}" INFO eventstream | tr -d '\r')"
+    settle_forwarded="$(
+      awk -F: '$1 == "eventstream_forwarded" { print $2; exit }' <<<"$settle_info"
+    )"
+    if [[ "${settle_forwarded:-0}" == "$requests" ]]; then
+      settled=true
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "$settled" != true ]]; then
+    echo "async capture did not settle at $requests forwarded events" >&2
+    exit 1
+  fi
+  settled_ns="$(date +%s%N)"
+  capture_settle_seconds="$(
+    awk -v started="$settle_started_ns" -v completed="$settled_ns" \
+      'BEGIN { printf "%.6f", (completed - started) / 1000000000 }'
+  )"
+fi
+
+capture_duration_seconds="$(
+  awk \
+    -v benchmark="$benchmark_duration_seconds" \
+    -v settle="$capture_settle_seconds" \
+    'BEGIN { printf "%.6f", benchmark + settle }'
+)"
+end_to_end_ops_per_sec="$(
+  awk \
+    -v requests="$requests" \
+    -v duration="$capture_duration_seconds" \
+    'BEGIN { if (duration > 0) printf "%.3f", requests / duration; else print "0" }'
+)"
+
 info="$("${redis_cli[@]}" INFO eventstream | tr -d '\r')"
 cpu_after="$("${redis_cli[@]}" INFO cpu | tr -d '\r')"
 memory_after="$("${redis_cli[@]}" INFO memory | tr -d '\r')"
@@ -175,7 +214,37 @@ main_thread_cpu_seconds="$(
 main_thread_core_percent="$(
   awk \
     -v cpu="$main_thread_cpu_seconds" \
-    -v duration="$benchmark_duration_seconds" \
+    -v duration="$capture_duration_seconds" \
+    'BEGIN {
+      if (duration > 0) {
+        printf "%.3f", (cpu / duration) * 100
+      } else {
+        print "0"
+      }
+    }'
+)"
+before_total_cpu_seconds="$(
+  awk \
+    -v sys="$(redis_info_field "$cpu_before" used_cpu_sys)" \
+    -v user="$(redis_info_field "$cpu_before" used_cpu_user)" \
+    'BEGIN { printf "%.6f", sys + user }'
+)"
+after_total_cpu_seconds="$(
+  awk \
+    -v sys="$(redis_info_field "$cpu_after" used_cpu_sys)" \
+    -v user="$(redis_info_field "$cpu_after" used_cpu_user)" \
+    'BEGIN { printf "%.6f", sys + user }'
+)"
+total_cpu_seconds="$(
+  awk \
+    -v before="$before_total_cpu_seconds" \
+    -v after="$after_total_cpu_seconds" \
+    'BEGIN { printf "%.6f", after - before }'
+)"
+total_core_percent="$(
+  awk \
+    -v cpu="$total_cpu_seconds" \
+    -v duration="$capture_duration_seconds" \
     'BEGIN {
       if (duration > 0) {
         printf "%.3f", (cpu / duration) * 100
@@ -201,6 +270,8 @@ jq -n \
   --argjson keyspace "$keyspace" \
   --argjson duration_seconds "$duration_seconds" \
   --argjson benchmark_duration_seconds "$benchmark_duration_seconds" \
+  --argjson capture_settle_seconds "$capture_settle_seconds" \
+  --argjson capture_duration_seconds "$capture_duration_seconds" \
   --argjson host_logical_cpus "$(getconf _NPROCESSORS_ONLN)" \
   --argjson stats_samples "$stats_samples" \
   --argjson cpu_percent_avg "$cpu_percent_avg" \
@@ -208,6 +279,8 @@ jq -n \
   --argjson memory_peak_mib "$memory_peak_mib" \
   --argjson main_thread_cpu_seconds "$main_thread_cpu_seconds" \
   --argjson main_thread_core_percent "$main_thread_core_percent" \
+  --argjson total_cpu_seconds "$total_cpu_seconds" \
+  --argjson total_core_percent "$total_core_percent" \
   --argjson used_memory_bytes \
     "$(redis_info_field "$memory_after" used_memory)" \
   --argjson used_memory_rss_bytes \
@@ -215,6 +288,7 @@ jq -n \
   --argjson used_memory_peak_bytes \
     "$(redis_info_field "$memory_after" used_memory_peak)" \
   --argjson ops_per_sec "$ops_per_sec" \
+  --argjson end_to_end_ops_per_sec "$end_to_end_ops_per_sec" \
   --argjson avg_ms "$avg_ms" \
   --argjson min_ms "$min_ms" \
   --argjson p50_ms "$p50_ms" \
@@ -227,6 +301,14 @@ jq -n \
   --argjson dropped "$(info_field dropped)" \
   --argjson handler_panics "$(info_field handler_panics)" \
   --argjson skipped_filtered "$(info_field skipped_filtered)" \
+  --argjson async_enqueued "$(info_field async_enqueued)" \
+  --argjson async_fallbacks "$(info_field async_fallbacks)" \
+  --argjson async_queue_high_water "$(info_field async_queue_high_water)" \
+  --argjson async_drains "$(info_field async_drains)" \
+  --argjson async_drain_events "$(info_field async_drain_events)" \
+  --argjson async_envelopes "$(info_field async_envelopes)" \
+  --argjson async_envelope_events "$(info_field async_envelope_events)" \
+  --argjson async_worker_errors "$(info_field async_worker_errors)" \
   --argjson stream_len "${stream_len:-0}" \
   '{
     scenario: $scenario,
@@ -238,7 +320,9 @@ jq -n \
       payload_bytes: $payload_bytes,
       keyspace: $keyspace,
       duration_seconds: $duration_seconds,
-      benchmark_duration_seconds: $benchmark_duration_seconds
+      benchmark_duration_seconds: $benchmark_duration_seconds,
+      capture_settle_seconds: $capture_settle_seconds,
+      capture_duration_seconds: $capture_duration_seconds
     },
     load_generator: {
       host_logical_cpus: $host_logical_cpus,
@@ -250,12 +334,15 @@ jq -n \
     server: {
       main_thread_cpu_seconds: $main_thread_cpu_seconds,
       main_thread_core_percent: $main_thread_core_percent,
+      total_cpu_seconds: $total_cpu_seconds,
+      total_core_percent: $total_core_percent,
       used_memory_bytes: $used_memory_bytes,
       used_memory_rss_bytes: $used_memory_rss_bytes,
       used_memory_peak_bytes: $used_memory_peak_bytes
     },
     result: {
       ops_per_sec: $ops_per_sec,
+      end_to_end_ops_per_sec: $end_to_end_ops_per_sec,
       avg_ms: $avg_ms,
       min_ms: $min_ms,
       p50_ms: $p50_ms,
@@ -270,6 +357,14 @@ jq -n \
       dropped: $dropped,
       handler_panics: $handler_panics,
       skipped_filtered: $skipped_filtered,
+      async_enqueued: $async_enqueued,
+      async_fallbacks: $async_fallbacks,
+      async_queue_high_water: $async_queue_high_water,
+      async_drains: $async_drains,
+      async_drain_events: $async_drain_events,
+      async_envelopes: $async_envelopes,
+      async_envelope_events: $async_envelope_events,
+      async_worker_errors: $async_worker_errors,
       stream_len: $stream_len
     }
   }'

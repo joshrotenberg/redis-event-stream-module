@@ -182,6 +182,19 @@ pub(crate) const LOG_WINDOW_SECS: u64 = 60;
 /// server.
 pub(crate) static HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
 
+/// Experimental bounded-dispatch telemetry (issue #265). These counters are
+/// logical events except `ASYNC_DRAINS`/`ASYNC_ENVELOPES`, which count worker
+/// flush units, and the two queue gauges.
+pub(crate) static ASYNC_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_QUEUE_DEPTH: AtomicI64 = AtomicI64::new(0);
+pub(crate) static ASYNC_QUEUE_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_DRAINS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_DRAIN_EVENTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_ENVELOPES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_ENVELOPE_EVENTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ASYNC_WORKER_ERRORS: AtomicU64 = AtomicU64::new(0);
+
 /// Per-stream in-process state (issues #68 and #71), keyed by destination
 /// stream name in `STREAM_STATS`. One record carries the per-stream counters
 /// (the `EVENTSTREAM.STREAMS WITHSTATS` join, SPEC.md section 8), the
@@ -294,22 +307,35 @@ pub(crate) fn count_drop(ctx: &Context, counter: &AtomicU64, latch: &AtomicBool,
 }
 
 /// A canonical per-event loss (issue #218): the selected event produced no
-/// per-event entry, so it counts toward `events_lost` (the total-loss SLO) in
+/// canonical record, so it counts toward `events_lost` (the total-loss SLO) in
 /// addition to its per-reason counter. Bundles the `EVENTS_LOST` bump with
 /// [`count_drop`] so the two cannot drift: auxiliary failures (firehose copy,
 /// registry `SADD`, gap markers, auto-group) call `count_drop` directly and
-/// never reach `events_lost`, because their canonical entry was still written.
+/// never reach `events_lost`, because the canonical record was still written.
 pub(crate) fn count_event_lost(
     ctx: &Context,
     counter: &AtomicU64,
     latch: &AtomicBool,
     detail: &str,
 ) {
-    EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    count_events_lost(ctx, 1, counter, latch, detail);
+}
+
+/// Count several logical events lost through one failed physical destination
+/// write. Preview envelopes need this split: `events_lost` remains per logical
+/// event while `dropped_*` remains per failed write.
+pub(crate) fn count_events_lost(
+    ctx: &Context,
+    logical_count: u64,
+    counter: &AtomicU64,
+    latch: &AtomicBool,
+    detail: &str,
+) {
+    EVENTS_LOST.fetch_add(logical_count, Ordering::Relaxed);
     count_drop(ctx, counter, latch, detail);
 }
 
-/// A canonical per-event loss counted against its destination stream: the
+/// A canonical logical-event loss counted against its destination stream: the
 /// `EVENTS_LOST` bump (issue #218) plus [`count_stream_drop`]. See
 /// [`count_event_lost`] for why auxiliary failures stay out of `events_lost`.
 pub(crate) fn count_event_lost_stream(
@@ -318,7 +344,18 @@ pub(crate) fn count_event_lost_stream(
     counter: &AtomicU64,
     detail: &str,
 ) {
-    EVENTS_LOST.fetch_add(1, Ordering::Relaxed);
+    count_events_lost_stream(ctx, 1, stream, counter, detail);
+}
+
+/// Stream-attributed counterpart of [`count_events_lost`].
+pub(crate) fn count_events_lost_stream(
+    ctx: &Context,
+    logical_count: u64,
+    stream: &str,
+    counter: &AtomicU64,
+    detail: &str,
+) {
+    EVENTS_LOST.fetch_add(logical_count, Ordering::Relaxed);
     count_stream_drop(ctx, stream, counter, detail);
 }
 
@@ -402,6 +439,18 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
         ("registry_errors", load(&REGISTRY_ERRORS)),
         ("control_markers", load(&CONTROL_MARKERS)),
         ("handler_panics", load(&HANDLER_PANICS)),
+        ("async_enqueued", load(&ASYNC_ENQUEUED)),
+        ("async_fallbacks", load(&ASYNC_FALLBACKS)),
+        (
+            "async_queue_depth",
+            Int(ASYNC_QUEUE_DEPTH.load(Ordering::Relaxed)),
+        ),
+        ("async_queue_high_water", load(&ASYNC_QUEUE_HIGH_WATER)),
+        ("async_drains", load(&ASYNC_DRAINS)),
+        ("async_drain_events", load(&ASYNC_DRAIN_EVENTS)),
+        ("async_envelopes", load(&ASYNC_ENVELOPES)),
+        ("async_envelope_events", load(&ASYNC_ENVELOPE_EVENTS)),
+        ("async_worker_errors", load(&ASYNC_WORKER_ERRORS)),
         ("dropped_no_owned_slot", load(&DROPPED_NO_OWNED_SLOT)),
         ("dropped_migrating", load(&DROPPED_MIGRATING)),
         ("repins", load(&REPINS)),

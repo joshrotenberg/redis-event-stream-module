@@ -13,9 +13,15 @@ keyspace="${BENCH_KEYSPACE:-100000}"
 maxlen="${BENCH_MAXLEN:-10000}"
 repetitions="${BENCH_REPETITIONS:-1}"
 filtered_repetitions="${BENCH_FILTERED_REPETITIONS:-$repetitions}"
+capture_scenarios="${BENCH_CAPTURE_SCENARIOS:-s2}"
 order_seed="${BENCH_ORDER_SEED:-260}"
 profile_scenarios="${BENCH_PROFILE_SCENARIO:-}"
 profile_frequency="${BENCH_PROFILE_FREQUENCY:-99}"
+async_queue_capacity="${BENCH_ASYNC_QUEUE_CAPACITY:-65536}"
+async_batch_size="${BENCH_ASYNC_BATCH_SIZE:-64}"
+async_max_wait_ms="${BENCH_ASYNC_MAX_WAIT_MS:-1}"
+module_source_commit="${BENCH_MODULE_SOURCE_COMMIT:-}"
+module_source_repo="${BENCH_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 results_dir="${RESULTS_DIR:-$root_dir/results/$run_id}"
 
@@ -32,9 +38,24 @@ positive_integer() {
 
 for value in \
   "$requests" "$threads" "$payload" "$keyspace" "$maxlen" \
-  "$repetitions" "$filtered_repetitions"; do
+  "$repetitions" "$filtered_repetitions" "$async_queue_capacity" \
+  "$async_batch_size" "$async_max_wait_ms"; do
   if ! positive_integer "$value"; then
     echo "benchmark values must be positive integers: $value" >&2
+    exit 2
+  fi
+done
+
+valid_scenario() {
+  case "$1" in
+    s0 | s1 | s2 | s2-sync | s2-individual | s2-envelope) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+for capture_scenario in $capture_scenarios; do
+  if ! valid_scenario "$capture_scenario" || [[ "$capture_scenario" != s2* ]]; then
+    echo "BENCH_CAPTURE_SCENARIOS must contain only s2 capture variants" >&2
     exit 2
   fi
 done
@@ -53,18 +74,22 @@ fi
 
 if [[ -n "$profile_scenarios" ]]; then
   for profile_scenario in ${profile_scenarios//,/ }; do
-    case "$profile_scenario" in
-      s0 | s1 | s2) ;;
-      *)
-        echo "BENCH_PROFILE_SCENARIO must contain only s0, s1, and/or s2" >&2
-        exit 2
-        ;;
-    esac
+    if ! valid_scenario "$profile_scenario"; then
+      echo "BENCH_PROFILE_SCENARIO contains an unknown scenario" >&2
+      exit 2
+    fi
   done
   if ! positive_integer "$profile_frequency"; then
     echo "BENCH_PROFILE_FREQUENCY must be a positive integer" >&2
     exit 2
   fi
+fi
+
+if [[ -n "$module_source_commit" ]] &&
+  [[ "$module_source_commit" != "HEAD" ]] &&
+  ! [[ "$module_source_commit" =~ ^[0-9a-f]{7,40}$ ]]; then
+  echo "BENCH_MODULE_SOURCE_COMMIT must be HEAD or a hexadecimal Git commit" >&2
+  exit 2
 fi
 
 profile_requested() {
@@ -245,6 +270,34 @@ bootstrap_command="cloud-init status --wait && test -f /var/lib/eventstream-smok
 run_remote "$server_id" bootstrap-server "$bootstrap_command" "$results_dir/raw/bootstrap-server"
 run_remote "$loadgen_id" bootstrap-loadgen "$bootstrap_command" "$results_dir/raw/bootstrap-loadgen"
 
+module_override="-"
+module_artifact_json="null"
+if [[ -n "$module_source_commit" ]]; then
+  if [[ "$module_source_commit" == "HEAD" ]]; then
+    module_source_commit="$git_commit"
+  fi
+  module_archive="${module_source_repo%/}/archive/${module_source_commit}.tar.gz"
+  module_build_script_b64="$(encode_file "$root_dir/scripts/remote-module-build.sh")"
+  module_override="/var/lib/eventstream-smoke/libredis_event_stream_module.so"
+  module_build_command="printf '%s' '$module_build_script_b64' | base64 --decode > /tmp/eventstream-module-build.sh
+chmod 0700 /tmp/eventstream-module-build.sh
+/tmp/eventstream-module-build.sh '$module_archive' '$module_override'"
+  echo "building branch module artifact from $module_source_commit..."
+  run_remote \
+    "$server_id" \
+    branch-module-build \
+    "$module_build_command" \
+    "$results_dir/raw/branch-module-build"
+  module_artifact_json="$(cat "$results_dir/raw/branch-module-build.stdout")"
+  jq -e \
+    '.sha256 | test("^[0-9a-f]{64}$")' \
+    <<<"$module_artifact_json" >/dev/null
+  module_artifact_json="$(
+    jq --arg commit "$module_source_commit" '. + {git_commit: $commit}' \
+      <<<"$module_artifact_json"
+  )"
+fi
+
 server_script_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 benchmark_script_b64="$(encode_file "$root_dir/scripts/remote-benchmark.sh")"
 profile_script_b64="$(encode_file "$root_dir/scripts/remote-profile.sh")"
@@ -271,7 +324,9 @@ add_trial() {
 for trial_clients in $client_levels; do
   for repetition in $(seq 1 "$repetitions"); do
     add_trial s0 "$trial_clients" "$repetition"
-    add_trial s2 "$trial_clients" "$repetition"
+    for capture_scenario in $capture_scenarios; do
+      add_trial "$capture_scenario" "$trial_clients" "$repetition"
+    done
   done
   for repetition in $(seq 1 "$filtered_repetitions"); do
     add_trial s1 "$trial_clients" "$repetition"
@@ -289,7 +344,7 @@ while IFS=$'\t' read -r _ scenario trial_clients repetition; do
 
   server_command="printf '%s' '$server_script_b64' | base64 --decode > /tmp/eventstream-server.sh
 chmod 0700 /tmp/eventstream-server.sh
-/tmp/eventstream-server.sh '$scenario' '$module_image' '$maxlen'"
+/tmp/eventstream-server.sh '$scenario' '$module_image' '$maxlen' '$module_override' '$async_queue_capacity' '$async_batch_size' '$async_max_wait_ms'"
   run_remote \
     "$server_id" \
     "server-$trial_id" \
@@ -385,6 +440,7 @@ jq -e '
     (.module.events_lost == 0) and
     (.module.dropped == 0) and
     (.module.handler_panics == 0) and
+    (.module.async_worker_errors == 0) and
     (if .scenario == "s0"
      then .module.loaded == false
      elif .scenario == "s1"
@@ -392,9 +448,19 @@ jq -e '
        (.module.loaded == true) and
        (.module.forwarded == 0) and
        (.module.skipped_filtered == .workload.requests)
-     else
+     elif (.scenario | startswith("s2"))
+     then
        (.module.loaded == true) and
-       (.module.forwarded == .workload.requests)
+       (.module.forwarded == .workload.requests) and
+       (if (.scenario == "s2-individual" or .scenario == "s2-envelope")
+        then
+          ((.module.async_enqueued + .module.async_fallbacks) == .workload.requests) and
+          (.module.async_drain_events == .module.async_enqueued)
+        else true end) and
+       (if .scenario == "s2-envelope"
+        then .module.async_envelopes > 0
+        else true end)
+     else false
      end))
 ' "$results_dir/trials.json" >/dev/null
 
@@ -428,12 +494,18 @@ jq '
       repetitions: ($trials | length),
       ops_per_sec:
         ($trials | map(.result.ops_per_sec) | distribution),
+      end_to_end_ops_per_sec:
+        ($trials | map(.result.end_to_end_ops_per_sec) | distribution),
       p99_ms:
         ($trials | map(.result.p99_ms) | distribution),
       max_ms:
         ($trials | map(.result.max_ms) | distribution),
       server_main_thread_core_percent:
         ($trials | map(.server.main_thread_core_percent) | distribution),
+      server_total_core_percent:
+        ($trials | map(.server.total_core_percent) | distribution),
+      capture_settle_seconds:
+        ($trials | map(.workload.capture_settle_seconds) | distribution),
       load_generator_cpu_percent_avg:
         ($trials | map(.load_generator.cpu_percent_avg) | distribution),
       load_generator_cpu_percent_max:
@@ -448,7 +520,7 @@ jq '
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 jq -n \
-  --arg schema_version "2" \
+  --arg schema_version "3" \
   --arg run_id "$run_id" \
   --arg started_at "$started_at" \
   --arg completed_at "$completed_at" \
@@ -461,6 +533,11 @@ jq -n \
   --arg module_image "$module_image" \
   --arg loadgen_image "$loadgen_image" \
   --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
+  --argjson module_artifact "$module_artifact_json" \
+  --arg capture_scenarios "$capture_scenarios" \
+  --argjson async_queue_capacity "$async_queue_capacity" \
+  --argjson async_batch_size "$async_batch_size" \
+  --argjson async_max_wait_ms "$async_max_wait_ms" \
   --slurpfile trials "$results_dir/trials.json" \
   --slurpfile summary "$results_dir/summary.json" \
   '{
@@ -476,8 +553,15 @@ jq -n \
       server_instance_type: $server_instance_type,
       loadgen_instance_type: $loadgen_instance_type,
       module_image: $module_image,
+      module_artifact: $module_artifact,
       loadgen_image: $loadgen_image,
       expires_at: $expires_at
+    },
+    capture_configuration: {
+      scenarios: ($capture_scenarios | split(" ")),
+      async_queue_capacity: $async_queue_capacity,
+      async_batch_size: $async_batch_size,
+      async_max_wait_ms: $async_max_wait_ms
     },
     trials: $trials[0],
     summary: $summary[0]
@@ -485,16 +569,17 @@ jq -n \
 
 echo
 jq -r '
-  ["scenario", "clients", "reps", "ops/s median", "ops/s range", "p99 median", "server core %", "loadgen CPU %"],
+  ["scenario", "clients", "reps", "client ops/s", "end-to-end ops/s", "p99", "main core %", "total core %", "settle s"],
   (.summary[] | [
     .scenario,
     (.clients | tostring),
     (.repetitions | tostring),
     (.ops_per_sec.median | tostring),
-    "\(.ops_per_sec.min)-\(.ops_per_sec.max)",
+    (.end_to_end_ops_per_sec.median | tostring),
     (.p99_ms.median | tostring),
     (.server_main_thread_core_percent.median | tostring),
-    (.load_generator_cpu_percent_avg.median | tostring)
+    (.server_total_core_percent.median | tostring),
+    (.capture_settle_seconds.median | tostring)
   ]) | @tsv
 ' "$results_dir/result.json" | column -t -s $'\t'
 

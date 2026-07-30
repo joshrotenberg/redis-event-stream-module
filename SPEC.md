@@ -187,6 +187,50 @@ Every non-`fixed` entry carries a leading `format` discriminator, so a stream th
 
 An entry that cannot be encoded is dropped and counted in `dropped_encode_error` (section 13); with the shipped formats only `json` can fail, on a non-UTF-8 event name, which the raw callback's lossy decode makes unreachable through the normal notification path.
 
+### Experimental write modes
+
+`eventstream.write-mode` is an immutable, default-off experiment from issue
+#265:
+
+| Value | Dispatch | Stream shape |
+|---|---|---|
+| `sync` (default) | Historical post-notification job | One configured-format entry per event |
+| `individual` | Bounded worker | One fixed-format entry per event |
+| `envelope` | Bounded worker | Compatible runs become `batch-v1` entries; ordered fallback entries remain fixed-format |
+
+The name `sync` distinguishes it from the worker modes; the write is still the
+historical post-notification job. It executes in the triggering command's
+execution unit. Worker-mode writes can land after that command has returned and
+can be lost if the Redis process crashes with an accepted queue backlog. A
+clean `MODULE UNLOAD` stops and joins the worker and synchronously finishes
+accepted events.
+
+The queue is bounded and the notification callback has a fixed lock-attempt
+budget. If the queue is full or remains contended beyond that budget, a
+post-notification fallback drains every earlier queued event before the current
+event. This preserves per-stream notification order and avoids pressure loss,
+but an envelope-mode stream can mix fixed entries with batch entries.
+
+A `batch-v1` entry has these fields:
+
+| # | Field | Value |
+|---|---|---|
+| 1 | `format` | `batch-v1` |
+| 2 | `count` | decimal logical-event count |
+| 3 | `events` | ordered JSON array of `{"event":<string>,"key":<base64>,"db":<number>,"class":<string>}` |
+
+Keys use padded RFC 4648 base64 because Redis keys are arbitrary bytes. Array
+order is notification order. A logical event's stable identity is the stream
+entry ID plus its zero-based array index; batched events do not have separate
+Redis stream IDs. `maxlen` trims physical entries, not logical events, so the
+logical retention window varies with achieved batch size.
+
+The worker modes are Preview and deliberately refuse combinations whose
+semantics have not been defined: cluster mode, `firehose yes`, `entry-seq yes`,
+non-`fixed` `entry-format`, nonzero `retention-ms`, and non-empty
+`maxlen-overrides`. The default `sync` path retains every stable feature and
+wire guarantee.
+
 ### Global sequence field
 
 `eventstream.entry-seq` (section 7; default `no`) appends a `seq` field to every mirrored entry, carrying a process-global monotonic counter. For the `json` format the value goes inside the document (`"seq"`) rather than as a separate field, keeping json a single document field.
@@ -225,6 +269,10 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | `eventstream.cluster-streams` | string | `refuse` | no (IMMUTABLE) | `refuse` or `per-node` (section 10). Only meaningful in cluster mode |
 | `eventstream.entry-format` | enum | `fixed` | yes | `fixed`, `minimal`, `verbose`, or `json` (section 6). The module's first enum config |
 | `eventstream.entry-seq` | bool | `no` | no (IMMUTABLE) | `yes` / `no`; appends the global `seq` field to every entry (section 6) |
+| `eventstream.write-mode` | enum | `sync` | no (IMMUTABLE) | Experimental: `sync`, `individual`, or `envelope` (section 6). Worker modes reject unsupported feature combinations at load |
+| `eventstream.async-queue-capacity` | i64 | `65536` | no (IMMUTABLE) | `1` to `10000000`; accepted worker events held before ordered fallback |
+| `eventstream.async-batch-size` | i64 | `64` | no (IMMUTABLE) | `1` to `10000`; maximum logical events drained per worker lock acquisition or compatible envelope |
+| `eventstream.async-max-wait-ms` | i64 | `1` | no (IMMUTABLE) | `1` to `60000`; maximum wait from the oldest queued event while filling a worker batch |
 | `eventstream.auto-group` | string | `` (empty) | yes | empty (disabled, the default) or a consumer-group name the module creates on each destination stream; at most 128 bytes over `A-Z a-z 0-9 : . _ -` (empty tokens and whitespace rejected). See section 9 |
 <!-- ANCHOR_END: config-table -->
 
@@ -253,6 +301,18 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 **`eventstream.entry-format`.** Selects the mirrored entry's field set (section 6): `fixed` (default, the historical `event`/`key`/`db` schema), `minimal`, `verbose`, or `json`. Registered DEFAULT (live-settable): a `CONFIG SET` takes effect on the next captured event. Live-settable is deliberate — it is what makes the per-entry `format` discriminator load-bearing, since a mid-stream change produces a mixed-format stream that consumers read entry by entry. The default never changes shape, so existing deployments are unaffected until an operator opts in.
 
 **`eventstream.entry-seq`.** When `yes`, every mirrored entry carries a `seq` field with a process-global monotonic counter (section 6), giving fan-in consumers a per-node same-millisecond tiebreaker. Registered IMMUTABLE (load-time only, like `stream-prefix`) so that within one process the entry field set stays uniform — every stream either always has `seq` or never does — which preserves the `SAMEFIELDS` compaction. Default `no`, so existing deployments see no schema change. Resets to 0 on load; not persisted or replicated as state.
+
+**`eventstream.write-mode` and `eventstream.async-*`.** Preview controls
+for the issue #265 worker experiment (section 6). All are IMMUTABLE so queue
+allocation and wire shape cannot change underneath a loaded module. `sync`
+remains the stable default. `async-queue-capacity` bounds accepted in-memory
+work; `async-batch-size` bounds one drain/envelope; and
+`async-max-wait-ms` bounds the oldest event's batch-fill delay. Queue pressure
+falls back to ordered post-notification work rather than dropping. These
+settings do not promise a throughput improvement: the AWS spike found
+`individual` slower than `sync`, while 256-event envelopes improved throughput
+only by spending a second core and accepting higher tail latency
+(`infra/aws-smoke/observations/2026-07-30-async-batch-spike.md`).
 
 **`eventstream.auto-group`.** Optional consumer-group auto-provisioning (issue #109): when non-empty, the module issues `XGROUP CREATE <stream> <name> 0` on each destination stream the first time it writes to it, so consumers can `XREADGROUP` without an operator-side setup step and the module-before-consumers deployment order becomes equivalent to the consumers-first order (section 9 explains the ordering footgun this removes). Empty (the default) leaves group creation operator-side, unchanged. The group is created at ID `0`, not `$`, so it sees the whole retained stream rather than only entries added after its creation. It is provisioned through the same replicated, OOM-checked `call_ext` options as the mirrored `XADD` (section 10), so the group replicates to replicas and persists to the AOF like the entry that triggered it. Idempotent: `XGROUP CREATE` on a stream that already has the group returns `BUSYGROUP`, which the module treats as success. Creation is deduped per stream the same way the registry `SADD` is (section 5 Discovery), and re-armed on flush — a `FLUSHALL` that destroyed the stream and its group re-creates the group on the next write. It applies to per-event streams **and** the firehose (`<prefix>#firehose`), but **not** the control stream (`<prefix>#control`), which is not a work queue. Runtime-mutable: setting it provisions the group on each stream's *next* write, not retroactively — a stream that never fires again keeps no group, and setting the config does not sweep `EVENTSTREAM.STREAMS` (a one-shot registry sweep is possible future work, but would need the deferred-job pattern gap markers use, since the on-changed callback cannot issue commands). In cluster per-node mode (section 10) each node creates the group on its own tagged streams, including streams created after a re-pin, matching the "N consumer groups, one per per-node stream" model. This does **not** change the slow-consumer contract (section 9): a group at `0` still loses entries trimmed by `maxlen` before consumers catch up — the value is operational (the group exists from stream birth), not a stronger delivery guarantee. Group-creation successes count in `autogroup_created` and failures other than `BUSYGROUP` in `autogroup_failed` (section 13), the latter following the same first-failure-log policy as drops; a failed creation is retried on the stream's next write.
 
@@ -361,7 +421,7 @@ The wrapper's stock `ConfigurationValue` impls never reject beyond UTF-8 convers
 
 Precedence at load, lowest first: compiled default; unprefixed module args (`loadmodule .../libredis_event_stream_module.so events "expired,evicted" maxlen 50000`, enabled by `module_args_as_configuration: true`); prefixed standard config sources (`eventstream.events` directive in redis.conf, or `MODULE LOADEX ... CONFIG eventstream.events ...`, applied by `RedisModule_LoadConfigs` after registration); then `CONFIG SET` at runtime for mutable keys. `CONFIG REWRITE` persists current values.
 
-Operator quirks to document: bool module args are true only for the literal string `yes` (anything else silently parses as false, `get_bool_default_config_value`), and a malformed module-arg value aborts module load with a logged error. Implementation note: with `module_args_as_configuration: true` the macro expansion requires all four config-type lists to be present (verified against v2.1.3; omitting one fails to compile, section 17 question 4), so the module registered an empty `enum: []` block, with a code comment, until issue #60 added the first real enum config; the block now holds `eventstream.entry-format` (section 17 Q4). The macro's optional `module_config_get`/`module_config_set` convenience commands are not registered; `CONFIG GET/SET eventstream.*` covers the need.
+Operator quirks to document: bool module args are true only for the literal string `yes` (anything else silently parses as false, `get_bool_default_config_value`), and a malformed module-arg value aborts module load with a logged error. Implementation note: with `module_args_as_configuration: true` the macro expansion requires all four config-type lists to be present (verified against v2.1.3; omitting one fails to compile, section 17 question 4), so the module registered an empty `enum: []` block, with a code comment, until issue #60 added the first real enum config; the block now holds `eventstream.entry-format` and `eventstream.write-mode` (section 17 Q4). The macro's optional `module_config_get`/`module_config_set` convenience commands are not registered; `CONFIG GET/SET eventstream.*` covers the need.
 <!-- ANCHOR_END: config-precedence -->
 
 ### Interplay with notify-keyspace-events
@@ -423,7 +483,8 @@ In per-node cluster mode `EVENTSTREAM.STREAMS` covers the local node's registry 
 
 | Scope | Guarantee |
 |---|---|
-| Event to stream entry, module enabled, event matched, node healthy | Exactly one entry, atomic with the triggering change |
+| Event to stream entry, module enabled, event matched, node healthy, `write-mode sync` | Exactly one entry, atomic with the triggering change |
+| Event to logical record, worker mode, node healthy | Exactly one fixed entry or one ordered element in a `batch-v1` entry; asynchronous with the triggering change |
 | Event to stream entry, overall (restarts, disabled windows, OOM) | At-most-once |
 | Stream entry to consumer, `XREADGROUP` + `XACK` | At-least-once within the retention window |
 | Stream entry to consumer, plain `XREAD`/`XRANGE` | At-most-once (trimming can outrun the reader) |
@@ -433,11 +494,28 @@ The module cannot be more durable than the Redis server it runs in; every guaran
 
 ### Atomicity
 
-The triggering command, its notification, and the mirrored `XADD` complete within the same execution unit on the same node. No other client can observe the keyspace change (for example the key gone after `expired`) while the stream entry is still pending, except in the loss windows below. One exception: post-notification jobs run at the end of the execution unit, so a later command in the same `MULTI`/`EXEC` or a later `redis.call` in the same Lua script observes the keyspace change before the mirrored entry exists. Scripts that both mutate keys and read the module's streams see pre-event stream state.
+With the default `write-mode sync`, the triggering command, its notification,
+and the mirrored `XADD` complete within the same execution unit on the same
+node. No other client can observe the keyspace change (for example the key gone
+after `expired`) while the stream entry is still pending, except in the loss
+windows below. One exception: post-notification jobs run at the end of the
+execution unit, so a later command in the same `MULTI`/`EXEC` or a later
+`redis.call` in the same Lua script observes the keyspace change before the
+mirrored entry exists. Scripts that both mutate keys and read the module's
+streams see pre-event stream state.
+
+The Preview worker modes intentionally relax this property: accepted events
+are written after the worker acquires Redis's thread-safe-context lock, which
+can be after the triggering command returns. Queue order is preserved, but a
+process crash can lose the accepted in-memory backlog.
 
 ### Ordering
 
-- Per stream: entries appear in exactly notification order (single command-execution thread, monotonic IDs), preserved on replicas and through AOF replay because IDs propagate verbatim.
+- Per stream: logical events appear in exactly notification order. In `sync`
+  this follows the command-execution thread and monotonic IDs. Worker modes
+  preserve FIFO order across worker drains and ordered fallbacks; in
+  `envelope`, order within one entry is the JSON array order. Replicas and AOF
+  replay preserve the resulting entry IDs and envelope arrays verbatim.
 - Per key within one event name: total order.
 - Per key across event names: not directly readable as one sequence (`hset k`, `del k`, `expired k` land in three streams). Merging streams by entry ID reconstructs order except for ties within the same millisecond. Two ways close that tie: the firehose (section 5), when enabled, is a single stream carrying every captured event, so its entry order is a total per-node order across event types, ties included; and the `seq` field (`eventstream.entry-seq`, section 6), when enabled, tags every entry with a per-node monotonic counter, so merging by `seq` totally orders same-millisecond entries across streams on one node. Both are per-node in cluster mode.
 - Cross-stream, cross-key: no guarantee beyond entry ID timestamps, plus per-node `seq` when `entry-seq` is on (a per-node total order, not cross-node).
@@ -451,6 +529,7 @@ The triggering command, its notification, and the mirrored `XADD` complete withi
 | `XADD` refused: OOM | With the `M` flag, writes are refused under `maxmemory` | Dropped and counted (`dropped_oom`); deliberate, see section 11. `eventstream.verify-oom no` closes this window (writes proceed at the limit) at the cost in section 11 |
 | `XADD` failed: `WRONGTYPE` etc. | Non-stream key at the destination name | Dropped and counted (`dropped_xadd_error`); module never deletes the offending key |
 | Job scheduling failed | `add_post_notification_job` returned `Status::Err` | Dropped and counted (`dropped_defer_error`) |
+| Worker backlog lost | Redis process crashes before accepted async events are written | Preview worker-mode caveat; use default `write-mode sync` when command-unit atomicity is required |
 | Stream trimming | `MAXLEN` (or `MINID` under `retention-ms`) evicts entries before a slow consumer reads them | Bounded, configurable; size `maxlen`/`retention-ms` for the slowest consumer; loss is detectable (below) |
 | Crash before fsync | Server persistence config | `appendfsync everysec` bounds loss to about 1 second (section 10) |
 | Failover | Entries not yet replicated to the promoted replica | Standard async replication caveat |
@@ -487,7 +566,14 @@ Consumers delimit gap windows by reading marker pairs: the window between a `dis
 ### Slow-consumer contract
 
 1. The module never blocks, delays, or drops writes because a consumer is slow. The keyspace sets the pace.
-2. Delivery is at-least-once within the retention window per stream: the last `maxlen` (approximately) entries when trimming by count, or the last `eventstream.retention-ms` (approximately) of wall-clock time when time-based retention is set (section 7). A consumer whose lag exceeds the window loses the overrun permanently; with time-based retention an idle stream can retain past the window until its next write (section 7 caveat).
+2. Delivery is at-least-once within the retention window per stream: the last
+   `maxlen` (approximately) physical entries when trimming by count, or the last
+   `eventstream.retention-ms` (approximately) of wall-clock time when
+   time-based retention is set (section 7). Under Preview `envelope` mode one
+   physical entry contains multiple logical events, so logical retention varies
+   with achieved batch size. A consumer whose lag exceeds the window loses the
+   overrun permanently; with time-based retention an idle stream can retain
+   past the window until its next write (section 7 caveat).
 3. Loss is detectable, not silent: compare the resume ID against the stream's first entry ID, or use `XINFO STREAM` (`entries-added`, `max-deleted-entry-id`) and `XINFO GROUPS` `lag` (Redis 7.0+) to alert before it happens.
 4. Pending entries are not protected from trimming. A trimmed unacknowledged entry reads back from the PEL with a nil field list; `XAUTOCLAIM` removes such dead references while scanning. Ack promptly, keep PELs small.
 5. An entry that is delivered fine but fails processing on every attempt (a "poison" entry) is the consumer's responsibility, not the module's: the module writes an entry once and never participates in the consumer group, so it has no delivery-count to act on. Bound the retries with the delivery counter (`XPENDING`/`XAUTOCLAIM`) and move the entry to an application-owned dead-letter stream — outside `<stream-prefix>` — after N attempts. The pattern is documented in the consumer guide (docs/src/consume.md).
@@ -677,6 +763,15 @@ eventstream_active_streams:1
 eventstream_registry_errors:0
 eventstream_control_markers:2
 eventstream_handler_panics:0
+eventstream_async_enqueued:0
+eventstream_async_fallbacks:0
+eventstream_async_queue_depth:0
+eventstream_async_queue_high_water:0
+eventstream_async_drains:0
+eventstream_async_drain_events:0
+eventstream_async_envelopes:0
+eventstream_async_envelope_events:0
+eventstream_async_worker_errors:0
 eventstream_dropped_no_owned_slot:0
 eventstream_dropped_migrating:0
 eventstream_repins:0
@@ -688,9 +783,23 @@ eventstream_last_error_time:1752071011
 <!-- ANCHOR_END: counters-info -->
 
 <!-- ANCHOR: counters-explanation -->
-`events_lost` is the total-loss SLO (issue #218): one increment per **selected logical event that produced no canonical per-event entry**, for any reason — `dropped_no_owned_slot`, `dropped_max_streams`, `dropped_encode_error`, `dropped_defer_error`, an OOM or `XADD` error on the canonical write, or a migration refusal still unrecovered after the one re-pin retry (`dropped_migrating`). It is per *event*: a firehose-copy failure after a successful canonical write does not touch it, and one event whose per-event entry and firehose copy both fail counts one in `events_lost` but two in `dropped`. It includes `dropped_no_owned_slot`, which `dropped` omits, so a zero-slot master's complete capture loss shows up here even though it does not move `dropped`. Alert on any increase.
+`events_lost` is the total-loss SLO (issue #218): one increment per **selected logical event that produced no canonical record** — an individual stream entry in the stable modes or an ordered envelope element in Preview `envelope` mode — for any reason: `dropped_no_owned_slot`, `dropped_max_streams`, `dropped_encode_error`, `dropped_defer_error`, an OOM or `XADD` error on the canonical write, or a migration refusal still unrecovered after the one re-pin retry (`dropped_migrating`). It is per *event*: a firehose-copy failure after a successful canonical write does not touch it, and one event whose per-event entry and firehose copy both fail counts one in `events_lost` but two in `dropped`. It includes `dropped_no_owned_slot`, which `dropped` omits, so a zero-slot master's complete capture loss shows up here even though it does not move `dropped`. Alert on any increase.
 
-`dropped` is the count of **failed destination writes** (not lost events): the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, `dropped_migrating`, `dropped_max_streams`, and `dropped_encode_error`. Because a failure is counted per write, the firehose copy and the per-event entry contribute independently, so `dropped` can exceed `events_lost` (both writes for one event failed) or move without `events_lost` (only the auxiliary firehose copy failed). It deliberately excludes `dropped_no_owned_slot` (kept as a separate field, historically). Use `events_lost` for "did this node lose a selected event", `dropped` for "how many destination writes failed". `dropped_max_streams` counts events dropped because creating their destination stream would exceed `eventstream.max-streams` (section 7); the stream was never created and existing streams are unaffected. `dropped_encode_error` counts entries dropped because the configured `entry-format` could not encode the event (section 6); with the shipped formats only `json` can fail, on a non-UTF-8 event name, and it is first-failure-logged once per process like the other no-destination drop reasons. `skipped_key_filtered` and `skipped_db` count events dropped in the notification callback by the key-name glob filter and the source-db filter respectively (section 7), kept separate from `skipped_filtered` (the event-name/class filter) so a "forwarded flat while `expired_keys` rises" diagnosis can tell which filter is too narrow. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `autogroup_created` and `autogroup_failed` are the consumer-group auto-provisioning counters (`eventstream.auto-group`, sections 7 and 9): `autogroup_created` counts genuine `XGROUP CREATE` successes (a `BUSYGROUP` reply — the group already existed — is idempotent success and not counted), and `autogroup_failed` counts failures other than `BUSYGROUP`. Neither is part of the `dropped` sum: the triggering event was still captured, only the group side-effect failed. `autogroup_failed` follows the first-failure-log policy of the no-destination drop reasons, and the failed creation is retried on the stream's next write. `active_streams` counts distinct destination streams **created** since load, excluding the control stream: a stream is counted on its first successful `XADD`, independent of whether the follow-up registry `SADD` succeeds (issue #216), so it means "streams written", not "streams registered". The counter never resets — a flush clears the in-process cache, so a stream re-written after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `registry_errors` counts registry `SADD` failures (issue #216): the mirrored `XADD` succeeded but the write registering the stream in `<prefix><seg>#streams` failed (for example a `WRONGTYPE` occupant, or an OOM on the set write while the stream write went through). It is not in the `dropped` sum and not in `events_lost` — the event was captured, only its discoverability side effect failed — but the affected stream will not appear in `EVENTSTREAM.STREAMS` until a later write registers it; `registered` stays false so the next write retries, and a recovery notice logs when it succeeds. First-failure logging latches like the other side-effect failures, re-armed on recovery. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module. `dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. `eviction_risk` is a derived 0/1 flag (issue #106): 1 when `maxmemory-policy` is an `allkeys-*` policy, which can evict the destination streams themselves and silently destroy captured history (section 11). It is recomputed at load and on every config-change server event, so it follows a live `CONFIG SET maxmemory-policy`; the offending policy name is logged, not surfaced in INFO. `volatile-*` policies are not flagged — they evict only keys carrying a TTL, and the streams carry none. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO. Per-stream forwarded/dropped counters live in the `EVENTSTREAM.STREAMS WITHSTATS` reply (section 8), never in INFO: one field set per event type ever seen is unbounded cardinality, hostile to INFO scrapers.
+`dropped` is the count of **failed destination writes** (not lost events): the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, `dropped_migrating`, `dropped_max_streams`, and `dropped_encode_error`. Because a failure is counted per write, the firehose copy and the per-event entry contribute independently, so `dropped` can exceed `events_lost` (both writes for one event failed) or move without `events_lost` (only the auxiliary firehose copy failed). It deliberately excludes `dropped_no_owned_slot` (kept as a separate field, historically). Use `events_lost` for "did this node lose a selected event", `dropped` for "how many destination writes failed". `dropped_max_streams` counts events dropped because creating their destination stream would exceed `eventstream.max-streams` (section 7); the stream was never created and existing streams are unaffected. `dropped_encode_error` counts entries dropped because the configured `entry-format` could not encode the event (section 6); with the shipped formats only `json` can fail, on a non-UTF-8 event name, and it is first-failure-logged once per process like the other no-destination drop reasons. `skipped_key_filtered` and `skipped_db` count events dropped in the notification callback by the key-name glob filter and the source-db filter respectively (section 7), kept separate from `skipped_filtered` (the event-name/class filter) so a "forwarded flat while `expired_keys` rises" diagnosis can tell which filter is too narrow. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `autogroup_created` and `autogroup_failed` are the consumer-group auto-provisioning counters (`eventstream.auto-group`, sections 7 and 9): `autogroup_created` counts genuine `XGROUP CREATE` successes (a `BUSYGROUP` reply — the group already existed — is idempotent success and not counted), and `autogroup_failed` counts failures other than `BUSYGROUP`. Neither is part of the `dropped` sum: the triggering event was still captured, only the group side-effect failed. `autogroup_failed` follows the first-failure-log policy of the no-destination drop reasons, and the failed creation is retried on the stream's next write. `active_streams` counts distinct destination streams **created** since load, excluding the control stream: a stream is counted on its first successful `XADD`, independent of whether the follow-up registry `SADD` succeeds (issue #216), so it means "streams written", not "streams registered". The counter never resets — a flush clears the in-process cache, so a stream re-written after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `registry_errors` counts registry `SADD` failures (issue #216): the mirrored `XADD` succeeded but the write registering the stream in `<prefix>#streams` failed (for example a `WRONGTYPE` occupant, or an OOM on the set write while the stream write went through). It is not in the `dropped` sum and not in `events_lost` — the event was captured, only its discoverability side effect failed — but the affected stream will not appear in `EVENTSTREAM.STREAMS` until a later write registers it; `registered` stays false so the next write retries, and a recovery notice logs when it succeeds. First-failure logging latches like the other side-effect failures, re-armed on recovery. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module.
+
+The Preview worker counters (issue #265) make queue behavior measurable:
+`async_enqueued` counts accepted logical events and `async_fallbacks` triggering
+events routed through the ordered fallback; together they equal selected
+worker-mode events. `async_queue_depth` is the current accepted backlog and
+`async_queue_high_water` its peak. `async_drains` counts worker or fallback
+drain units and `async_drain_events` the accepted events they contained.
+`async_envelopes` counts successful `batch-v1` XADDs and
+`async_envelope_events` the logical events inside them; their ratio is achieved
+batch size. If one envelope write fails, `events_lost` rises by its logical
+event count while the applicable `dropped_*` counter rises once for the failed
+physical write. `async_worker_errors` must remain zero.
+
+`dropped_no_owned_slot`, `dropped_migrating`, `repins`, `repins_probe_detected`, `cluster_per_node`, and `cluster_pinned_tag` are cluster per-node fields (section 10): the count of events dropped for want of an owned slot, events refused in a migration window even after the re-pin retry, the number of times the node re-pinned after its slot migrated away, the subset of re-pins detected by the ownership-probe fallback rather than the recognized error text (nonzero means the string match stopped working), whether per-node mode is active (0/1), and the hash tag this node pinned to (empty until selected). `last_error_time` is the unix-seconds timestamp of the most recent `dropped_*` count (caught handler panics do not stamp it); 0 until the first drop. `eviction_risk` is a derived 0/1 flag (issue #106): 1 when `maxmemory-policy` is an `allkeys-*` policy, which can evict the destination streams themselves and silently destroy captured history (section 11). It is recomputed at load and on every config-change server event, so it follows a live `CONFIG SET maxmemory-policy`; the offending policy name is logged, not surfaced in INFO. `volatile-*` policies are not flagged — they evict only keys carrying a TTL, and the streams carry none. Config values are otherwise not duplicated into INFO (`CONFIG GET eventstream.*` covers them), and free-form error text stays in the log, not INFO. Per-stream forwarded/dropped counters live in the `EVENTSTREAM.STREAMS WITHSTATS` reply (section 8), never in INFO: one field set per event type ever seen is unbounded cardinality, hostile to INFO scrapers.
 <!-- ANCHOR_END: counters-explanation -->
 
 Documentation must state plainly: module sections do not appear in default `INFO` or `INFO all`; use `INFO everything`, `INFO eventstream`, `INFO eventstream_stats`, or `INFO modules`. This is otherwise a recurring support question.
@@ -833,7 +942,7 @@ Each item is additive (new config key, counter, command, or entry field), so not
 1. **Non-UTF-8 module event names panic in the wrapper.** Resolved. The module no longer uses the wrapper's `event_handlers:` macro; its hand-written raw callback (section 5) decodes the event name with `from_utf8_lossy` and wraps the handler in `catch_unwind`, so a non-UTF-8 name is captured (with replacement characters) rather than crashing the server. The upstream issue RedisLabsModules/redismodule-rs#472 remains filed for the benefit of modules that still use the macro.
 2. **notify-keyspace-events bypass across versions.** Resolved. The integration suite never sets `notify-keyspace-events`, so it only passes if module keyspace subscribers receive events with the setting empty. CI runs the full suite against Redis 7.2.8, 7.4.5, and 8.8.0, so every supported server line empirically pins the bypass. Originally verified by reading Redis 7.2 `src/notify.c` (`moduleNotifyKeyspaceEvent()` runs before the config check); now enforced across the matrix rather than asserted.
 3. **Is an immutable `stream-prefix` acceptable for launch?** Resolved 2026-07-14: keep IMMUTABLE (issue #59, closed not-planned). IMMUTABLE deletes real complexity (dual-prefix guard, cleanup semantics), no concrete need to re-prefix without a restart has appeared, and relaxing later remains non-breaking if one does.
-4. **`module_args_as_configuration` with three config types.** The macro grammar makes each config-type block optional, but the established wrapper guidance says all four sections must be present when module args are enabled. Resolved 2026-07-09 by experiment against the pinned v2.1.3 tag: omitting the enum section fails to compile, but an empty `enum: []` list compiles and works (module loads, `CONFIG GET eventstream.*` lists the real configs, unprefixed module args are applied). The block was kept as `enum: []` with a code comment until issue #60 added the first real enum config (`eventstream.entry-format`); it now holds that entry, defined with the wrapper's `enum_configuration!` macro (variant names are the byte-exact config strings, so they are lowercase).
+4. **`module_args_as_configuration` with three config types.** The macro grammar makes each config-type block optional, but the established wrapper guidance says all four sections must be present when module args are enabled. Resolved 2026-07-09 by experiment against the pinned v2.1.3 tag: omitting the enum section fails to compile, but an empty `enum: []` list compiles and works (module loads, `CONFIG GET eventstream.*` lists the real configs, unprefixed module args are applied). The block was kept as `enum: []` with a code comment until issue #60 added the first real enum config (`eventstream.entry-format`); it now holds that entry and Preview `eventstream.write-mode`, both defined with the wrapper's `enum_configuration!` macro (variant names are the byte-exact config strings, so they are lowercase).
 
 ## 18. Stability contract
 
