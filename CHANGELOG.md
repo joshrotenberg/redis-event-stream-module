@@ -4,6 +4,60 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.3.0...v0.4.0) (2026-07-29)
+
+
+### Added
+
+* add a lifecycle-managed Phoenix LiveView observatory ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+* add an at-least-once webhook sink example ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+* add at-least-once webhook sink example ([#244](https://github.com/joshrotenberg/redis-event-stream-module/issues/244)) ([09b54e5](https://github.com/joshrotenberg/redis-event-stream-module/commit/09b54e57693cd290608fe10126f581f3d57beea4)), closes [#112](https://github.com/joshrotenberg/redis-event-stream-module/issues/112)
+* add events_lost, the per-event total-loss metric ([#218](https://github.com/joshrotenberg/redis-event-stream-module/issues/218)) ([#226](https://github.com/joshrotenberg/redis-event-stream-module/issues/226)) ([cd473c2](https://github.com/joshrotenberg/redis-event-stream-module/commit/cd473c23063d01a474fca2a8fed09fef5018f687))
+* cargo-fuzz targets for the filter parser and sanitizer ([#131](https://github.com/joshrotenberg/redis-event-stream-module/issues/131)) ([#163](https://github.com/joshrotenberg/redis-event-stream-module/issues/163)) ([0b5e9ff](https://github.com/joshrotenberg/redis-event-stream-module/commit/0b5e9ff07634e9cead79dfb30d8d7beecc0a5809))
+* web live-events demo (SSE bridge + static page) ([#113](https://github.com/joshrotenberg/redis-event-stream-module/issues/113)) ([#230](https://github.com/joshrotenberg/redis-event-stream-module/issues/230)) ([f0ebe1f](https://github.com/joshrotenberg/redis-event-stream-module/commit/f0ebe1fda873b1c9d0519a03c450fca3b8870ca3))
+
+
+### Fixed
+
+* discover control streams and refresh across re-pins ([#215](https://github.com/joshrotenberg/redis-event-stream-module/issues/215)) ([#228](https://github.com/joshrotenberg/redis-event-stream-module/issues/228)) ([dd66723](https://github.com/joshrotenberg/redis-event-stream-module/commit/dd667239c26eef91f92fb55efdc2011e704608e6))
+* keep generated release PR checks reproducible ([#250](https://github.com/joshrotenberg/redis-event-stream-module/issues/250)) ([3738287](https://github.com/joshrotenberg/redis-event-stream-module/commit/373828752860940366b8f28465f9e281587eb0ad))
+* make registry registration failures observable and keep stream-cap accounting correct ([#216](https://github.com/joshrotenberg/redis-event-stream-module/issues/216)) ([#227](https://github.com/joshrotenberg/redis-event-stream-module/issues/227)) ([5e1a7dd](https://github.com/joshrotenberg/redis-event-stream-module/commit/5e1a7dd1ba509527128e31a584628e2dfbac7a46))
+* preserve arbitrary Redis key bytes in the Rust consumer ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+
+
+### Removed
+
+* retire the legacy Rust/SSE demo in favor of the LiveView observatory ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+
+
+### Documentation
+
+* add Python, Go, and Node consumer examples ([#110](https://github.com/joshrotenberg/redis-event-stream-module/issues/110)) ([#165](https://github.com/joshrotenberg/redis-event-stream-module/issues/165)) ([f37d7ab](https://github.com/joshrotenberg/redis-event-stream-module/commit/f37d7abfaf1a9d2ee8ca25f4c5cbdf13498daeda))
+* complete the loss-windows table and de-duplicate the INFO caveat ([#173](https://github.com/joshrotenberg/redis-event-stream-module/issues/173), [#178](https://github.com/joshrotenberg/redis-event-stream-module/issues/178)) ([#197](https://github.com/joshrotenberg/redis-event-stream-module/issues/197)) ([0fe64aa](https://github.com/joshrotenberg/redis-event-stream-module/commit/0fe64aa6de77fa6415b277ca05d8e35633d0449f))
+* correct expiration-gap reconciliation claims ([#221](https://github.com/joshrotenberg/redis-event-stream-module/issues/221)) ([610acbc](https://github.com/joshrotenberg/redis-event-stream-module/commit/610acbcfa9c6943aed6fb22a161907e183df6b32)), closes [#217](https://github.com/joshrotenberg/redis-event-stream-module/issues/217)
+* define the 1.0 stability contract ([#243](https://github.com/joshrotenberg/redis-event-stream-module/issues/243)) ([733f616](https://github.com/joshrotenberg/redis-event-stream-module/commit/733f616302806d7ed80654083622cdc621bb5e13))
+* define the 1.0 stability contract and content-filter boundary ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+* define the content-filter boundary ([#245](https://github.com/joshrotenberg/redis-event-stream-module/issues/245)) ([86ea29a](https://github.com/joshrotenberg/redis-event-stream-module/commit/86ea29a24d671a93e17c5bbfbc5c705d6b20c7fc)), closes [#167](https://github.com/joshrotenberg/redis-event-stream-module/issues/167)
+* define the supported-surface contract as Stable/Preview/Internal tiers ([#219](https://github.com/joshrotenberg/redis-event-stream-module/issues/219)) ([#229](https://github.com/joshrotenberg/redis-event-stream-module/issues/229)) ([cb10075](https://github.com/joshrotenberg/redis-event-stream-module/commit/cb100757181f8f51874a3a83323617f61eb87b62))
+* document a dead-letter pattern for poison entries ([#111](https://github.com/joshrotenberg/redis-event-stream-module/issues/111)) ([#166](https://github.com/joshrotenberg/redis-event-stream-module/issues/166)) ([062086f](https://github.com/joshrotenberg/redis-event-stream-module/commit/062086f3cf56f79493064cb3e8bfd7c4c49e2abf))
+* document the black-box-untriggerable counters as asserted-unreachable ([#185](https://github.com/joshrotenberg/redis-event-stream-module/issues/185)) ([#206](https://github.com/joshrotenberg/redis-event-stream-module/issues/206)) ([784eea5](https://github.com/joshrotenberg/redis-event-stream-module/commit/784eea5d6aa416870190bbbac240c51a4ae83700))
+* fix example-client flags, README config table, and CONTRIBUTING fuzz claim ([#169](https://github.com/joshrotenberg/redis-event-stream-module/issues/169), [#172](https://github.com/joshrotenberg/redis-event-stream-module/issues/172), [#175](https://github.com/joshrotenberg/redis-event-stream-module/issues/175)) ([#195](https://github.com/joshrotenberg/redis-event-stream-module/issues/195)) ([47ba8a0](https://github.com/joshrotenberg/redis-event-stream-module/commit/47ba8a0575603f53d76b6049184c17f1926d71c0))
+* fix links that 404 in the rendered book and cover CHANGELOG.md in the docs workflow ([#176](https://github.com/joshrotenberg/redis-event-stream-module/issues/176), [#177](https://github.com/joshrotenberg/redis-event-stream-module/issues/177)) ([#198](https://github.com/joshrotenberg/redis-event-stream-module/issues/198)) ([cc1fb93](https://github.com/joshrotenberg/redis-event-stream-module/commit/cc1fb936b555fb55abf6609dc5dcd335b93a8df1))
+* PRUNE-aware ACL guidance and complete IMMUTABLE/mutable config lists ([#170](https://github.com/joshrotenberg/redis-event-stream-module/issues/170), [#171](https://github.com/joshrotenberg/redis-event-stream-module/issues/171)) ([#196](https://github.com/joshrotenberg/redis-event-stream-module/issues/196)) ([d4639b7](https://github.com/joshrotenberg/redis-event-stream-module/commit/d4639b7a851269bace99a6f79d3a384866b385a5))
+* restructure the book around reader roles ([#168](https://github.com/joshrotenberg/redis-event-stream-module/issues/168)) ([#192](https://github.com/joshrotenberg/redis-event-stream-module/issues/192)) ([1e383d8](https://github.com/joshrotenberg/redis-event-stream-module/commit/1e383d898af555d1fafc2bf8d893eab9e5f4995e))
+* rewrite product journey and add observatory ([#242](https://github.com/joshrotenberg/redis-event-stream-module/issues/242)) ([22bda55](https://github.com/joshrotenberg/redis-event-stream-module/commit/22bda550ea97fa67e3a4452bbf753889beded649))
+* rewrite the README and mdBook around evaluation, integration, reliability, and production ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+* SPEC.md staleness sweep ([#174](https://github.com/joshrotenberg/redis-event-stream-module/issues/174)) ([#199](https://github.com/joshrotenberg/redis-event-stream-module/issues/199)) ([9e33817](https://github.com/joshrotenberg/redis-event-stream-module/commit/9e33817224b1549bc9c8d69a55cefbe6c94f4b4f))
+
+
+### Continuous Integration
+
+* automate release PRs, tags, GitHub releases, and artifacts with Release Please ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+* grant packages: write to the release-artifacts workflow_call ([#200](https://github.com/joshrotenberg/redis-event-stream-module/issues/200)) ([8c405bb](https://github.com/joshrotenberg/redis-event-stream-module/commit/8c405bb16f017b3b0c96da53aef8fca6f3ef5e47))
+* lint every tracked README and check every Markdown link ([73ed1a2](https://github.com/joshrotenberg/redis-event-stream-module/commit/73ed1a2ef9ad8cc402cbb8ae3112a34a803ae0e6))
+* skip the CI workflow on docs-only changes ([#193](https://github.com/joshrotenberg/redis-event-stream-module/issues/193)) ([#194](https://github.com/joshrotenberg/redis-event-stream-module/issues/194)) ([cbc3fcf](https://github.com/joshrotenberg/redis-event-stream-module/commit/cbc3fcffc5fe8a491bf9998e2dae312bda8d6c9c))
+* stop Dependabot bumping the MSRV toolchain pin ([#220](https://github.com/joshrotenberg/redis-event-stream-module/issues/220)) ([9726d1a](https://github.com/joshrotenberg/redis-event-stream-module/commit/9726d1a49ab97269f6ae3a34e81b2deafc8f608c))
+
 ## [0.3.0] - 2026-07-16
 
 Packaging and operability release: a preloaded container image, a Redis
