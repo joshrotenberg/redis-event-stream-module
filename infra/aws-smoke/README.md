@@ -197,6 +197,46 @@ end-to-end throughput while minimizing p99 latency and total Redis-process CPU.
 It fails if any input configuration reports loss, drops, handler panics, or
 worker errors.
 
+## Focused soak and restart-loss probe
+
+The bounded follow-up to the short comparison trials uses the selected Preview
+envelope configuration (`batch-size 128`, `max-wait-ms 1`) for a 30-minute
+single-node exercise:
+
+```sh
+SOAK_MODULE_SOURCE_COMMIT=HEAD ./lab.sh soak
+```
+
+The driver first calibrates 1, 2, 4, and 8 clients around 80,000 requests/s,
+then restarts the server for clean counters. Its seven phases contain sustained
+load, two 2x bursts, a paused decoder-aware consumer, and a catch-up interval.
+The first-party client decodes mixed fixed and `batch-v1` entries without
+printing each event and atomically checkpoints its logical count.
+
+After the main run, two isolated probes use unique source keys:
+
+- `MODULE UNLOAD` observes a nonempty Preview queue, drains it, reloads the
+  module, and checks the retained stream with the first-party decoder;
+- `SIGKILL` observes a nonempty queue in an AOF `everysec` server, restarts the
+  process, and separately reports acknowledged commands, durable source keys,
+  decoded logical events, and the missing-event count.
+
+The default stream retention is 100,000 physical entries. Telemetry samples
+Redis CPU, RSS, stream length/memory, worker queue depth, consumer lag, and
+load-generator container use every five seconds. Normalized and raw results
+land under `results/<UTC-run-id>-soak/`.
+
+Validate the phase and probe configuration without AWS access:
+
+```sh
+SOAK_PLAN_ONLY=yes ./lab.sh soak
+```
+
+Useful overrides include `SOAK_SECONDS` (minimum 70), `SOAK_TARGET_RPS`,
+`SOAK_MAXLEN`, `SOAK_PROBE_DEPTH`, and `SOAK_PROBE_BATCH_EVENTS`. The
+30-minute default is the evidence-producing configuration; shorter values are
+useful only for harness validation.
+
 The runner fails unless:
 
 - `s0` has no module loaded;
