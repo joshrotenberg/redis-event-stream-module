@@ -3,3 +3,11 @@
 dump.rdb
 # mdBook build output (docs/book.toml sets build-dir = "../book")
 /book
+
+# Terraform and local AWS smoke-run artifacts.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+/infra/aws-smoke/results/

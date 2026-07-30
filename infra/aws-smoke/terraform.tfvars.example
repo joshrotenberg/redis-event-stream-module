@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars or export TF_VAR_owner instead.
+owner = "you@example.com"
+
+# Optional overrides:
+# aws_region            = "us-west-2"
+# availability_zone     = "us-west-2a"
+# server_instance_type  = "c7i.large"
+# loadgen_instance_type = "c7i.large"
+# ttl_hours             = 4
