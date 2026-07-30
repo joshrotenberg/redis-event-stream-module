@@ -4,9 +4,10 @@
 //! otherwise reimplement from SPEC.md sections 9-10: cluster-wide discovery via
 //! per-master `EVENTSTREAM.STREAMS` fan-out, a merged-by-entry-ID reader across
 //! a logical event type's per-node `{tag}` streams, and gap-marker reads from
-//! the `#control` stream. A module command runs node-locally, so the union of
-//! streams and the merge across nodes must be computed client-side; this crate
-//! is that client side.
+//! the `#control` stream. It also expands the stable fixed schema and Preview
+//! `batch-v1` envelopes into one binary-safe logical-event type. A module
+//! command runs node-locally, so the union of streams and the merge across
+//! nodes must be computed client-side; this crate is that client side.
 //!
 //! The crate depends only on the `redis` client (with the `cluster` feature),
 //! not on `redis-module`, so it carries no git-pinned dependency and can be
@@ -14,9 +15,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use base64::Engine;
 use redis::cluster::{ClusterClient, ClusterConnection};
 use redis::streams::StreamReadReply;
 use redis::{Cmd, Connection, FromRedisValue, RedisResult, Value};
+use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // Topology and connections.
@@ -359,7 +362,307 @@ pub fn counter_sum(target: &Target, field: &str) -> i64 {
 // Merged reader.
 // ---------------------------------------------------------------------------
 
+/// The Redis Stream entry that must be acknowledged as one unit.
+///
+/// A fixed entry contains one logical event. A `batch-v1` entry can contain
+/// many, but Redis consumer groups still acknowledge this physical position
+/// with one `XACK`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PhysicalPosition {
+    pub stream: String,
+    pub entry_id: String,
+}
+
+impl std::fmt::Display for PhysicalPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.stream, self.entry_id)
+    }
+}
+
+/// Stable identity of one decoded logical event.
+///
+/// `envelope_index` is `None` for a fixed entry and the zero-based array index
+/// for a `batch-v1` event. All events with the same [`PhysicalPosition`] share
+/// one consumer-group acknowledgement boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SourcePosition {
+    pub physical: PhysicalPosition,
+    pub envelope_index: Option<usize>,
+}
+
+impl std::fmt::Display for SourcePosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.physical)?;
+        if let Some(index) = self.envelope_index {
+            write!(f, "/{index}")?;
+        }
+        Ok(())
+    }
+}
+
+/// One logical keyspace event decoded from either a fixed entry or a
+/// `batch-v1` envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogicalEvent {
+    pub source: SourcePosition,
+    pub event: String,
+    /// The exact Redis key bytes after decoding. Redis keys are binary-safe.
+    pub key: Vec<u8>,
+    pub db: i64,
+    /// Notification class, present in `batch-v1` envelopes.
+    pub class: Option<String>,
+}
+
+impl std::fmt::Display for LogicalEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}  {:<8} db={} key={}",
+            self.source,
+            self.event,
+            self.db,
+            self.key.escape_ascii()
+        )
+    }
+}
+
+/// Machine-readable reason a physical entry could not be decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeErrorKind {
+    MissingField(&'static str),
+    InvalidFieldType(&'static str),
+    InvalidUtf8(&'static str),
+    InvalidInteger {
+        field: &'static str,
+        value: String,
+    },
+    UnsupportedFormat(String),
+    InvalidJson(String),
+    CountMismatch {
+        declared: usize,
+        decoded: usize,
+    },
+    InvalidBase64 {
+        envelope_index: usize,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for DecodeErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(f, "missing required field `{field}`"),
+            Self::InvalidFieldType(field) => {
+                write!(f, "field `{field}` is not a Redis string")
+            }
+            Self::InvalidUtf8(field) => write!(f, "field `{field}` is not valid UTF-8"),
+            Self::InvalidInteger { field, value } => {
+                write!(f, "field `{field}` is not a valid integer: {value:?}")
+            }
+            Self::UnsupportedFormat(format) => write!(
+                f,
+                "unsupported entry format {format:?}; expected fixed or batch-v1"
+            ),
+            Self::InvalidJson(message) => write!(f, "invalid `events` JSON: {message}"),
+            Self::CountMismatch { declared, decoded } => write!(
+                f,
+                "field `count` declares {declared} events but `events` contains {decoded}"
+            ),
+            Self::InvalidBase64 {
+                envelope_index,
+                message,
+            } => write!(
+                f,
+                "event {envelope_index} has invalid padded RFC 4648 base64 in `key`: {message}"
+            ),
+        }
+    }
+}
+
+/// A decode failure attributed to the physical stream entry that caused it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodeError {
+    pub physical: PhysicalPosition,
+    pub kind: DecodeErrorKind,
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.physical, self.kind)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// One physical Redis Stream entry before its logical events are expanded.
+#[derive(Clone, Debug)]
+pub struct PhysicalEntry {
+    pub stream: String,
+    pub id: String,
+    pub fields: HashMap<String, Value>,
+}
+
+impl PhysicalEntry {
+    pub fn new(
+        stream: impl Into<String>,
+        id: impl Into<String>,
+        fields: HashMap<String, Value>,
+    ) -> Self {
+        Self {
+            stream: stream.into(),
+            id: id.into(),
+            fields,
+        }
+    }
+
+    /// The physical consumer-group acknowledgement position.
+    pub fn position(&self) -> PhysicalPosition {
+        PhysicalPosition {
+            stream: self.stream.clone(),
+            entry_id: self.id.clone(),
+        }
+    }
+
+    /// Decode this entry into one or more logical events.
+    pub fn decode(&self) -> Result<Vec<LogicalEvent>, DecodeError> {
+        decode_entry(self)
+    }
+
+    fn sort_key(&self) -> (u64, u64) {
+        entry_id_sort_key(&self.id)
+    }
+
+    fn error(&self, kind: DecodeErrorKind) -> DecodeError {
+        DecodeError {
+            physical: self.position(),
+            kind,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct BatchEvent {
+    event: String,
+    key: String,
+    db: i64,
+    class: String,
+}
+
+fn field_bytes<'a>(entry: &'a PhysicalEntry, name: &'static str) -> Result<&'a [u8], DecodeError> {
+    match entry.fields.get(name) {
+        Some(Value::BulkString(bytes)) => Ok(bytes),
+        Some(Value::SimpleString(value)) => Ok(value.as_bytes()),
+        Some(_) => Err(entry.error(DecodeErrorKind::InvalidFieldType(name))),
+        None => Err(entry.error(DecodeErrorKind::MissingField(name))),
+    }
+}
+
+fn field_utf8<'a>(entry: &'a PhysicalEntry, name: &'static str) -> Result<&'a str, DecodeError> {
+    std::str::from_utf8(field_bytes(entry, name)?)
+        .map_err(|_| entry.error(DecodeErrorKind::InvalidUtf8(name)))
+}
+
+fn optional_field_utf8<'a>(
+    entry: &'a PhysicalEntry,
+    name: &'static str,
+) -> Result<Option<&'a str>, DecodeError> {
+    if entry.fields.contains_key(name) {
+        field_utf8(entry, name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_integer(entry: &PhysicalEntry, name: &'static str) -> Result<i64, DecodeError> {
+    let value = field_utf8(entry, name)?;
+    value.parse::<i64>().map_err(|_| {
+        entry.error(DecodeErrorKind::InvalidInteger {
+            field: name,
+            value: value.to_string(),
+        })
+    })
+}
+
+/// Decode one physical stream entry.
+///
+/// The stable discriminator-free fixed schema expands to one event.
+/// Preview `format=batch-v1` expands its ordered JSON array. Other
+/// `entry-format` variants are intentionally rejected instead of being
+/// mistaken for either shape.
+pub fn decode_entry(entry: &PhysicalEntry) -> Result<Vec<LogicalEvent>, DecodeError> {
+    let format = optional_field_utf8(entry, "format")?;
+    match format {
+        None => decode_fixed_entry(entry),
+        Some("batch-v1") => decode_batch_v1_entry(entry),
+        Some(other) => Err(entry.error(DecodeErrorKind::UnsupportedFormat(other.to_string()))),
+    }
+}
+
+fn decode_fixed_entry(entry: &PhysicalEntry) -> Result<Vec<LogicalEvent>, DecodeError> {
+    let event = field_utf8(entry, "event")?.to_string();
+    let key = field_bytes(entry, "key")?.to_vec();
+    let db = parse_integer(entry, "db")?;
+    let class = optional_field_utf8(entry, "class")?.map(str::to_string);
+    Ok(vec![LogicalEvent {
+        source: SourcePosition {
+            physical: entry.position(),
+            envelope_index: None,
+        },
+        event,
+        key,
+        db,
+        class,
+    }])
+}
+
+fn decode_batch_v1_entry(entry: &PhysicalEntry) -> Result<Vec<LogicalEvent>, DecodeError> {
+    let count_text = field_utf8(entry, "count")?;
+    let declared = count_text.parse::<usize>().map_err(|_| {
+        entry.error(DecodeErrorKind::InvalidInteger {
+            field: "count",
+            value: count_text.to_string(),
+        })
+    })?;
+    let events: Vec<BatchEvent> = serde_json::from_slice(field_bytes(entry, "events")?)
+        .map_err(|error| entry.error(DecodeErrorKind::InvalidJson(error.to_string())))?;
+    if declared != events.len() {
+        return Err(entry.error(DecodeErrorKind::CountMismatch {
+            declared,
+            decoded: events.len(),
+        }));
+    }
+
+    events
+        .into_iter()
+        .enumerate()
+        .map(|(envelope_index, event)| {
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(event.key)
+                .map_err(|error| {
+                    entry.error(DecodeErrorKind::InvalidBase64 {
+                        envelope_index,
+                        message: error.to_string(),
+                    })
+                })?;
+            Ok(LogicalEvent {
+                source: SourcePosition {
+                    physical: entry.position(),
+                    envelope_index: Some(envelope_index),
+                },
+                event: event.event,
+                key,
+                db: event.db,
+                class: Some(event.class),
+            })
+        })
+        .collect()
+}
+
 /// One mirrored stream entry, with the fields the module writes decoded.
+///
+/// This is the original fixed-format view retained for compatibility. New
+/// consumers that can encounter Preview envelopes should use
+/// [`PhysicalEntry::decode`] or [`MergedReader::poll_decoded`].
 pub struct Entry {
     pub stream: String,
     pub id: String,
@@ -402,11 +705,15 @@ impl Entry {
     /// nodes is unspecified (SPEC.md section 9, ordering), so this key does not
     /// impose a cross-node total order.
     pub fn sort_key(&self) -> (u64, u64) {
-        let mut parts = self.id.splitn(2, '-');
-        let ms = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let seq = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        (ms, seq)
+        entry_id_sort_key(&self.id)
     }
+}
+
+fn entry_id_sort_key(id: &str) -> (u64, u64) {
+    let mut parts = id.splitn(2, '-');
+    let ms = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let seq = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (ms, seq)
 }
 
 impl std::fmt::Display for Entry {
@@ -485,10 +792,10 @@ impl MergedReader {
     }
 
     /// One `XREAD COUNT count` round across every stream, advancing each
-    /// cursor, returning the round's entries sorted by entry ID. A stream that
+    /// cursor, returning physical entries sorted by entry ID. A stream that
     /// errors on this round (e.g. a node that just went away) is skipped.
-    pub fn poll(&mut self, conn: &mut Conn, count: usize) -> Vec<Entry> {
-        let mut batch: Vec<Entry> = Vec::new();
+    pub fn poll_physical(&mut self, conn: &mut Conn, count: usize) -> Vec<PhysicalEntry> {
+        let mut batch: Vec<PhysicalEntry> = Vec::new();
         for s in &self.streams {
             let cursor = self
                 .cursors
@@ -510,12 +817,42 @@ impl MergedReader {
             for key in reply.keys {
                 for id in key.ids {
                     self.cursors.insert(s.clone(), id.id.clone());
-                    batch.push(Entry::from(s, &id.id, &id.map));
+                    batch.push(PhysicalEntry::new(s, id.id, id.map));
                 }
             }
         }
         batch.sort_by_key(|e| e.sort_key());
         batch
+    }
+
+    /// Read and expand one round of fixed and `batch-v1` physical entries.
+    ///
+    /// Logical events preserve physical entry order and, inside an envelope,
+    /// JSON array order. A decode failure names the source stream and entry ID.
+    /// The physical read cursor has already advanced, so callers should treat
+    /// a failure as a poison entry and stop or record it explicitly.
+    pub fn poll_decoded(
+        &mut self,
+        conn: &mut Conn,
+        count: usize,
+    ) -> Result<Vec<LogicalEvent>, DecodeError> {
+        let physical = self.poll_physical(conn, count);
+        let mut logical = Vec::new();
+        for entry in physical {
+            logical.extend(entry.decode()?);
+        }
+        Ok(logical)
+    }
+
+    /// Original fixed-format reader retained for compatibility.
+    ///
+    /// Use [`Self::poll_decoded`] when a stream can contain Preview
+    /// `batch-v1` envelopes.
+    pub fn poll(&mut self, conn: &mut Conn, count: usize) -> Vec<Entry> {
+        self.poll_physical(conn, count)
+            .into_iter()
+            .map(|entry| Entry::from(&entry.stream, &entry.id, &entry.fields))
+            .collect()
     }
 }
 
@@ -672,6 +1009,193 @@ mod tests {
         assert_eq!(entry.event, "set");
         assert_eq!(entry.db, "0");
         assert!(format!("{entry}").ends_with(r"key=\xff\x00a"));
+    }
+
+    fn batch_entry(id: &str, count: &str, events: &str) -> PhysicalEntry {
+        PhysicalEntry::new(
+            "events:set",
+            id,
+            HashMap::from([
+                (
+                    "format".to_string(),
+                    Value::BulkString(b"batch-v1".to_vec()),
+                ),
+                (
+                    "count".to_string(),
+                    Value::BulkString(count.as_bytes().to_vec()),
+                ),
+                (
+                    "events".to_string(),
+                    Value::BulkString(events.as_bytes().to_vec()),
+                ),
+            ]),
+        )
+    }
+
+    #[test]
+    fn decoder_expands_fixed_entry_with_physical_identity() {
+        let key = vec![0xff, 0x00, b'a'];
+        let entry = PhysicalEntry::new(
+            "events:set",
+            "10-0",
+            HashMap::from([
+                ("event".to_string(), Value::BulkString(b"set".to_vec())),
+                ("key".to_string(), Value::BulkString(key.clone())),
+                ("db".to_string(), Value::BulkString(b"2".to_vec())),
+            ]),
+        );
+
+        let decoded = entry.decode().expect("decode fixed entry");
+
+        assert_eq!(
+            decoded,
+            vec![LogicalEvent {
+                source: SourcePosition {
+                    physical: PhysicalPosition {
+                        stream: "events:set".to_string(),
+                        entry_id: "10-0".to_string(),
+                    },
+                    envelope_index: None,
+                },
+                event: "set".to_string(),
+                key,
+                db: 2,
+                class: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn decoder_expands_batch_v1_in_array_order() {
+        let entry = batch_entry(
+            "20-0",
+            "2",
+            r#"[{"event":"set","key":"/wBh","db":0,"class":"string"},{"event":"set","key":"Yg==","db":1,"class":"string"}]"#,
+        );
+
+        let decoded = entry.decode().expect("decode batch-v1");
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].key, vec![0xff, 0x00, b'a']);
+        assert_eq!(decoded[1].key, b"b");
+        assert_eq!(decoded[0].source.envelope_index, Some(0));
+        assert_eq!(decoded[1].source.envelope_index, Some(1));
+        assert_eq!(decoded[0].source.physical, decoded[1].source.physical);
+        assert_eq!(decoded[1].db, 1);
+        assert_eq!(decoded[1].class.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn decoder_preserves_mixed_physical_and_envelope_order() {
+        let fixed = PhysicalEntry::new(
+            "events:set",
+            "30-0",
+            HashMap::from([
+                ("event".to_string(), Value::BulkString(b"set".to_vec())),
+                ("key".to_string(), Value::BulkString(b"fallback".to_vec())),
+                ("db".to_string(), Value::BulkString(b"0".to_vec())),
+            ]),
+        );
+        let batch = batch_entry(
+            "31-0",
+            "2",
+            r#"[{"event":"set","key":"Zmlyc3Q=","db":0,"class":"string"},{"event":"set","key":"c2Vjb25k","db":0,"class":"string"}]"#,
+        );
+
+        let decoded: Vec<LogicalEvent> = [&fixed, &batch]
+            .into_iter()
+            .flat_map(|entry| entry.decode().expect("decode mixed entry"))
+            .collect();
+
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|event| event.key.as_slice())
+                .collect::<Vec<_>>(),
+            vec![
+                b"fallback".as_slice(),
+                b"first".as_slice(),
+                b"second".as_slice()
+            ]
+        );
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|event| event.source.envelope_index)
+                .collect::<Vec<_>>(),
+            vec![None, Some(0), Some(1)]
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_malformed_batch_metadata_with_context() {
+        let invalid_count = batch_entry("40-0", "two", "[]")
+            .decode()
+            .expect_err("invalid count must fail");
+        assert_eq!(
+            invalid_count.physical,
+            PhysicalPosition {
+                stream: "events:set".to_string(),
+                entry_id: "40-0".to_string(),
+            }
+        );
+        assert!(matches!(
+            invalid_count.kind,
+            DecodeErrorKind::InvalidInteger { field: "count", .. }
+        ));
+
+        let invalid_json = batch_entry("41-0", "1", "{")
+            .decode()
+            .expect_err("invalid JSON must fail");
+        assert!(matches!(invalid_json.kind, DecodeErrorKind::InvalidJson(_)));
+
+        let mismatch = batch_entry(
+            "42-0",
+            "2",
+            r#"[{"event":"set","key":"YQ==","db":0,"class":"string"}]"#,
+        )
+        .decode()
+        .expect_err("count mismatch must fail");
+        assert_eq!(
+            mismatch.kind,
+            DecodeErrorKind::CountMismatch {
+                declared: 2,
+                decoded: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_unknown_format_and_invalid_key_encoding() {
+        let unknown = PhysicalEntry::new(
+            "events:set",
+            "50-0",
+            HashMap::from([(
+                "format".to_string(),
+                Value::BulkString(b"batch-v2".to_vec()),
+            )]),
+        )
+        .decode()
+        .expect_err("unknown format must fail");
+        assert_eq!(
+            unknown.kind,
+            DecodeErrorKind::UnsupportedFormat("batch-v2".to_string())
+        );
+
+        let invalid_key = batch_entry(
+            "51-0",
+            "1",
+            r#"[{"event":"set","key":"not base64","db":0,"class":"string"}]"#,
+        )
+        .decode()
+        .expect_err("invalid key encoding must fail");
+        assert!(matches!(
+            invalid_key.kind,
+            DecodeErrorKind::InvalidBase64 {
+                envelope_index: 0,
+                ..
+            }
+        ));
     }
 
     #[test]

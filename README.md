@@ -138,7 +138,9 @@ Runnable consumers are included for
 [Python](examples/python),
 [Go](examples/go),
 [Node.js](examples/node), and
-[Rust](crates/eventstream-client).
+[Rust](crates/eventstream-client). The Rust client includes the first-party
+decoder for streams that mix stable fixed entries with Preview `batch-v1`
+envelopes.
 
 ## Build and contribute
 
