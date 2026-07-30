@@ -14,7 +14,7 @@ maxlen="${BENCH_MAXLEN:-10000}"
 repetitions="${BENCH_REPETITIONS:-1}"
 filtered_repetitions="${BENCH_FILTERED_REPETITIONS:-$repetitions}"
 order_seed="${BENCH_ORDER_SEED:-260}"
-profile_scenario="${BENCH_PROFILE_SCENARIO:-}"
+profile_scenarios="${BENCH_PROFILE_SCENARIO:-}"
 profile_frequency="${BENCH_PROFILE_FREQUENCY:-99}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 results_dir="${RESULTS_DIR:-$root_dir/results/$run_id}"
@@ -51,19 +51,33 @@ if ! [[ "$order_seed" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-if [[ -n "$profile_scenario" ]]; then
-  case "$profile_scenario" in
-    s0 | s1 | s2) ;;
-    *)
-      echo "BENCH_PROFILE_SCENARIO must be s0, s1, s2, or empty" >&2
-      exit 2
-      ;;
-  esac
+if [[ -n "$profile_scenarios" ]]; then
+  for profile_scenario in ${profile_scenarios//,/ }; do
+    case "$profile_scenario" in
+      s0 | s1 | s2) ;;
+      *)
+        echo "BENCH_PROFILE_SCENARIO must contain only s0, s1, and/or s2" >&2
+        exit 2
+        ;;
+    esac
+  done
   if ! positive_integer "$profile_frequency"; then
     echo "BENCH_PROFILE_FREQUENCY must be a positive integer" >&2
     exit 2
   fi
 fi
+
+profile_requested() {
+  local scenario="$1"
+  local requested
+
+  for requested in ${profile_scenarios//,/ }; do
+    if [[ "$scenario" == "$requested" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 mkdir -p "$results_dir/raw"
 
@@ -283,7 +297,7 @@ chmod 0700 /tmp/eventstream-server.sh
     "$results_dir/raw/server-$trial_id"
 
   profiled=false
-  if [[ -n "$profile_scenario" && "$scenario" == "$profile_scenario" ]]; then
+  if profile_requested "$scenario"; then
     profiled=true
     profile_start_command="printf '%s' '$profile_script_b64' | base64 --decode > /tmp/eventstream-profile.sh
 chmod 0700 /tmp/eventstream-profile.sh

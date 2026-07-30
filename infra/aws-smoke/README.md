@@ -100,7 +100,8 @@ container startup and telemetry teardown time. The CPU figures remain
 diagnostic estimates from Redis `INFO` and Docker sampling, not
 laboratory-grade hardware counters.
 
-To attach Linux `perf` to one scenario, set `BENCH_PROFILE_SCENARIO`:
+To attach Linux `perf` to one or more scenarios, set
+`BENCH_PROFILE_SCENARIO` to a comma-separated list:
 
 ```sh
 BENCH_REQUESTS=5000000 \
@@ -108,13 +109,15 @@ BENCH_CLIENT_LEVELS=100 \
 BENCH_THREADS=4 \
 BENCH_REPETITIONS=1 \
 BENCH_FILTERED_REPETITIONS=1 \
-BENCH_PROFILE_SCENARIO=s2 \
+BENCH_PROFILE_SCENARIO=s1,s2 \
 BENCH_PROFILE_FREQUENCY=99 \
 ./lab.sh run
 ```
 
 The server records `cpu-clock` samples with DWARF call graphs only for matching
-trials. Compressed raw `perf report` output and decompressed text land under
+trials. A matched `s1,s2` pair is useful for separating the filtered control
+from the incremental full-capture work. Compressed raw `perf report` output
+and decompressed text land under
 `results/<run-id>/profile/<trial-id>/`; the normalized trial JSON includes
 profiler metadata. Profiling is opt-in because call-stack collection adds
 overhead and changes the measured throughput.
