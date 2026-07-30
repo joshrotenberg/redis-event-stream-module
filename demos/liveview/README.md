@@ -20,6 +20,24 @@ restarting Phoenix. It includes a command console, mixed workloads, continuous
 flow, capture-gap controls, counters, gap markers, and node-aware cluster
 lanes.
 
+## Visual tour
+
+The opening view makes the evaluation path explicit: configure capture, create
+Redis activity, then watch the matching streams.
+
+![Observatory overview with capture metrics and the three-step workflow](screenshots/observatory-overview.jpg)
+
+A mixed pulse fills one live lane per captured event type while the counters
+retain the full-session totals.
+
+![Live event lanes populated by a mixed Redis workload](screenshots/live-event-lanes.jpg)
+
+Cluster mode runs three disposable masters. The topology reports each node's
+local stream set, and every event keeps its source-node badge as the observer
+merges the lanes.
+
+![Three-master Redis Cluster topology with node-aware event lanes](screenshots/cluster-topology.jpg)
+
 ## Run with Docker
 
 Build from the repository root:
