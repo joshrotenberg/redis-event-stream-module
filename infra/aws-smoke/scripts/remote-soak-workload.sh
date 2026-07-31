@@ -343,7 +343,8 @@ sample_loop() {
         epoch_ms: $epoch_ms,
         forwarded: ($forwarded - $start_forwarded),
         consumer_seen: $consumer_seen,
-        consumer_lag: (($forwarded - $start_forwarded) - $consumer_seen),
+        consumer_lag:
+          ([ (($forwarded - $start_forwarded) - $consumer_seen), 0 ] | max),
         queue_depth: $queue_depth,
         queue_high_water: $queue_high_water,
         stream_len: $stream_len,

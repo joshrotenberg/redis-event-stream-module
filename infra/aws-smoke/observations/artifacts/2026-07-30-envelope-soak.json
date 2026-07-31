@@ -1,0 +1,928 @@
+{
+  "schema_version": 1,
+  "experiment": "Preview envelope soak and restart-loss probe",
+  "runs": [
+    {
+      "outcome": "consumer_retention_gap",
+      "run_id": "20260730T2340Z-envelope-soak",
+      "started_at": "2026-07-30T23:29:59Z",
+      "completed_at": "2026-07-31T00:12:27Z",
+      "git_commit": "c80926c7acd6675e9f6ff9c1ba7cef4d32682a91",
+      "environment": {
+        "region": "us-west-2",
+        "availability_zone": "us-west-2a",
+        "server_instance_type": "c7i.large",
+        "loadgen_instance_type": "c7i.large",
+        "module_image": "ghcr.io/joshrotenberg/redis-event-stream-module:0.4.0@sha256:1466a273fd64321ca3eba4447db3a16e2eb231be2afdb3a620c5cb2229be4db2",
+        "module_artifact": {
+          "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/c80926c7acd6675e9f6ff9c1ba7cef4d32682a91.tar.gz",
+          "path": "/var/lib/eventstream-smoke/libredis_event_stream_module.so",
+          "sha256": "1aa59cc7043f7a337c0e8e6fd9803040096437a47417a339182fc92a8a3cc25b",
+          "size_bytes": 2952352,
+          "git_commit": "c80926c7acd6675e9f6ff9c1ba7cef4d32682a91"
+        },
+        "consumer_artifact": {
+          "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/c80926c7acd6675e9f6ff9c1ba7cef4d32682a91.tar.gz",
+          "image": "eventstream-branch-client:soak-c80926c7acd6",
+          "image_id": "sha256:ca5c915e04e4016ac85173bea0a7d36d1f8549a7b022bed73165efd568088ecd",
+          "binary_sha256": "bede6431fd8cf90314139d019c661175384c2eea6ff8bb3661c9919d81fe95c8",
+          "binary_size_bytes": 2166512,
+          "git_commit": "c80926c7acd6675e9f6ff9c1ba7cef4d32682a91"
+        },
+        "loadgen_image": "redis:8.8.0@sha256:234c902a2db49461a129e2d4aeff85b28cf20187ed274a67f6e50995fa713c7b",
+        "expires_at": "2026-07-31T03:07:11Z"
+      },
+      "plan": {
+        "run_id": "20260730T2340Z-envelope-soak",
+        "soak_seconds": 1800,
+        "target_rps": 80000,
+        "calibration_requests_per_candidate": 500000,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "maxlen": 100000,
+        "async_configuration": {
+          "queue_capacity": 1048576,
+          "batch_size": 128,
+          "max_wait_ms": 1
+        },
+        "phase_percentages": [
+          {
+            "name": "steady-1",
+            "percent": 27
+          },
+          {
+            "name": "burst-1",
+            "percent": 2,
+            "target_multiplier": 2
+          },
+          {
+            "name": "steady-2",
+            "percent": 23
+          },
+          {
+            "name": "consumer-pause",
+            "percent": 4
+          },
+          {
+            "name": "consumer-catchup",
+            "percent": 13
+          },
+          {
+            "name": "burst-2",
+            "percent": 2,
+            "target_multiplier": 2
+          },
+          {
+            "name": "steady-3",
+            "percent": 29
+          }
+        ],
+        "restart_probe": {
+          "queue_depth_threshold": 10000,
+          "unique_events_per_batch": 100000,
+          "maximum_batches": 10,
+          "modes": [
+            "graceful-module-unload",
+            "abrupt-process-kill-aof-everysec"
+          ]
+        }
+      },
+      "calibration": {
+        "target_rps": 80000,
+        "candidates": [
+          {
+            "clients": 1,
+            "threads": 1,
+            "requests": 500000,
+            "ops_per_sec": 3248.97,
+            "avg_ms": 0.305,
+            "min_ms": 0.272,
+            "p50_ms": 0.295,
+            "p95_ms": 0.431,
+            "p99_ms": 0.519,
+            "max_ms": 7.823
+          },
+          {
+            "clients": 100,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 124875.12,
+            "avg_ms": 0.719,
+            "min_ms": 0.248,
+            "p50_ms": 0.695,
+            "p95_ms": 1.103,
+            "p99_ms": 1.431,
+            "max_ms": 12.447
+          },
+          {
+            "clients": 16,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 51261.02,
+            "avg_ms": 0.307,
+            "min_ms": 0.224,
+            "p50_ms": 0.295,
+            "p95_ms": 0.359,
+            "p99_ms": 0.399,
+            "max_ms": 7.183
+          },
+          {
+            "clients": 2,
+            "threads": 2,
+            "requests": 500000,
+            "ops_per_sec": 6988.71,
+            "avg_ms": 0.283,
+            "min_ms": 0.248,
+            "p50_ms": 0.287,
+            "p95_ms": 0.303,
+            "p99_ms": 0.335,
+            "max_ms": 9.151
+          },
+          {
+            "clients": 32,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 86926.29,
+            "avg_ms": 0.352,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.439,
+            "p99_ms": 0.727,
+            "max_ms": 14.775
+          },
+          {
+            "clients": 4,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 13977.41,
+            "avg_ms": 0.284,
+            "min_ms": 0.248,
+            "p50_ms": 0.287,
+            "p95_ms": 0.311,
+            "p99_ms": 0.335,
+            "max_ms": 10.799
+          },
+          {
+            "clients": 64,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 117619.38,
+            "avg_ms": 0.500,
+            "min_ms": 0.232,
+            "p50_ms": 0.463,
+            "p95_ms": 0.783,
+            "p99_ms": 1.135,
+            "max_ms": 38.143
+          },
+          {
+            "clients": 8,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 26653.87,
+            "avg_ms": 0.295,
+            "min_ms": 0.224,
+            "p50_ms": 0.295,
+            "p95_ms": 0.343,
+            "p99_ms": 0.367,
+            "max_ms": 13.439
+          }
+        ],
+        "selected": {
+          "clients": 32,
+          "threads": 4,
+          "requests": 500000,
+          "ops_per_sec": 86926.29,
+          "avg_ms": 0.352,
+          "min_ms": 0.224,
+          "p50_ms": 0.343,
+          "p95_ms": 0.439,
+          "p99_ms": 0.727,
+          "max_ms": 14.775
+        }
+      },
+      "main": {
+        "planned_logical_events": 162726015,
+        "selected_load": {
+          "target_rps": 86926.29,
+          "clients": 32
+        },
+        "phases": [
+          {
+            "name": "burst-1",
+            "kind": "burst",
+            "started_at": "2026-07-30T23:43:43Z",
+            "completed_at": "2026-07-30T23:44:33Z",
+            "target_seconds": 36,
+            "duration_seconds": 50.068628,
+            "clients": 100,
+            "threads": 4,
+            "requests": 6258693,
+            "pause_consumer": false,
+            "consumer_before": 42246177,
+            "consumer_after": 48504870,
+            "ops_per_sec": 125701.80,
+            "avg_ms": 0.752,
+            "min_ms": 0.232,
+            "p50_ms": 0.703,
+            "p95_ms": 1.183,
+            "p99_ms": 1.743,
+            "max_ms": 21.167
+          },
+          {
+            "name": "burst-2",
+            "kind": "burst",
+            "started_at": "2026-07-30T23:56:18Z",
+            "completed_at": "2026-07-30T23:57:08Z",
+            "target_seconds": 36,
+            "duration_seconds": 50.583012,
+            "clients": 100,
+            "threads": 4,
+            "requests": 6258693,
+            "pause_consumer": false,
+            "consumer_before": 106134437,
+            "consumer_after": 112393130,
+            "ops_per_sec": 124442.14,
+            "avg_ms": 0.757,
+            "min_ms": 0.232,
+            "p50_ms": 0.703,
+            "p95_ms": 1.199,
+            "p99_ms": 1.759,
+            "max_ms": 16.831
+          },
+          {
+            "name": "consumer-catchup",
+            "kind": "consumer-catchup",
+            "started_at": "2026-07-30T23:52:25Z",
+            "completed_at": "2026-07-30T23:56:18Z",
+            "target_seconds": 234,
+            "duration_seconds": 232.567471,
+            "clients": 32,
+            "threads": 4,
+            "requests": 20340752,
+            "pause_consumer": false,
+            "consumer_before": 84514441,
+            "consumer_after": 106134437,
+            "ops_per_sec": 87550.75,
+            "avg_ms": 0.359,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.455,
+            "p99_ms": 0.775,
+            "max_ms": 17.871
+          },
+          {
+            "name": "consumer-pause",
+            "kind": "consumer-pause",
+            "started_at": "2026-07-30T23:51:16Z",
+            "completed_at": "2026-07-30T23:52:25Z",
+            "target_seconds": 72,
+            "duration_seconds": 69.501695,
+            "clients": 32,
+            "threads": 4,
+            "requests": 6258693,
+            "pause_consumer": true,
+            "consumer_before": 84492354,
+            "consumer_after": 84492354,
+            "ops_per_sec": 90357.36,
+            "avg_ms": 0.348,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.439,
+            "p99_ms": 0.703,
+            "max_ms": 11.047
+          },
+          {
+            "name": "steady-1",
+            "kind": "steady",
+            "started_at": "2026-07-30T23:35:46Z",
+            "completed_at": "2026-07-30T23:43:43Z",
+            "target_seconds": 486,
+            "duration_seconds": 477.208340,
+            "clients": 32,
+            "threads": 4,
+            "requests": 42246177,
+            "pause_consumer": false,
+            "consumer_before": 0,
+            "consumer_after": 42246177,
+            "ops_per_sec": 88584.98,
+            "avg_ms": 0.354,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.447,
+            "p99_ms": 0.759,
+            "max_ms": 16.543
+          },
+          {
+            "name": "steady-2",
+            "kind": "steady",
+            "started_at": "2026-07-30T23:44:33Z",
+            "completed_at": "2026-07-30T23:51:16Z",
+            "target_seconds": 414,
+            "duration_seconds": 402.116867,
+            "clients": 32,
+            "threads": 4,
+            "requests": 35987484,
+            "pause_consumer": false,
+            "consumer_before": 48504870,
+            "consumer_after": 84492354,
+            "ops_per_sec": 89547.16,
+            "avg_ms": 0.350,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.447,
+            "p99_ms": 0.759,
+            "max_ms": 15.391
+          },
+          {
+            "name": "steady-3",
+            "kind": "steady",
+            "started_at": "2026-07-30T23:57:08Z",
+            "completed_at": "2026-07-31T00:05:42Z",
+            "target_seconds": 522,
+            "duration_seconds": 513.944016,
+            "clients": 32,
+            "threads": 4,
+            "requests": 45375523,
+            "pause_consumer": false,
+            "consumer_before": 112393130,
+            "consumer_after": 157768653,
+            "ops_per_sec": 88335.95,
+            "avg_ms": 0.356,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.455,
+            "p99_ms": 0.759,
+            "max_ms": 217.215
+          }
+        ],
+        "analysis": {
+          "samples": 320,
+          "elapsed_seconds": 2134.669,
+          "redis_main_core_percent": 63.74723954861386,
+          "redis_total_core_percent": 100.03737108657127,
+          "max_queue_depth": 126,
+          "final_queue_depth": 0,
+          "max_consumer_lag": 6158284,
+          "final_consumer_lag": 4957362,
+          "rss_bytes": {
+            "first": 9437184,
+            "max": 150519808,
+            "final": 130367488
+          },
+          "stream_memory_bytes": {
+            "first": 1596949,
+            "max": 107849602,
+            "final": 96664460
+          }
+        },
+        "retained_stream": {
+          "physical_entries": 100029,
+          "memory_bytes": 96664460
+        },
+        "correctness": {
+          "capture_settled": true,
+          "consumer_completed": false,
+          "forwarded": 162726015,
+          "consumed_logical_events": 157768653,
+          "source_to_forwarded_exact": true,
+          "source_to_consumer_exact": false,
+          "events_lost": 0,
+          "dropped": 0,
+          "handler_panics": 0,
+          "async_worker_errors": 0
+        },
+        "consumer": {
+          "logical_events": 157768653,
+          "target_logical_events": 162726015,
+          "streams": 1,
+          "done": false,
+          "idle_exit": false,
+          "updated_unix_ms": 1785456686654
+        },
+        "module_start": {
+          "forwarded": 1,
+          "events_lost": 0,
+          "dropped": 0,
+          "handler_panics": 0,
+          "async_enqueued": 1,
+          "async_fallbacks": 0,
+          "async_queue_depth": 0,
+          "async_queue_high_water": 1,
+          "async_drains": 1,
+          "async_drain_events": 1,
+          "async_envelopes": 1,
+          "async_envelope_events": 1,
+          "async_worker_errors": 0
+        },
+        "module_end": {
+          "forwarded": 162726016,
+          "events_lost": 0,
+          "dropped": 0,
+          "handler_panics": 0,
+          "async_enqueued": 162540340,
+          "async_fallbacks": 185676,
+          "async_queue_depth": 0,
+          "async_queue_high_water": 2790,
+          "async_drains": 1771791,
+          "async_drain_events": 162540340,
+          "async_envelopes": 1586170,
+          "async_envelope_events": 152223817,
+          "async_worker_errors": 0
+        }
+      },
+      "restart_probes": {
+        "graceful": {
+          "queue_depth_before_boundary": 12293,
+          "queue_high_water_before_boundary": 12293,
+          "unload_seconds": 0.088531,
+          "durable_source_events": 1000000,
+          "decoded_logical_events": 1000000,
+          "missing_logical_events": 0,
+          "exact": true
+        },
+        "abrupt": {
+          "persistence": "aof-everysec",
+          "queue_depth_before_boundary": 17541,
+          "queue_high_water_before_boundary": 17541,
+          "acknowledged_commands": 175680,
+          "durable_source_events": 175680,
+          "decoded_logical_events": 166074,
+          "acknowledged_not_durable": 0,
+          "missing_logical_events": 9606,
+          "missing_vs_observed_queue": 0.547631263896015,
+          "accounting_valid": true
+        }
+      }
+    },
+    {
+      "outcome": "exact_end_to_end",
+      "run_id": "20260731T0020Z-envelope-soak-retained",
+      "started_at": "2026-07-31T00:18:44Z",
+      "completed_at": "2026-07-31T00:55:42Z",
+      "git_commit": "1fe4221631852f181579d47f1f67d571625dbc8d",
+      "environment": {
+        "region": "us-west-2",
+        "availability_zone": "us-west-2a",
+        "server_instance_type": "c7i.large",
+        "loadgen_instance_type": "c7i.large",
+        "module_image": "ghcr.io/joshrotenberg/redis-event-stream-module:0.4.0@sha256:1466a273fd64321ca3eba4447db3a16e2eb231be2afdb3a620c5cb2229be4db2",
+        "module_artifact": {
+          "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/1fe4221631852f181579d47f1f67d571625dbc8d.tar.gz",
+          "path": "/var/lib/eventstream-smoke/libredis_event_stream_module.so",
+          "sha256": "1aa59cc7043f7a337c0e8e6fd9803040096437a47417a339182fc92a8a3cc25b",
+          "size_bytes": 2952352,
+          "git_commit": "1fe4221631852f181579d47f1f67d571625dbc8d"
+        },
+        "consumer_artifact": {
+          "source_archive": "https://github.com/joshrotenberg/redis-event-stream-module/archive/1fe4221631852f181579d47f1f67d571625dbc8d.tar.gz",
+          "image": "eventstream-branch-client:soak-1fe422163185",
+          "image_id": "sha256:ca5c915e04e4016ac85173bea0a7d36d1f8549a7b022bed73165efd568088ecd",
+          "binary_sha256": "bede6431fd8cf90314139d019c661175384c2eea6ff8bb3661c9919d81fe95c8",
+          "binary_size_bytes": 2166512,
+          "git_commit": "1fe4221631852f181579d47f1f67d571625dbc8d"
+        },
+        "loadgen_image": "redis:8.8.0@sha256:234c902a2db49461a129e2d4aeff85b28cf20187ed274a67f6e50995fa713c7b",
+        "expires_at": "2026-07-31T03:07:11Z"
+      },
+      "plan": {
+        "run_id": "20260731T0020Z-envelope-soak-retained",
+        "soak_seconds": 1800,
+        "target_rps": 80000,
+        "calibration_requests_per_candidate": 500000,
+        "payload_bytes": 64,
+        "keyspace": 100000,
+        "maxlen": 750000,
+        "async_configuration": {
+          "queue_capacity": 1048576,
+          "batch_size": 128,
+          "max_wait_ms": 1
+        },
+        "phase_percentages": [
+          {
+            "name": "steady-1",
+            "percent": 27
+          },
+          {
+            "name": "burst-1",
+            "percent": 2,
+            "target_multiplier": 2
+          },
+          {
+            "name": "steady-2",
+            "percent": 23
+          },
+          {
+            "name": "consumer-pause",
+            "percent": 4
+          },
+          {
+            "name": "consumer-catchup",
+            "percent": 13
+          },
+          {
+            "name": "burst-2",
+            "percent": 2,
+            "target_multiplier": 2
+          },
+          {
+            "name": "steady-3",
+            "percent": 29
+          }
+        ],
+        "restart_probe": {
+          "queue_depth_threshold": 10000,
+          "unique_events_per_batch": 100000,
+          "maximum_batches": 10,
+          "modes": [
+            "graceful-module-unload",
+            "abrupt-process-kill-aof-everysec"
+          ]
+        }
+      },
+      "calibration": {
+        "target_rps": 80000,
+        "candidates": [
+          {
+            "clients": 1,
+            "threads": 1,
+            "requests": 500000,
+            "ops_per_sec": 3586.05,
+            "avg_ms": 0.277,
+            "min_ms": 0.248,
+            "p50_ms": 0.271,
+            "p95_ms": 0.303,
+            "p99_ms": 0.455,
+            "max_ms": 7.255
+          },
+          {
+            "clients": 100,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 124875.12,
+            "avg_ms": 0.719,
+            "min_ms": 0.240,
+            "p50_ms": 0.687,
+            "p95_ms": 1.103,
+            "p99_ms": 1.431,
+            "max_ms": 15.551
+          },
+          {
+            "clients": 16,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 48766.21,
+            "avg_ms": 0.319,
+            "min_ms": 0.224,
+            "p50_ms": 0.319,
+            "p95_ms": 0.383,
+            "p99_ms": 0.423,
+            "max_ms": 13.087
+          },
+          {
+            "clients": 2,
+            "threads": 2,
+            "requests": 500000,
+            "ops_per_sec": 6868.60,
+            "avg_ms": 0.289,
+            "min_ms": 0.256,
+            "p50_ms": 0.295,
+            "p95_ms": 0.311,
+            "p99_ms": 0.343,
+            "max_ms": 3.159
+          },
+          {
+            "clients": 32,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 86880.97,
+            "avg_ms": 0.346,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.423,
+            "p99_ms": 0.695,
+            "max_ms": 15.167
+          },
+          {
+            "clients": 4,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 13689.63,
+            "avg_ms": 0.289,
+            "min_ms": 0.248,
+            "p50_ms": 0.295,
+            "p95_ms": 0.319,
+            "p99_ms": 0.343,
+            "max_ms": 11.191
+          },
+          {
+            "clients": 64,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 117508.81,
+            "avg_ms": 0.497,
+            "min_ms": 0.232,
+            "p50_ms": 0.463,
+            "p95_ms": 0.783,
+            "p99_ms": 1.143,
+            "max_ms": 38.239
+          },
+          {
+            "clients": 8,
+            "threads": 4,
+            "requests": 500000,
+            "ops_per_sec": 27010.97,
+            "avg_ms": 0.290,
+            "min_ms": 0.224,
+            "p50_ms": 0.295,
+            "p95_ms": 0.343,
+            "p99_ms": 0.367,
+            "max_ms": 15.639
+          }
+        ],
+        "selected": {
+          "clients": 32,
+          "threads": 4,
+          "requests": 500000,
+          "ops_per_sec": 86880.97,
+          "avg_ms": 0.346,
+          "min_ms": 0.224,
+          "p50_ms": 0.343,
+          "p95_ms": 0.423,
+          "p99_ms": 0.695,
+          "max_ms": 15.167
+        }
+      },
+      "main": {
+        "planned_logical_events": 162641176,
+        "selected_load": {
+          "target_rps": 86880.97,
+          "clients": 32
+        },
+        "phases": [
+          {
+            "name": "burst-1",
+            "kind": "burst",
+            "started_at": "2026-07-31T00:32:23Z",
+            "completed_at": "2026-07-31T00:33:14Z",
+            "target_seconds": 36,
+            "duration_seconds": 50.330224,
+            "clients": 100,
+            "threads": 4,
+            "requests": 6255430,
+            "pause_consumer": false,
+            "consumer_before": 42224151,
+            "consumer_after": 48479581,
+            "ops_per_sec": 125006.09,
+            "avg_ms": 0.757,
+            "min_ms": 0.240,
+            "p50_ms": 0.703,
+            "p95_ms": 1.199,
+            "p99_ms": 1.735,
+            "max_ms": 14.023
+          },
+          {
+            "name": "burst-2",
+            "kind": "burst",
+            "started_at": "2026-07-31T00:45:03Z",
+            "completed_at": "2026-07-31T00:45:54Z",
+            "target_seconds": 36,
+            "duration_seconds": 50.407354,
+            "clients": 100,
+            "threads": 4,
+            "requests": 6255430,
+            "pause_consumer": false,
+            "consumer_before": 111033880,
+            "consumer_after": 117289310,
+            "ops_per_sec": 124983.62,
+            "avg_ms": 0.757,
+            "min_ms": 0.232,
+            "p50_ms": 0.703,
+            "p95_ms": 1.207,
+            "p99_ms": 1.743,
+            "max_ms": 20.367
+          },
+          {
+            "name": "consumer-catchup",
+            "kind": "consumer-catchup",
+            "started_at": "2026-07-31T00:41:12Z",
+            "completed_at": "2026-07-31T00:45:03Z",
+            "target_seconds": 234,
+            "duration_seconds": 231.601497,
+            "clients": 32,
+            "threads": 4,
+            "requests": 20330147,
+            "pause_consumer": false,
+            "consumer_before": 84482101,
+            "consumer_after": 111033880,
+            "ops_per_sec": 87885.27,
+            "avg_ms": 0.357,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.455,
+            "p99_ms": 0.775,
+            "max_ms": 15.935
+          },
+          {
+            "name": "consumer-pause",
+            "kind": "consumer-pause",
+            "started_at": "2026-07-31T00:40:02Z",
+            "completed_at": "2026-07-31T00:41:12Z",
+            "target_seconds": 72,
+            "duration_seconds": 70.057696,
+            "clients": 32,
+            "threads": 4,
+            "requests": 6255430,
+            "pause_consumer": true,
+            "consumer_before": 84448303,
+            "consumer_after": 84448303,
+            "ops_per_sec": 89664.30,
+            "avg_ms": 0.350,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.439,
+            "p99_ms": 0.695,
+            "max_ms": 9.871
+          },
+          {
+            "name": "steady-1",
+            "kind": "steady",
+            "started_at": "2026-07-31T00:24:21Z",
+            "completed_at": "2026-07-31T00:32:23Z",
+            "target_seconds": 486,
+            "duration_seconds": 482.654527,
+            "clients": 32,
+            "threads": 4,
+            "requests": 42224151,
+            "pause_consumer": false,
+            "consumer_before": 0,
+            "consumer_after": 42224151,
+            "ops_per_sec": 87529.16,
+            "avg_ms": 0.359,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.455,
+            "p99_ms": 0.751,
+            "max_ms": 17.727
+          },
+          {
+            "name": "steady-2",
+            "kind": "steady",
+            "started_at": "2026-07-31T00:33:14Z",
+            "completed_at": "2026-07-31T00:40:02Z",
+            "target_seconds": 414,
+            "duration_seconds": 408.129373,
+            "clients": 32,
+            "threads": 4,
+            "requests": 35968722,
+            "pause_consumer": false,
+            "consumer_before": 48479581,
+            "consumer_after": 84448303,
+            "ops_per_sec": 88188.23,
+            "avg_ms": 0.356,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.447,
+            "p99_ms": 0.767,
+            "max_ms": 15.951
+          },
+          {
+            "name": "steady-3",
+            "kind": "steady",
+            "started_at": "2026-07-31T00:45:54Z",
+            "completed_at": "2026-07-31T00:54:33Z",
+            "target_seconds": 522,
+            "duration_seconds": 518.687951,
+            "clients": 32,
+            "threads": 4,
+            "requests": 45351866,
+            "pause_consumer": false,
+            "consumer_before": 117289310,
+            "consumer_after": 162641176,
+            "ops_per_sec": 87477.22,
+            "avg_ms": 0.359,
+            "min_ms": 0.224,
+            "p50_ms": 0.343,
+            "p95_ms": 0.455,
+            "p99_ms": 0.759,
+            "max_ms": 19.295
+          }
+        ],
+        "analysis": {
+          "samples": 259,
+          "elapsed_seconds": 1815.419,
+          "redis_main_core_percent": 74.7301985932724,
+          "redis_total_core_percent": 117.53447005897813,
+          "max_queue_depth": 116,
+          "final_queue_depth": 0,
+          "max_consumer_lag": 5769389,
+          "final_consumer_lag": 0,
+          "rss_bytes": {
+            "first": 9453568,
+            "max": 895524864,
+            "final": 843988992
+          },
+          "stream_memory_bytes": {
+            "first": 867808,
+            "max": 805810632,
+            "final": 751057235
+          }
+        },
+        "retained_stream": {
+          "physical_entries": 750000,
+          "memory_bytes": 751057235
+        },
+        "correctness": {
+          "capture_settled": true,
+          "consumer_completed": true,
+          "forwarded": 162641176,
+          "consumed_logical_events": 162641176,
+          "source_to_forwarded_exact": true,
+          "source_to_consumer_exact": true,
+          "events_lost": 0,
+          "dropped": 0,
+          "handler_panics": 0,
+          "async_worker_errors": 0
+        },
+        "consumer": {
+          "logical_events": 162641176,
+          "target_logical_events": 162641176,
+          "streams": 1,
+          "done": true,
+          "idle_exit": false,
+          "updated_unix_ms": 1785459272888
+        },
+        "module_start": {
+          "forwarded": 1,
+          "events_lost": 0,
+          "dropped": 0,
+          "handler_panics": 0,
+          "async_enqueued": 1,
+          "async_fallbacks": 0,
+          "async_queue_depth": 0,
+          "async_queue_high_water": 1,
+          "async_drains": 1,
+          "async_drain_events": 1,
+          "async_envelopes": 1,
+          "async_envelope_events": 1,
+          "async_worker_errors": 0
+        },
+        "module_end": {
+          "forwarded": 162641177,
+          "events_lost": 0,
+          "dropped": 0,
+          "handler_panics": 0,
+          "async_enqueued": 162459695,
+          "async_fallbacks": 181482,
+          "async_queue_depth": 0,
+          "async_queue_high_water": 1996,
+          "async_drains": 1785883,
+          "async_drain_events": 162459695,
+          "async_envelopes": 1604419,
+          "async_envelope_events": 152479612,
+          "async_worker_errors": 0
+        }
+      },
+      "restart_probes": {
+        "graceful": {
+          "queue_depth_before_boundary": 12459,
+          "queue_high_water_before_boundary": 16384,
+          "unload_seconds": 0.124236,
+          "durable_source_events": 1000000,
+          "decoded_logical_events": 1000000,
+          "missing_logical_events": 0,
+          "exact": true
+        },
+        "abrupt": {
+          "persistence": "aof-everysec",
+          "queue_depth_before_boundary": 19518,
+          "queue_high_water_before_boundary": 28517,
+          "acknowledged_commands": 111047,
+          "durable_source_events": 111047,
+          "decoded_logical_events": 72344,
+          "acknowledged_not_durable": 0,
+          "missing_logical_events": 38703,
+          "missing_vs_observed_queue": 1.9829388256993545,
+          "accounting_valid": true
+        }
+      }
+    }
+  ],
+  "comparison": {
+    "undersized_retention": {
+      "physical_entry_limit": 100000,
+      "planned_logical_events": 162726015,
+      "decoded_logical_events": 157768653,
+      "final_consumer_gap": 4957362,
+      "peak_consumer_lag": 6158284,
+      "final_stream_memory_bytes": 96664460
+    },
+    "retained_history": {
+      "physical_entry_limit": 750000,
+      "planned_logical_events": 162641176,
+      "decoded_logical_events": 162641176,
+      "final_consumer_gap": 0,
+      "peak_consumer_lag": 5769389,
+      "final_stream_memory_bytes": 751057235
+    }
+  }
+}

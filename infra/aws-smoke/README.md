@@ -256,6 +256,7 @@ The runner fails unless:
 - [2026-07-30: full-capture CPU profile][capture-profile]
 - [2026-07-30: async and batch write spike][async-batch]
 - [2026-07-30: Preview envelope tuning][envelope-tuning]
+- [2026-07-30: Preview envelope soak and restart-loss probe][envelope-soak]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
@@ -263,6 +264,7 @@ The runner fails unless:
 [capture-profile]: observations/2026-07-30-capture-profile.md
 [async-batch]: observations/2026-07-30-async-batch-spike.md
 [envelope-tuning]: observations/2026-07-30-envelope-tuning.md
+[envelope-soak]: observations/2026-07-30-envelope-soak.md
 
 ## Image pins
 
