@@ -43,6 +43,14 @@ COPY crates ./crates
 RUN cargo build --release --lib -p redis-event-stream-module \
     && cp target/release/libredis_event_stream_module.so /module.so
 
+# --- Optional target: first-party decoder/consumer ------------------------
+# The AWS soak harness builds this target from the same source commit as the
+# module and runs it as a container on the load-generator host. Keeping the
+# binary in its build image avoids host-glibc assumptions.
+FROM module-build AS client-build
+RUN cargo build --release --bin eventstream-client -p eventstream-client \
+    && cp target/release/eventstream-client /eventstream-client
+
 # --- Stage 2: the server, built from source -------------------------------
 # Mirrors the CI "Build from source" step (.github/workflows/ci.yml): the same
 # tarball/tag and BUILD_TLS=no, so the image runs the exact server build the

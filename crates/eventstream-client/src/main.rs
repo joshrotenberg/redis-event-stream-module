@@ -10,11 +10,14 @@
 //! over it.
 
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use redis::{Cmd, ErrorKind, RedisError, RedisResult};
+use serde::Serialize;
 
 use eventstream_client::{
     counter_sum, discover_all, discover_streams, node_counters, Conn, MergedReader, Target,
@@ -67,6 +70,18 @@ enum Command {
         /// Stop after N logical events (default: run until Ctrl-C).
         #[arg(long)]
         count: Option<i64>,
+        /// Decode and count events without printing each record.
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+        /// Exit after this many idle milliseconds (default: wait forever).
+        #[arg(long)]
+        idle_exit_ms: Option<u64>,
+        /// Atomically update this JSON file with consumer progress.
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+        /// Maximum physical entries requested from each stream per poll.
+        #[arg(long, default_value_t = 1000)]
+        read_count: usize,
     },
     /// Live dashboard of counters and stream lengths.
     Watch,
@@ -103,7 +118,22 @@ fn main() {
             events,
             from,
             count,
-        } => cmd_consume(&target, events.as_deref(), from, *count),
+            quiet,
+            idle_exit_ms,
+            checkpoint,
+            read_count,
+        } => cmd_consume(
+            &target,
+            ConsumeOptions {
+                events: events.as_deref(),
+                from,
+                count: *count,
+                quiet: *quiet,
+                idle_exit_ms: *idle_exit_ms,
+                checkpoint: checkpoint.as_deref(),
+                read_count: *read_count,
+            },
+        ),
         Command::Watch => cmd_watch(&target),
         Command::Soak { count, rate } => cmd_soak(&target, *count, *rate),
     };
@@ -329,17 +359,80 @@ fn toggle_enabled(target: &Target) -> RedisResult<()> {
 // consume
 // ---------------------------------------------------------------------------
 
-fn cmd_consume(
-    target: &Target,
-    events: Option<&str>,
-    from: &str,
+#[derive(Serialize)]
+struct ConsumerCheckpoint {
+    logical_events: i64,
+    target_logical_events: Option<i64>,
+    streams: usize,
+    done: bool,
+    idle_exit: bool,
+    updated_unix_ms: u128,
+}
+
+struct ConsumeOptions<'a> {
+    events: Option<&'a str>,
+    from: &'a str,
     count: Option<i64>,
+    quiet: bool,
+    idle_exit_ms: Option<u64>,
+    checkpoint: Option<&'a Path>,
+    read_count: usize,
+}
+
+fn write_consumer_checkpoint(
+    path: Option<&Path>,
+    logical_events: i64,
+    target_logical_events: Option<i64>,
+    streams: usize,
+    done: bool,
+    idle_exit: bool,
 ) -> RedisResult<()> {
+    let checkpoint = ConsumerCheckpoint {
+        logical_events,
+        target_logical_events,
+        streams,
+        done,
+        idle_exit,
+        updated_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    };
+    if let Some(path) = path {
+        let temporary = path.with_extension("tmp");
+        let json = serde_json::to_vec_pretty(&checkpoint).map_err(|error| {
+            RedisError::from((
+                ErrorKind::UnexpectedReturnType,
+                "could not encode consumer checkpoint",
+                error.to_string(),
+            ))
+        })?;
+        fs::write(&temporary, json)
+            .and_then(|_| fs::rename(&temporary, path))
+            .map_err(|error| {
+                RedisError::from((
+                    ErrorKind::Io,
+                    "could not write consumer checkpoint",
+                    error.to_string(),
+                ))
+            })?;
+    }
+    if done {
+        println!(
+            "{}",
+            serde_json::to_string(&checkpoint).expect("checkpoint serialization already succeeded")
+        );
+    }
+    Ok(())
+}
+
+fn cmd_consume(target: &Target, options: ConsumeOptions<'_>) -> RedisResult<()> {
     // A set of event names, e.g. {"set", "expired"}.
-    let wanted: Option<HashSet<String>> =
-        events.map(|s| s.split(',').map(|e| e.trim().to_string()).collect());
-    let from_zero = from == "0";
-    let limit = count.unwrap_or(i64::MAX);
+    let wanted: Option<HashSet<String>> = options
+        .events
+        .map(|s| s.split(',').map(|e| e.trim().to_string()).collect());
+    let from_zero = options.from == "0";
+    let limit = options.count.unwrap_or(i64::MAX);
 
     // The matched data streams for the current topology. Uses the keyspace
     // scan (issue #215) so a reshard's migrated old-tag streams are found on
@@ -359,14 +452,26 @@ fn cmd_consume(
 
     let streams = matched(target);
     if streams.is_empty() {
-        println!("no matching streams yet; produce some events first, then re-run");
+        if !options.quiet {
+            println!("no matching streams yet; produce some events first, then re-run");
+        }
+        write_consumer_checkpoint(
+            options.checkpoint,
+            0,
+            options.count,
+            0,
+            true,
+            options.idle_exit_ms.is_some(),
+        )?;
         return Ok(());
     }
-    println!(
-        "tailing {} stream(s): {}",
-        streams.len(),
-        streams.join(", ")
-    );
+    if !options.quiet {
+        println!(
+            "tailing {} stream(s): {}",
+            streams.len(),
+            streams.join(", ")
+        );
+    }
 
     let mut conn = target.open_rw()?;
     let mut reader = MergedReader::new(&mut conn, streams, from_zero);
@@ -378,25 +483,73 @@ fn cmd_consume(
     let rediscover_every = Duration::from_secs(5);
     let mut last_discovery = Instant::now();
     let mut seen = 0i64;
+    let mut idle_since = Instant::now();
+    write_consumer_checkpoint(
+        options.checkpoint,
+        seen,
+        options.count,
+        reader.streams().len(),
+        false,
+        false,
+    )?;
     loop {
-        let events = reader.poll_decoded(&mut conn, 200).map_err(|error| {
-            RedisError::from((
-                ErrorKind::UnexpectedReturnType,
-                "failed to decode event stream entry",
-                error.to_string(),
-            ))
-        })?;
+        let events = reader
+            .poll_decoded(&mut conn, options.read_count.max(1))
+            .map_err(|error| {
+                RedisError::from((
+                    ErrorKind::UnexpectedReturnType,
+                    "failed to decode event stream entry",
+                    error.to_string(),
+                ))
+            })?;
+        let was_idle = events.is_empty();
+        if !was_idle {
+            idle_since = Instant::now();
+        }
         for e in events {
-            println!("{e}");
+            if !options.quiet {
+                println!("{e}");
+            }
             seen += 1;
             if seen >= limit {
+                write_consumer_checkpoint(
+                    options.checkpoint,
+                    seen,
+                    options.count,
+                    reader.streams().len(),
+                    true,
+                    false,
+                )?;
                 return Ok(());
             }
+        }
+        write_consumer_checkpoint(
+            options.checkpoint,
+            seen,
+            options.count,
+            reader.streams().len(),
+            false,
+            false,
+        )?;
+        if was_idle
+            && options.idle_exit_ms.is_some_and(|milliseconds| {
+                idle_since.elapsed() >= Duration::from_millis(milliseconds)
+            })
+        {
+            write_consumer_checkpoint(
+                options.checkpoint,
+                seen,
+                options.count,
+                reader.streams().len(),
+                true,
+                true,
+            )?;
+            return Ok(());
         }
         if last_discovery.elapsed() >= rediscover_every {
             last_discovery = Instant::now();
             let added = reader.add_streams(&mut conn, &matched(target), true);
-            if !added.is_empty() {
+            if !options.quiet && !added.is_empty() {
                 println!(
                     "discovered {} new stream(s): {}",
                     added.len(),
@@ -404,7 +557,9 @@ fn cmd_consume(
                 );
             }
         }
-        sleep(Duration::from_millis(200));
+        if was_idle {
+            sleep(Duration::from_millis(200));
+        }
     }
 }
 
@@ -545,4 +700,78 @@ fn cmd_soak(target: &Target, count: i64, rate: i64) -> RedisResult<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consume_flags_parse_for_counting_audit() {
+        let cli = Cli::try_parse_from([
+            "eventstream-client",
+            "consume",
+            "--events",
+            "set",
+            "--from",
+            "0",
+            "--quiet",
+            "--idle-exit-ms",
+            "2000",
+            "--checkpoint",
+            "/tmp/consumer.json",
+            "--read-count",
+            "2048",
+        ])
+        .expect("parse counting consumer");
+
+        let Command::Consume {
+            events,
+            from,
+            count,
+            quiet,
+            idle_exit_ms,
+            checkpoint,
+            read_count,
+        } = cli.command
+        else {
+            panic!("expected consume command");
+        };
+        assert_eq!(events.as_deref(), Some("set"));
+        assert_eq!(from, "0");
+        assert_eq!(count, None);
+        assert!(quiet);
+        assert_eq!(idle_exit_ms, Some(2000));
+        assert_eq!(checkpoint.as_deref(), Some(Path::new("/tmp/consumer.json")));
+        assert_eq!(read_count, 2048);
+    }
+
+    #[test]
+    fn checkpoint_replaces_atomically_with_final_state() {
+        let path = std::env::temp_dir().join(format!(
+            "eventstream-consumer-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        write_consumer_checkpoint(Some(&path), 41, Some(42), 1, false, false)
+            .expect("write in-progress checkpoint");
+        write_consumer_checkpoint(Some(&path), 42, Some(42), 1, true, false)
+            .expect("write final checkpoint");
+
+        let checkpoint: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read checkpoint"))
+                .expect("parse checkpoint");
+        assert_eq!(checkpoint["logical_events"], 42);
+        assert_eq!(checkpoint["target_logical_events"], 42);
+        assert_eq!(checkpoint["streams"], 1);
+        assert_eq!(checkpoint["done"], true);
+        assert_eq!(checkpoint["idle_exit"], false);
+        assert!(!path.with_extension("tmp").exists());
+
+        fs::remove_file(path).expect("remove checkpoint");
+    }
 }

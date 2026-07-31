@@ -224,6 +224,25 @@ eventstream-client consume \
   --from 0
 ```
 
+For a counting audit or a long-running health probe, suppress per-event output
+and checkpoint decoded logical progress atomically:
+
+```sh
+eventstream-client consume \
+  --url redis://127.0.0.1:6379 \
+  --events set \
+  --from 0 \
+  --quiet \
+  --idle-exit-ms 2000 \
+  --checkpoint /var/run/eventstream-consumer.json
+```
+
+`--count N` exits after exactly `N` decoded logical events. Without a count,
+`--idle-exit-ms` turns a retained-stream audit into a bounded command. The
+checkpoint distinguishes a completed count from an idle exit and records the
+number of streams covered. `--read-count` controls physical entries per stream
+poll; one Preview envelope can expand into many logical events.
+
 ## Use a language example
 
 Small runnable consumers live under `examples/`:
