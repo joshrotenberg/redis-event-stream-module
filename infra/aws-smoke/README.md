@@ -207,8 +207,8 @@ single-node exercise:
 SOAK_MODULE_SOURCE_COMMIT=HEAD ./lab.sh soak
 ```
 
-The driver first calibrates 1, 2, 4, and 8 clients around 80,000 requests/s,
-then restarts the server for clean counters. Its seven phases contain sustained
+The driver calibrates 1 through 100 clients around 80,000 requests/s, then
+restarts the server for clean counters. Its seven phases contain sustained
 load, two 2x bursts, a paused decoder-aware consumer, and a catch-up interval.
 The first-party client decodes mixed fixed and `batch-v1` entries without
 printing each event and atomically checkpoints its logical count.
@@ -221,7 +221,10 @@ After the main run, two isolated probes use unique source keys:
   process, and separately reports acknowledged commands, durable source keys,
   decoded logical events, and the missing-event count.
 
-The default stream retention is 100,000 physical entries. Telemetry samples
+The default stream retention is 750,000 physical entries. This intentionally
+bounds memory while leaving headroom for the decoder pause: the logical
+capacity of a physical-entry limit depends on the envelope occupancy achieved
+by the workload, not merely the configured batch maximum. Telemetry samples
 Redis CPU, RSS, stream length/memory, worker queue depth, consumer lag, and
 load-generator container use every five seconds. Normalized and raw results
 land under `results/<UTC-run-id>-soak/`.

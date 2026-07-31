@@ -9,7 +9,7 @@ target_rps="${SOAK_TARGET_RPS:-80000}"
 calibration_requests="${SOAK_CALIBRATION_REQUESTS:-500000}"
 payload="${SOAK_PAYLOAD:-64}"
 keyspace="${SOAK_KEYSPACE:-100000}"
-maxlen="${SOAK_MAXLEN:-100000}"
+maxlen="${SOAK_MAXLEN:-750000}"
 queue_capacity="${SOAK_QUEUE_CAPACITY:-1048576}"
 batch_size="${SOAK_BATCH_SIZE:-128}"
 max_wait_ms="${SOAK_MAX_WAIT_MS:-1}"
@@ -441,19 +441,6 @@ jq -n \
   --slurpfile abrupt_audit "$results_dir/abrupt-audit.json" \
   -f "$root_dir/scripts/assemble-soak.jq" >"$results_dir/result.json"
 
-jq -e '
-  .main.correctness.capture_settled and
-  .main.correctness.consumer_completed and
-  .main.correctness.source_to_forwarded_exact and
-  .main.correctness.source_to_consumer_exact and
-  (.main.correctness.events_lost == 0) and
-  (.main.correctness.dropped == 0) and
-  (.main.correctness.handler_panics == 0) and
-  (.main.correctness.async_worker_errors == 0) and
-  .graceful.exact and
-  .abrupt.accounting_valid
-' "$results_dir/result.json" >/dev/null
-
 echo
 jq '{
   run_id,
@@ -480,3 +467,16 @@ jq '{
 }' "$results_dir/result.json"
 echo
 echo "result: $results_dir/result.json"
+
+jq -e '
+  .main.correctness.capture_settled and
+  .main.correctness.consumer_completed and
+  .main.correctness.source_to_forwarded_exact and
+  .main.correctness.source_to_consumer_exact and
+  (.main.correctness.events_lost == 0) and
+  (.main.correctness.dropped == 0) and
+  (.main.correctness.handler_panics == 0) and
+  (.main.correctness.async_worker_errors == 0) and
+  .graceful.exact and
+  .abrupt.accounting_valid
+' "$results_dir/result.json" >/dev/null
