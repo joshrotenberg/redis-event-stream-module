@@ -17,7 +17,7 @@ use crate::cluster::{
     DROPPED_MIGRATING, DROPPED_NO_OWNED_SLOT, NODE_TAG, PER_NODE, REPINS, REPINS_PROBE_DETECTED,
 };
 use crate::config::ENABLED;
-use crate::markers::CONTROL_MARKERS;
+use crate::markers::{CONTROL_CHECKPOINTS, CONTROL_MARKERS};
 // INFO-section-only: `info_stats` is `#[cfg(not(test))]`, so these stay gated.
 #[cfg(not(test))]
 use redis_module::{InfoContext, RedisResult};
@@ -398,6 +398,18 @@ pub(crate) enum StatValue {
     Text(String),
 }
 
+/// Failed destination/control writes across the classified `dropped_*`
+/// reasons. Kept as one helper so INFO/STATS and durable control checkpoints
+/// cannot disagree about the aggregate.
+pub(crate) fn dropped_total() -> u64 {
+    DROPPED_XADD_ERROR.load(Ordering::Relaxed)
+        + DROPPED_OOM.load(Ordering::Relaxed)
+        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
+        + DROPPED_MIGRATING.load(Ordering::Relaxed)
+        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
+        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed)
+}
+
 /// The complete, ordered counter surface, read once. This is the single source
 /// of truth for all three emitters — the `INFO eventstream` section, the
 /// `EVENTSTREAM.STATS` reply, and the deinit final-counters log — so they cannot
@@ -407,12 +419,7 @@ pub(crate) enum StatValue {
 pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
     use StatValue::{Int, Text};
     let load = |c: &AtomicU64| Int(c.load(Ordering::Relaxed) as i64);
-    let dropped = DROPPED_XADD_ERROR.load(Ordering::Relaxed)
-        + DROPPED_OOM.load(Ordering::Relaxed)
-        + DROPPED_DEFER_ERROR.load(Ordering::Relaxed)
-        + DROPPED_MIGRATING.load(Ordering::Relaxed)
-        + DROPPED_MAX_STREAMS.load(Ordering::Relaxed)
-        + DROPPED_ENCODE_ERROR.load(Ordering::Relaxed);
+    let dropped = dropped_total();
     vec![
         ("enabled", Int(ENABLED.load(Ordering::Relaxed) as i64)),
         (
@@ -438,6 +445,7 @@ pub(crate) fn stats_snapshot() -> Vec<(&'static str, StatValue)> {
         ("active_streams", load(&ACTIVE_STREAMS)),
         ("registry_errors", load(&REGISTRY_ERRORS)),
         ("control_markers", load(&CONTROL_MARKERS)),
+        ("control_checkpoints", load(&CONTROL_CHECKPOINTS)),
         ("handler_panics", load(&HANDLER_PANICS)),
         ("async_enqueued", load(&ASYNC_ENQUEUED)),
         ("async_fallbacks", load(&ASYNC_FALLBACKS)),

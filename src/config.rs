@@ -117,6 +117,37 @@ pub(crate) static ASYNC_MAX_WAIT_MS: AsyncPositiveConfig = AsyncPositiveConfig {
     max: 60_000,
 };
 
+/// Optional durable status cadence for the `#control` stream (issue #277).
+/// Zero disables checkpoints. Positive values are bounded away from zero so a
+/// typo cannot turn a diagnostic surface into a main-thread write storm.
+pub(crate) static CONTROL_CHECKPOINT_MS: ControlCheckpointMsConfig = ControlCheckpointMsConfig {
+    value: AtomicI64::new(0),
+};
+
+const MIN_CONTROL_CHECKPOINT_MS: i64 = 100;
+const MAX_CONTROL_CHECKPOINT_MS: i64 = 86_400_000;
+
+pub(crate) struct ControlCheckpointMsConfig {
+    pub(crate) value: AtomicI64,
+}
+
+impl ConfigurationValue<i64> for ControlCheckpointMsConfig {
+    fn get(&self, _ctx: &ConfigurationContext) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, _ctx: &ConfigurationContext, val: i64) -> Result<(), RedisError> {
+        if val != 0 && !(MIN_CONTROL_CHECKPOINT_MS..=MAX_CONTROL_CHECKPOINT_MS).contains(&val) {
+            return Err(RedisError::String(format!(
+                "control-checkpoint-ms must be 0 (disabled) or between \
+                 {MIN_CONTROL_CHECKPOINT_MS} and {MAX_CONTROL_CHECKPOINT_MS}, got {val}"
+            )));
+        }
+        self.value.store(val, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 pub(crate) static MAXLEN: MaxlenConfig = MaxlenConfig {
     value: AtomicI64::new(10_000),
 };

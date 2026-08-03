@@ -204,6 +204,51 @@ fn per_node_single_shard_captures() {
 }
 
 #[test]
+fn per_node_checkpoint_schedule_uses_each_nodes_tagged_control_stream() {
+    let cluster = TestCluster::try_start(
+        3,
+        Some(&[
+            "cluster-streams",
+            "per-node",
+            "control-checkpoint-ms",
+            "100",
+        ]),
+    )
+    .expect("checkpoint-enabled cluster forms");
+
+    wait_until(Duration::from_secs(10), "per-node checkpoints", || {
+        (0..cluster.num_masters()).all(|i| {
+            cluster.node_info_field(i, "control_checkpoints") >= 1
+                && !cluster.node_pinned_tag(i).is_empty()
+        })
+    });
+
+    for i in 0..cluster.num_masters() {
+        let tag = cluster.node_pinned_tag(i);
+        let tagged = format!("events:{{{tag}}}#control");
+        let len = cluster
+            .node_run(i, &["XLEN", &tagged])
+            .unwrap_or_default()
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
+        assert!(len >= 2, "node {i} should have loaded + checkpoint");
+    }
+    // Route this key-level assertion through the cluster connection: a direct
+    // EXISTS against a non-owner correctly returns MOVED, which is not evidence
+    // that the key exists.
+    let mut conn = cluster.cluster_conn();
+    let untagged_exists: bool = redis::cmd("EXISTS")
+        .arg("events:#control")
+        .query(&mut conn)
+        .expect("cluster-routed EXISTS");
+    assert!(
+        !untagged_exists,
+        "must not create an untagged control stream"
+    );
+}
+
+#[test]
 fn per_node_repins_after_slot_migration() {
     // A reshard that moves a node's pinned slot must not stop capture: the node
     // detects the local-refusal on its next mirrored write, re-pins to a slot it

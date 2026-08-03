@@ -891,17 +891,107 @@ pub fn first_id_of_xrange(v: &Value) -> Option<String> {
 /// missing here" windows from these and re-run discovery when they see a
 /// `repinned` marker after a reshard moved a node's pinned slot (SPEC.md
 /// sections 9-10).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GapMarker {
     /// The `#control` stream the marker was read from.
     pub stream: String,
     /// The marker's entry ID.
     pub id: String,
-    /// `loaded`, `unloading`, `enabled`, `disabled`, `repinned`, or `flushed`.
+    /// Lifecycle actions plus the additive `checkpoint` status action.
     pub action: String,
     /// For `flushed`, the flushed database (`-1` == `FLUSHALL`); else `None`.
     pub db: Option<i64>,
     /// The module version that wrote the marker.
     pub module_version: Option<String>,
+    /// Opaque identity for the module load that wrote this control entry.
+    pub generation: Option<String>,
+    /// Checkpoint trigger (`periodic` today); absent on lifecycle markers.
+    pub reason: Option<String>,
+    /// Configured checkpoint cadence; absent on lifecycle markers.
+    pub checkpoint_ms: Option<u64>,
+    /// Logical events resolved to either `forwarded` or `events_lost`.
+    pub resolved_events: Option<u64>,
+    /// Canonical logical events successfully represented in the data streams.
+    pub forwarded: Option<u64>,
+    /// Selected logical events known not to have a canonical record.
+    pub events_lost: Option<u64>,
+    /// Failed destination/control writes across all drop reasons.
+    pub dropped: Option<u64>,
+    /// Logical events accepted by the Preview async queue in this generation.
+    pub async_enqueued: Option<u64>,
+    /// Accepted Preview events still queued at checkpoint time.
+    pub async_queue_depth: Option<i64>,
+    /// Preview logical events removed from the queue for processing.
+    pub async_drain_events: Option<u64>,
+    /// Preview worker failures observed in this generation.
+    pub async_worker_errors: Option<u64>,
+    /// Panics caught at module callback boundaries.
+    pub handler_panics: Option<u64>,
+    /// Unix seconds of the most recent classified write failure, or zero.
+    pub last_error_time: Option<u64>,
+}
+
+/// How a new control-stream generation followed the prior one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestartBoundaryKind {
+    /// The old generation wrote `unloading` before the new `loaded` marker.
+    Graceful,
+    /// No durable closing marker survived; loss is possible but unproven.
+    Uncertain,
+}
+
+/// One generation transition inferred from a single `#control` stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestartBoundary {
+    pub stream: String,
+    pub id: String,
+    pub previous_generation: String,
+    pub generation: String,
+    pub kind: RestartBoundaryKind,
+}
+
+/// Infer graceful versus uncertain restarts from parsed control entries.
+/// Markers without generation IDs are retained for compatibility but cannot
+/// participate in generation assessment.
+pub fn assess_restart_boundaries(markers: &[GapMarker]) -> Vec<RestartBoundary> {
+    let mut state: HashMap<&str, (String, bool)> = HashMap::new();
+    let mut out = Vec::new();
+    for marker in markers {
+        let Some(generation) = marker.generation.as_ref() else {
+            continue;
+        };
+        match state.get_mut(marker.stream.as_str()) {
+            None => {
+                state.insert(marker.stream.as_str(), (generation.clone(), false));
+            }
+            Some((previous, closed)) if previous != generation => {
+                if marker.action == "loaded" {
+                    out.push(RestartBoundary {
+                        stream: marker.stream.clone(),
+                        id: marker.id.clone(),
+                        previous_generation: previous.clone(),
+                        generation: generation.clone(),
+                        kind: if *closed {
+                            RestartBoundaryKind::Graceful
+                        } else {
+                            RestartBoundaryKind::Uncertain
+                        },
+                    });
+                }
+                *previous = generation.clone();
+                *closed = false;
+            }
+            Some(_) => {}
+        }
+        if marker.action == "unloading" {
+            if let Some((current, closed)) = state.get_mut(marker.stream.as_str()) {
+                if current == generation {
+                    *closed = true;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Read gap markers from every `#control` stream in the deployment, starting
@@ -939,12 +1029,27 @@ pub fn read_gap_markers(target: &Target, from: &str) -> RedisResult<Vec<GapMarke
                     Some(other) => Some(format!("{other:?}")),
                     None => None,
                 };
+                let u64_field = |name: &str| field(name).and_then(|v| v.parse().ok());
+                let i64_field = |name: &str| field(name).and_then(|v| v.parse().ok());
                 out.push(GapMarker {
                     stream: stream.clone(),
                     id: id.id.clone(),
                     action: field("action").unwrap_or_default(),
                     db: field("db").and_then(|d| d.parse().ok()),
                     module_version: field("module-version"),
+                    generation: field("generation"),
+                    reason: field("reason"),
+                    checkpoint_ms: u64_field("checkpoint-ms"),
+                    resolved_events: u64_field("resolved-events"),
+                    forwarded: u64_field("forwarded"),
+                    events_lost: u64_field("events-lost"),
+                    dropped: u64_field("dropped"),
+                    async_enqueued: u64_field("async-enqueued"),
+                    async_queue_depth: i64_field("async-queue-depth"),
+                    async_drain_events: u64_field("async-drain-events"),
+                    async_worker_errors: u64_field("async-worker-errors"),
+                    handler_panics: u64_field("handler-panics"),
+                    last_error_time: u64_field("last-error-time"),
                 });
             }
         }
@@ -1209,5 +1314,54 @@ id4 127.0.0.1:7004@17004 master,fail - 0 0 4 disconnected\n";
             masters_from_cluster_nodes(nodes),
             vec!["127.0.0.1:7001".to_string(), "127.0.0.1:7002".to_string()]
         );
+    }
+
+    fn control_marker(action: &str, generation: &str, id: &str) -> GapMarker {
+        GapMarker {
+            stream: "events:#control".to_owned(),
+            id: id.to_owned(),
+            action: action.to_owned(),
+            db: None,
+            module_version: Some("0.6.0".to_owned()),
+            generation: Some(generation.to_owned()),
+            reason: None,
+            checkpoint_ms: None,
+            resolved_events: None,
+            forwarded: None,
+            events_lost: None,
+            dropped: None,
+            async_enqueued: None,
+            async_queue_depth: None,
+            async_drain_events: None,
+            async_worker_errors: None,
+            handler_panics: None,
+            last_error_time: None,
+        }
+    }
+
+    #[test]
+    fn restart_assessment_distinguishes_graceful_and_uncertain() {
+        let markers = vec![
+            control_marker("loaded", "a", "1-0"),
+            control_marker("checkpoint", "a", "2-0"),
+            control_marker("loaded", "b", "3-0"),
+            control_marker("unloading", "b", "4-0"),
+            control_marker("loaded", "c", "5-0"),
+        ];
+        let boundaries = assess_restart_boundaries(&markers);
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0].kind, RestartBoundaryKind::Uncertain);
+        assert_eq!(boundaries[0].previous_generation, "a");
+        assert_eq!(boundaries[0].generation, "b");
+        assert_eq!(boundaries[1].kind, RestartBoundaryKind::Graceful);
+        assert_eq!(boundaries[1].previous_generation, "b");
+        assert_eq!(boundaries[1].generation, "c");
+    }
+
+    #[test]
+    fn legacy_markers_without_generation_are_not_overinterpreted() {
+        let mut legacy = control_marker("loaded", "unused", "1-0");
+        legacy.generation = None;
+        assert!(assess_restart_boundaries(&[legacy]).is_empty());
     }
 }

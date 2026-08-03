@@ -9,6 +9,7 @@ use eventstream_client::{
     counter_sum, discover, discover_all, discover_streams, node_counters, read_gap_markers,
     scan_streams, MergedReader, Target,
 };
+use redis::Commands;
 
 #[test]
 fn standalone_client_preserves_binary_entries_and_observability() {
@@ -69,7 +70,40 @@ fn standalone_client_preserves_binary_entries_and_observability() {
     assert!(reader.poll(&mut conn, 100).is_empty());
 
     let markers = read_gap_markers(&target, "0").expect("read control markers");
-    assert!(markers.iter().any(|marker| marker.action == "loaded"));
+    let loaded = markers
+        .iter()
+        .find(|marker| marker.action == "loaded")
+        .expect("loaded marker");
+    assert_eq!(loaded.generation.as_deref().map(str::len), Some(32));
+}
+
+#[test]
+fn client_parses_durable_control_checkpoint() {
+    let server = TestServer::start(&["events", "set", "control-checkpoint-ms", "100"]);
+    let mut redis = server.conn();
+    let _: () = redis.set("checkpointed", "1").expect("SET");
+    wait_until(CAPTURE_WAIT, "checkpoint after capture", || {
+        info_field(&mut redis, "control_checkpoints") >= 1
+            && stream_field_strings(&mut redis, CONTROL, "forwarded")
+                .last()
+                .is_some_and(|value| value == "1")
+    });
+
+    let url = format!("redis://127.0.0.1:{}/", server.port);
+    let target = Target::detect(&url, "events:").expect("detect target");
+    let markers = read_gap_markers(&target, "0").expect("read control markers");
+    let checkpoint = markers
+        .iter()
+        .rev()
+        .find(|marker| marker.action == "checkpoint")
+        .expect("checkpoint marker");
+    assert_eq!(checkpoint.reason.as_deref(), Some("periodic"));
+    assert_eq!(checkpoint.checkpoint_ms, Some(100));
+    assert_eq!(checkpoint.resolved_events, Some(1));
+    assert_eq!(checkpoint.forwarded, Some(1));
+    assert_eq!(checkpoint.events_lost, Some(0));
+    assert_eq!(checkpoint.async_queue_depth, Some(0));
+    assert_eq!(checkpoint.generation.as_deref().map(str::len), Some(32));
 }
 
 #[test]

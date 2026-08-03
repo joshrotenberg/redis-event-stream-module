@@ -54,9 +54,11 @@ with the keyspace change. Consumers use normal Redis commands such as `XREAD`,
 | Recover events that occurred while Redis or the module was down | Not a fit |
 | Provide exactly-once delivery | Not a fit |
 
-This is a live mirror, not change data capture, an application outbox, or a
-write-ahead log. Retention is bounded, and crash durability is whatever the
-Redis persistence configuration provides.
+This is a best-effort, gap-aware live feed, not change data capture, an
+application outbox, a write-ahead log, or a Kafka replacement. Exact capture
+is the healthy-path target; definite loss and uncertain restart windows are
+observable, not recoverable by the module. Retention is bounded, and crash
+durability is whatever the Redis persistence configuration provides.
 
 ## Supported environments
 

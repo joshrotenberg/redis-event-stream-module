@@ -9,7 +9,7 @@ definitions.
 
 {{#include ../../../SPEC.md:commands}}
 
-## Gap markers
+## Control stream: lifecycle markers and checkpoints
 
 {{#include ../../../SPEC.md:gap-markers}}
 

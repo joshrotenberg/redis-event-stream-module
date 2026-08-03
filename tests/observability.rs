@@ -40,6 +40,7 @@ fn info_section_has_all_fields() {
         "active_streams",
         "registry_errors",
         "control_markers",
+        "control_checkpoints",
         "handler_panics",
         "async_enqueued",
         "async_fallbacks",

@@ -81,6 +81,157 @@ fn disabled_enabled_pair() {
     // Marker entries carry the module version.
     let versions = stream_field_strings(&mut c, CONTROL, "module-version");
     assert!(versions.iter().all(|v| !v.is_empty()));
+    let generations = stream_field_strings(&mut c, CONTROL, "generation");
+    assert_eq!(generations.len(), 3);
+    assert!(generations
+        .iter()
+        .all(|g| { g.len() == 32 && g.as_bytes().iter().all(u8::is_ascii_hexdigit) }));
+    assert!(generations.iter().all(|g| g == &generations[0]));
+}
+
+#[test]
+fn checkpoint_schedule_flushes_loaded_and_persists_status_while_idle() {
+    let s = TestServer::start(&["events", "set", "control-checkpoint-ms", "100"]);
+    let mut c = s.conn();
+
+    wait_until(CAPTURE_WAIT, "idle loaded marker and checkpoint", || {
+        xlen(&mut c, CONTROL) >= 2
+    });
+    let actions = marker_actions(&mut c);
+    assert_eq!(actions.first().map(String::as_str), Some("loaded"));
+    assert!(actions[1..].iter().all(|action| action == "checkpoint"));
+    assert_eq!(info_field(&mut c, "control_markers"), 1);
+    assert!(info_field(&mut c, "control_checkpoints") >= 1);
+
+    let generations = stream_field_strings(&mut c, CONTROL, "generation");
+    assert!(generations.iter().all(|g| g == &generations[0]));
+    assert_eq!(
+        stream_field_strings(&mut c, CONTROL, "checkpoint-ms")
+            .last()
+            .map(String::as_str),
+        Some("100")
+    );
+    assert_eq!(
+        stream_field_strings(&mut c, CONTROL, "events-lost")
+            .last()
+            .map(String::as_str),
+        Some("0")
+    );
+
+    let _: () = c.set("captured", "1").expect("SET");
+    wait_until(CAPTURE_WAIT, "checkpoint observes capture", || {
+        stream_field_strings(&mut c, CONTROL, "forwarded")
+            .last()
+            .is_some_and(|value| value == "1")
+    });
+    assert_eq!(
+        stream_field_strings(&mut c, CONTROL, "resolved-events")
+            .last()
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
+fn checkpoint_persists_a_definite_loss_transition() {
+    let s = TestServer::start(&[
+        "events",
+        "set,lpush",
+        "max-streams",
+        "1",
+        "control-checkpoint-ms",
+        "100",
+    ]);
+    let mut c = s.conn();
+
+    let _: () = c.set("first", "1").expect("SET creates the one stream");
+    wait_until(CAPTURE_WAIT, "healthy checkpoint", || {
+        stream_field_strings(&mut c, CONTROL, "events-lost")
+            .last()
+            .is_some_and(|value| value == "0")
+    });
+
+    // A second event type would require another stream and is rejected by the
+    // configured cap. The next durable checkpoint must expose that definite
+    // logical loss rather than relying only on process-local INFO counters.
+    let _: () = c.lpush("second", "1").expect("LPUSH source command");
+    wait_until(CAPTURE_WAIT, "loss checkpoint", || {
+        stream_field_strings(&mut c, CONTROL, "events-lost")
+            .last()
+            .is_some_and(|value| value == "1")
+    });
+    assert_eq!(
+        stream_field_strings(&mut c, CONTROL, "resolved-events")
+            .last()
+            .map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        stream_field_strings(&mut c, CONTROL, "dropped")
+            .last()
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
+fn checkpoint_history_obeys_control_stream_retention() {
+    let s = TestServer::start(&[
+        "control-checkpoint-ms",
+        "100",
+        "maxlen-overrides",
+        "#control=1",
+    ]);
+    let mut c = s.conn();
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("stream-node-max-entries")
+        .arg(1)
+        .query(&mut c)
+        .expect("CONFIG SET stream-node-max-entries");
+
+    wait_until(CAPTURE_WAIT, "several checkpoint writes", || {
+        info_field(&mut c, "control_checkpoints") >= 5
+    });
+    let written = info_field(&mut c, "control_checkpoints") + 1; // loaded
+    let retained = xlen(&mut c, CONTROL);
+    assert!(
+        retained < written,
+        "control retention must erase old checkpoints: retained={retained}, written={written}"
+    );
+    assert!(
+        retained <= 2,
+        "approximate #control=1 retention may overshoot by one node, got {retained}"
+    );
+    assert!(
+        marker_actions(&mut c)
+            .iter()
+            .all(|action| action == "checkpoint"),
+        "the old loaded boundary should have been trimmed"
+    );
+}
+
+#[test]
+fn checkpoint_cadence_is_opt_in_bounded_and_load_time_only() {
+    let err = TestServer::try_start(&["control-checkpoint-ms", "99"])
+        .err()
+        .expect("sub-100ms checkpoint cadence must abort module load");
+    assert!(
+        err.contains("control-checkpoint-ms must be 0 (disabled) or between 100"),
+        "unexpected validation error: {err}"
+    );
+
+    let s = TestServer::start(&["control-checkpoint-ms", "100"]);
+    let mut c = s.conn();
+    let result = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("eventstream.control-checkpoint-ms")
+        .arg("200")
+        .query::<()>(&mut c);
+    assert!(
+        result.is_err(),
+        "checkpoint schedule ownership is immutable"
+    );
 }
 
 #[test]
@@ -96,6 +247,28 @@ fn unloading_marker_on_module_unload() {
         .query(&mut c)
         .expect("MODULE UNLOAD");
     assert_eq!(marker_actions(&mut c), vec!["loaded", "unloading"]);
+    let generations = stream_field_strings(&mut c, CONTROL, "generation");
+    assert_eq!(generations.len(), 2);
+    assert_eq!(generations[0], generations[1]);
+}
+
+#[test]
+fn checkpoint_cron_does_not_block_module_unload() {
+    let s = TestServer::start(&["control-checkpoint-ms", "100"]);
+    let mut c = s.conn();
+    wait_until(CAPTURE_WAIT, "checkpoint before unload", || {
+        info_field(&mut c, "control_checkpoints") >= 1
+    });
+    let _: () = redis::cmd("MODULE")
+        .arg("UNLOAD")
+        .arg("eventstream")
+        .query(&mut c)
+        .expect("MODULE UNLOAD");
+    let after_unload = xlen(&mut c, CONTROL);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let pong: String = redis::cmd("PING").query(&mut c).expect("server alive");
+    assert_eq!(pong, "PONG");
+    assert_eq!(xlen(&mut c, CONTROL), after_unload);
 }
 
 #[test]
@@ -216,6 +389,7 @@ fn crash_leaves_no_closing_marker() {
     // tests above — SPEC.md section 9 documents that the two are permanently
     // indistinguishable from the node's own control stream.
     let s = TestServer::start_aof(&["events", "set"]);
+    let old_generation;
     {
         let mut c = s.conn();
         let _: () = c.set("x", "1").expect("SET");
@@ -223,6 +397,10 @@ fn crash_leaves_no_closing_marker() {
         // already written the AOF buffer to the page cache, which survives a
         // process kill (only an OS crash would need the fsync).
         wait_until(CAPTURE_WAIT, "loaded marker", || xlen(&mut c, CONTROL) == 1);
+        old_generation = stream_field_strings(&mut c, CONTROL, "generation")
+            .into_iter()
+            .next()
+            .expect("loaded generation");
     }
     s.kill9();
 
@@ -239,6 +417,10 @@ fn crash_leaves_no_closing_marker() {
         xlen(&mut c, CONTROL) == 2
     });
     assert_eq!(marker_actions(&mut c), vec!["loaded", "loaded"]);
+    let generations = stream_field_strings(&mut c, CONTROL, "generation");
+    assert_eq!(generations.len(), 2);
+    assert_eq!(generations[0], old_generation);
+    assert_ne!(generations[0], generations[1]);
 }
 
 #[test]

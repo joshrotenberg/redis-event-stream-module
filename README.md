@@ -30,9 +30,11 @@ Preview capabilities.
 - **Detect capture gaps.** Counters and a control stream expose disabled,
   reconfigured, or failed capture.
 
-This is a live mirror, not permanent change data capture, an application
-outbox, or a write-ahead log. Retention is bounded, and crash durability is
-whatever the Redis persistence configuration provides.
+This is a best-effort, gap-aware live feed, not permanent change data capture,
+an application outbox, a write-ahead log, or a Kafka replacement. Exact
+capture is the healthy-path target; definite loss and uncertain restart
+windows are signals consumers must handle. Retention is bounded, and crash
+durability is whatever the Redis persistence configuration provides.
 
 ## Try it in 60 seconds
 
@@ -115,6 +117,9 @@ defaults and validation.
 - Gap markers identify when capture was incomplete, not which keys were
   missed. An expired key is already gone, so exact reconciliation requires an
   independent application index or source of truth.
+- Optional `#control` checkpoints persist generation-local counts and make an
+  unclosed restart window machine-readable; they narrow uncertainty but cannot
+  prove an exact missing count.
 - Replication and AOF/RDB settings determine crash and failover durability.
 - Cluster mode produces node-local tagged streams that consumers must discover
   and merge.
