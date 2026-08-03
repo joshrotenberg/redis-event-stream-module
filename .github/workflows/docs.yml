@@ -35,15 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install mdBook
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: mdbook@0.5.3
       - name: Install mdbook-lint
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: mdbook-lint@0.15.0
       - name: Install lychee
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: lychee@0.24.2
       - name: Lint Markdown
