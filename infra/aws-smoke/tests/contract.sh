@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fixture_dir="$root_dir/tests/fixtures"
+test_dir="$(mktemp -d)"
+
+cleanup() {
+  rm -rf "$test_dir"
+}
+trap cleanup EXIT
+
+BENCH_PLAN_ONLY=yes \
+RESULTS_DIR="$test_dir/benchmark" \
+RUN_ID=contract-test \
+  "$root_dir/lab.sh" run >"$test_dir/benchmark-plan.txt"
+awk '
+  NR == 1 && $1 == "order" { header = 1 }
+  NR > 1 && $2 ~ /^s[012]/ { trials += 1 }
+  END { exit !(header && trials == 3) }
+' "$test_dir/benchmark-plan.txt"
+
+SOAK_PLAN_ONLY=yes RUN_ID=contract-soak-test \
+  "$root_dir/lab.sh" soak >"$test_dir/soak-plan.json"
+jq -e '
+  .soak_seconds == 1800 and
+  (.phase_percentages | map(.percent) | add) == 100 and
+  (.restart_probe.modes | length) == 2
+' "$test_dir/soak-plan.json" >/dev/null
+
+jq -n \
+  --arg schema_version 1 \
+  --arg collected_at 2026-08-03T12:00:00Z \
+  --arg server_id i-server \
+  --arg loadgen_id i-loadgen \
+  --arg region us-west-2 \
+  --arg availability_zone us-west-2a \
+  --arg vpc_id vpc-test \
+  --arg subnet_id subnet-test \
+  --arg server_private_ip 10.87.0.10 \
+  --arg expiry_stop_schedule_arn arn:aws:scheduler:test \
+  --arg expires_at 2026-08-03T16:00:00Z \
+  --arg root_volume_type gp3 \
+  --argjson root_volume_gib 16 \
+  --slurpfile server_host "$fixture_dir/server-host.json" \
+  --slurpfile loadgen_host "$fixture_dir/loadgen-host.json" \
+  --slurpfile instances "$fixture_dir/instances.json" \
+  --slurpfile volumes "$fixture_dir/volumes.json" \
+  -f "$root_dir/scripts/assemble-environment.jq" \
+  >"$test_dir/environment.json"
+
+jq -e '
+  .schema_version == 1 and
+  .topology.kind == "standalone" and
+  .hosts.server.intrinsic_latency.max_us == 4 and
+  .hosts.load_generator.private_network_ping.p99_ms == 0.04 and
+  (.instances | length) == 2 and
+  (.volumes | length) == 2 and
+  .hard_stop.scheduler_arn == "arn:aws:scheduler:test"
+' "$test_dir/environment.json" >/dev/null

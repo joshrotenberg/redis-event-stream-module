@@ -45,10 +45,13 @@ def telemetry_analysis($samples):
     server_instance_type: $server_instance_type,
     loadgen_instance_type: $loadgen_instance_type,
     module_image: $module_image,
-    module_artifact: ($module_artifact + {git_commit: $git_commit}),
-    consumer_artifact: ($client_artifact + {git_commit: $git_commit}),
+    module_build_profile: "release",
+    module_git_commit: $module_artifact.git_commit,
+    module_artifact: $module_artifact,
+    consumer_artifact: $client_artifact,
     loadgen_image: $loadgen_image,
-    expires_at: $expires_at
+    expires_at: $expires_at,
+    lab: $lab_environment[0]
   },
   plan: $plan[0],
   calibration: $calibration[0],

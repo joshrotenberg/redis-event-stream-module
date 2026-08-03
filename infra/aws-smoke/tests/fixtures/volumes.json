@@ -1,0 +1,22 @@
+{
+  "Volumes": [
+    {
+      "VolumeId": "vol-server",
+      "Attachments": [{"InstanceId": "i-server", "Device": "/dev/xvda"}],
+      "VolumeType": "gp3",
+      "Size": 16,
+      "Iops": 3000,
+      "Throughput": 125,
+      "Encrypted": true
+    },
+    {
+      "VolumeId": "vol-loadgen",
+      "Attachments": [{"InstanceId": "i-loadgen", "Device": "/dev/xvda"}],
+      "VolumeType": "gp3",
+      "Size": 16,
+      "Iops": 3000,
+      "Throughput": 125,
+      "Encrypted": true
+    }
+  ]
+}

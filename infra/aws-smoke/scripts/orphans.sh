@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-region="${AWS_REGION:-us-west-2}"
+region="${AWS_REGION:-${TF_VAR_aws_region:-us-west-2}}"
 if [[ $# -gt 0 ]]; then
   region="$1"
 fi

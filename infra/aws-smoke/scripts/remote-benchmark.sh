@@ -28,11 +28,34 @@ redis_cli=(
   docker run --rm --network host "$loadgen_image"
   redis-cli -h "$server_ip" -p 6379 --raw
 )
+redis_cli_json=(
+  docker run --rm --network host "$loadgen_image"
+  redis-cli -h "$server_ip" -p 6379 --json
+)
 
 if ! "${redis_cli[@]}" PING | grep -q PONG; then
   echo "Redis at $server_ip did not answer PING" >&2
   exit 1
 fi
+
+server_info="$("${redis_cli[@]}" INFO server | tr -d '\r')"
+server_config_json="$(
+  "${redis_cli_json[@]}" CONFIG GET '*' |
+    jq -c '
+      if type == "array" then
+        . as $items |
+        reduce range(0; length; 2) as $index
+          ({}; .[$items[$index]] = $items[$index + 1])
+      elif type == "object" then .
+      else error("unexpected CONFIG GET JSON shape")
+      end
+    '
+)"
+generator_command="$(
+  jq -cn --args '$ARGS.positional' -- \
+    redis-benchmark -h "$server_ip" -p 6379 -t set -n "$requests" \
+    -c "$clients" --threads "$threads" -d "$payload" -r "$keyspace" --csv
+)"
 
 cpu_before="$("${redis_cli[@]}" INFO cpu | tr -d '\r')"
 started_ns="$(date +%s%N)"
@@ -263,6 +286,7 @@ fi
 jq -n \
   --arg scenario "$scenario" \
   --arg test "$test_name" \
+  --argjson generator_command "$generator_command" \
   --argjson requests "$requests" \
   --argjson clients "$clients" \
   --argjson threads "$threads" \
@@ -281,6 +305,12 @@ jq -n \
   --argjson main_thread_core_percent "$main_thread_core_percent" \
   --argjson total_cpu_seconds "$total_cpu_seconds" \
   --argjson total_core_percent "$total_core_percent" \
+  --arg redis_version "$(redis_info_field "$server_info" redis_version)" \
+  --arg redis_mode "$(redis_info_field "$server_info" redis_mode)" \
+  --arg os "$(redis_info_field "$server_info" os)" \
+  --arg arch_bits "$(redis_info_field "$server_info" arch_bits)" \
+  --arg process_supervised "$(redis_info_field "$server_info" process_supervised)" \
+  --argjson redis_configuration "$server_config_json" \
   --argjson used_memory_bytes \
     "$(redis_info_field "$memory_after" used_memory)" \
   --argjson used_memory_rss_bytes \
@@ -314,6 +344,7 @@ jq -n \
     scenario: $scenario,
     workload: {
       test: $test,
+      generator_command: $generator_command,
       requests: $requests,
       clients: $clients,
       threads: $threads,
@@ -332,6 +363,17 @@ jq -n \
       memory_peak_mib: $memory_peak_mib
     },
     server: {
+      redis_version: $redis_version,
+      redis_mode: $redis_mode,
+      os: $os,
+      arch_bits: $arch_bits,
+      process_supervised: $process_supervised,
+      configuration: $redis_configuration,
+      persistence: {
+        appendonly: ($redis_configuration.appendonly == "yes"),
+        appendfsync: $redis_configuration.appendfsync,
+        save: $redis_configuration.save
+      },
       main_thread_cpu_seconds: $main_thread_cpu_seconds,
       main_thread_core_percent: $main_thread_core_percent,
       total_cpu_seconds: $total_cpu_seconds,

@@ -1,0 +1,6 @@
+{
+  "role": "loadgen",
+  "kernel": "6.1",
+  "architecture": "x86_64",
+  "private_network_ping": {"p99_ms": 0.04}
+}
