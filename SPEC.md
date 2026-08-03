@@ -2,7 +2,15 @@
 
 ## 1. Summary
 
-`redis-event-stream-module` is a Redis module, written in Rust on the `redis-module` crate (redismodule-rs, pinned at the v2.1.3 git tag), that subscribes to keyspace notifications inside the server and mirrors each selected notification as an `XADD` into a Redis Stream. Keyspace notifications over pub/sub are fire-and-forget: a disconnected subscriber misses events permanently. This module makes those events durable, replayable, and consumable through consumer groups, using only standard Redis Streams on the read side. The v0.1 default configuration is reliable capture of key expiration events (`expired`) for consumers that must not miss one across restarts.
+`redis-event-stream-module` is a Redis module, written in Rust on the
+`redis-module` crate, that subscribes to keyspace notifications inside the
+server and mirrors each selected notification as an `XADD` into a Redis
+Stream. Keyspace pub/sub is fire-and-forget; this module provides a durable,
+bounded, replayable alternative using standard Redis Streams on the read side.
+Its reliability contract is a best-effort, gap-aware live feed: exact capture
+is expected while the selected write path is healthy, known and uncertain loss
+are observable, and recovery after a gap remains application-owned. It is not
+a transactional CDC log, application outbox, WAL, or Kafka replacement.
 
 ## 2. Goals and non-goals
 
@@ -273,6 +281,7 @@ The module name is `eventstream`; Redis registers module configs as `<module-nam
 | `eventstream.async-queue-capacity` | i64 | `65536` | no (IMMUTABLE) | `1` to `10000000`; accepted worker events held before ordered fallback |
 | `eventstream.async-batch-size` | i64 | `64` | no (IMMUTABLE) | `1` to `10000`; maximum logical events drained per worker lock acquisition or compatible envelope |
 | `eventstream.async-max-wait-ms` | i64 | `1` | no (IMMUTABLE) | `1` to `60000`; maximum wait from the oldest queued event while filling a worker batch |
+| `eventstream.control-checkpoint-ms` | i64 | `0` | no (IMMUTABLE) | `0` disables; otherwise `100` to `86400000`. Writes generation-local status snapshots to `<prefix>#control` at the configured cadence (section 9) |
 | `eventstream.auto-group` | string | `` (empty) | yes | empty (disabled, the default) or a consumer-group name the module creates on each destination stream; at most 128 bytes over `A-Z a-z 0-9 : . _ -` (empty tokens and whitespace rejected). See section 9 |
 <!-- ANCHOR_END: config-table -->
 
@@ -313,6 +322,23 @@ settings do not promise a throughput improvement: the AWS spike found
 `individual` slower than `sync`, while 256-event envelopes improved throughput
 only by spending a second core and accepting higher tail latency
 (`infra/aws-smoke/observations/2026-07-30-async-batch-spike.md`).
+
+**`eventstream.control-checkpoint-ms`.** Opt-in durable health snapshots on
+the existing control stream (issue #277). `0` keeps the cron subscription and
+its writes disabled. A positive load-time value schedules one
+`action=checkpoint` entry per interval, bounded to 100 ms through 24 hours so
+a typo cannot create a main-thread write storm. The first implementation is
+IMMUTABLE: changing cron
+subscription ownership requires a module reload. Checkpoints share the control
+stream's replication, persistence, maxmemory, cluster-tag, and retention
+behavior. They add evidence, not delivery guarantees: absence of an error
+checkpoint does not prove absence of loss, because the failure that blocked a
+data write can also
+block the checkpoint write. The focused disabled/1,000 ms/100 ms probe found no
+measurable foreground change at one second and linear AOF amplification; see
+`infra/aws-smoke/observations/2026-08-03-control-checkpoints.md`. Checkpointing
+therefore remains disabled by default, with one to five seconds the documented
+starting range.
 
 **`eventstream.auto-group`.** Optional consumer-group auto-provisioning (issue #109): when non-empty, the module issues `XGROUP CREATE <stream> <name> 0` on each destination stream the first time it writes to it, so consumers can `XREADGROUP` without an operator-side setup step and the module-before-consumers deployment order becomes equivalent to the consumers-first order (section 9 explains the ordering footgun this removes). Empty (the default) leaves group creation operator-side, unchanged. The group is created at ID `0`, not `$`, so it sees the whole retained stream rather than only entries added after its creation. It is provisioned through the same replicated, OOM-checked `call_ext` options as the mirrored `XADD` (section 10), so the group replicates to replicas and persists to the AOF like the entry that triggered it. Idempotent: `XGROUP CREATE` on a stream that already has the group returns `BUSYGROUP`, which the module treats as success. Creation is deduped per stream the same way the registry `SADD` is (section 5 Discovery), and re-armed on flush — a `FLUSHALL` that destroyed the stream and its group re-creates the group on the next write. It applies to per-event streams **and** the firehose (`<prefix>#firehose`), but **not** the control stream (`<prefix>#control`), which is not a work queue. Runtime-mutable: setting it provisions the group on each stream's *next* write, not retroactively — a stream that never fires again keeps no group, and setting the config does not sweep `EVENTSTREAM.STREAMS` (a one-shot registry sweep is possible future work, but would need the deferred-job pattern gap markers use, since the on-changed callback cannot issue commands). In cluster per-node mode (section 10) each node creates the group on its own tagged streams, including streams created after a re-pin, matching the "N consumer groups, one per per-node stream" model. This does **not** change the slow-consumer contract (section 9): a group at `0` still loses entries trimmed by `maxlen` before consumers catch up — the value is operational (the group exists from stream birth), not a stronger delivery guarantee. Group-creation successes count in `autogroup_created` and failures other than `BUSYGROUP` in `autogroup_failed` (section 13), the latter following the same first-failure-log policy as drops; a failed creation is retried on the stream's next write.
 
@@ -554,13 +580,84 @@ Capture gaps are made machine-readable through a control stream at `<stream-pref
 | Slot re-pin (per-node cluster mode, section 10) | `repinned` |
 | `MODULE UNLOAD` (`deinit`) | `unloading` |
 
-Each marker carries two fields, `action` and `module-version`, with one additive exception: the `flushed` marker carries a third `db` field, the decimal flushed database number (`-1` for `FLUSHALL`), so consumers can bound the reconcile to the flushed database. Consumers reading markers by `action` are unaffected by the extra field. Markers are written through the same `call_ext` options as mirrored entries (`!`, `E`, and `M` unless `eventstream.verify-oom no`, section 7), so they replicate, respect `maxmemory`, and persist like any other entry; the control stream follows the same trim strategy as data streams so replay-window reasoning is uniform — count-based `MAXLEN` (the `#control` suffix is addressable as a per-event override, section 7, else the global `maxlen`) or time-based `MINID` when `eventstream.retention-ms` is set (issues #62, #108). The MASTER-and-not-LOADING gate applies to marker writes exactly as it does to mirrored entries (replicas receive markers only via replication of the master's writes). Marker-write failures follow the same drop-counter and first-failure-log policy as mirrored entries. Markers count in `control_markers` (section 13). The prefix feedback guard already drops the control stream's own keyspace notifications.
+Every control entry carries `action`, `module-version`, and `generation`. The
+generation is a random 32-hex-character identity assigned at module load and
+shared by all lifecycle markers and checkpoints from that load. The `flushed`
+marker additionally carries `db`, the decimal flushed database number (`-1`
+for `FLUSHALL`), so consumers can bound the reconcile to that database.
+Consumers reading markers by `action` remain compatible with these additive
+fields.
+
+With `eventstream.control-checkpoint-ms > 0`, the same stream also receives
+periodic `action=checkpoint` entries with this additive schema:
+
+| Field | Meaning |
+|---|---|
+| `reason` | `periodic` |
+| `checkpoint-ms` | configured cadence |
+| `resolved-events` | `forwarded + events-lost`; selected logical events whose canonical outcome is known |
+| `forwarded` | logical events represented by canonical records |
+| `events-lost` | logical events definitely missing canonical records |
+| `dropped` | failed destination/control writes |
+| `async-enqueued` | logical events accepted by a Preview worker |
+| `async-queue-depth` | accepted events still in the queue at snapshot time |
+| `async-drain-events` | events removed from the queue for processing |
+| `async-worker-errors` | worker failures |
+| `handler-panics` | caught callback panics |
+| `last-error-time` | unix seconds of the last classified write failure, or `0` |
+
+`async-queue-depth` is an instantaneous gauge, not a crash-loss upper bound: a
+worker can have removed events from the queue before their `XADD` completes.
+Likewise, a checkpoint reports the state that reached that durable record; it
+cannot identify work accepted afterward.
+
+Control entries are written through the same `call_ext` options as mirrored
+entries (`!`, `E`, and `M` unless `eventstream.verify-oom no`, section 7), so
+they replicate, respect `maxmemory`, and persist like any other entry. The
+control stream follows the same trim strategy as data streams — count-based
+`MAXLEN` (the `#control` suffix is addressable as a per-event override) or
+time-based `MINID`. The MASTER-and-not-LOADING gate applies exactly as it does
+to mirrored entries. Failures follow the same drop-counter and first-failure
+log policy. Lifecycle markers count in `control_markers`; checkpoints count in
+`control_checkpoints` (section 13). The prefix feedback guard drops the control
+stream's own notifications.
 
 The flush and `SWAPDB` events are captured through raw `RedisModule_SubscribeToServerEvent` subscriptions (`REDISMODULE_EVENT_FLUSHDB`, `REDISMODULE_EVENT_SWAPDB`), not the wrapper's flush-event macro: the safe wrapper discards the `RedisModuleFlushInfo`/`RedisModuleSwapDbInfo` payload, and the flushed/swapped database numbers are exactly what these markers turn on. This is the same raw-binding rationale as the keyspace subscription (section 5), and both callbacks catch panics at the FFI boundary. A `SWAPDB` that does not involve db 0 leaves the streams' database untouched and writes no marker. The `flushed`/`swapdb` markers are recorded only when this node is the capturing master (the same MASTER-and-not-LOADING gate that governs marker writes): the flush event also fires when a replica empties its dataset for a full resync (no capture gap on that node) and when a replica replays a replicated `FLUSHALL`/`FLUSHDB`/`SWAPDB` (the master's own marker already reaches the replica through replication), so recording one on the replica would spuriously duplicate it on failover. Registry invalidation is unconditional by contrast, since a replayed flush really does clear the replica's registry.
 
-Delivery mechanics. Direct writes are impossible or unsafe at most of these lifecycle points, so markers are deferred, not hedged: at v2.1.3 the config on-changed callback receives only a `ConfigurationContext`, a deliberately restricted type with no command-call capability, and a direct write in `init` is a startup hazard (with `loadmodule` at startup the module initializes before the dataset loads; creating the control stream in the empty keyspace makes the subsequent RDB load hit a duplicate key and abort the server). A direct write at flush time would itself be flushed (for `FLUSHALL` or `FLUSHDB` in db 0, which delete the control stream). The `loaded`, `disabled`, `enabled`, `flushed`, and `swapdb` markers therefore go through a pending-marker mechanism: the lifecycle point records the pending action (a `Vec`, so overlapping points accumulate rather than clobber each other), and the notification callback, which keeps running while disabled, checks it ahead of the enabled gate and enqueues a post-notification job that writes the pending markers before that event's mirrored entry. The marker's entry ID consequently timestamps the first event at the boundary, which is exactly the boundary that matters: the first lost event after a disable, the first captured event after an enable, load, flush, or swap. If no notification fires, the pending marker is never written, and nothing was mirrored into the void in that window either (for a flush that deleted the streams the pre-flush contents are still gone). The only direct write is `unloading` in `deinit`, which runs inside the `MODULE UNLOAD` command on a live server, where writes are safe and no future notification exists to defer to.
+Delivery mechanics. Direct writes are impossible or unsafe at most lifecycle
+points, so markers are deferred: the config callback has no command capability,
+an `init` write can collide with the later RDB load, and a flush-time write can
+itself be flushed. The lifecycle point records a pending action, and the next
+notification callback enqueues a post-notification job that writes pending
+markers before that event's entry. With checkpointing disabled, an idle load's
+`loaded` marker remains pending because no selected or skipped notification
+needs a boundary. With checkpointing enabled, the first due cron-loop callback
+after LOADING clears writes pending markers before its checkpoint, so an idle
+deployment still advertises its generation. In per-node cluster mode a
+cron-loop callback that finds no owned slot preserves the pending markers and
+retries later;
+it does not count a source-event loss. `unloading` remains the one direct
+lifecycle write, inside `MODULE UNLOAD`, after checkpoint callbacks have
+stopped and the Preview worker has drained.
 
 Consumers delimit gap windows by reading marker pairs: the window between a `disabled` or `unloading` marker and the next `enabled` or `loaded` marker is a capture gap, and reconciliation can be bounded to it instead of sweeping the keyspace. A marker bounds *when* a gap occurred, not *which* keys it affected — it carries no key identities — so the marker turns "did I miss anything, and when" into a yes/no with a time window, not the missing events themselves. For expirations, the keys removed during the gap are gone from the post-gap keyspace, so `SCAN`/`PTTL` cannot enumerate them; exact reconciliation of missed expiration events needs an application-maintained source of truth that outlives the key (section 2 non-goal on backfill; docs/src/reliability.md). A `flushed` marker opens a gap that a full reconcile of the flushed database closes (the pre-flush stream contents are gone); a `swapdb` marker means entries before it may now live in another database (read the swapped database to recover db 0 history). In cluster per-node mode a `repinned` marker (section 10) appears on a node's new control stream when its pinned slot migrated away, delimiting the point where that node's stream name changed and any migration-window events were lost. Two limitations, both documented: crashes write no closing marker, and clean server shutdowns cannot write one — a shutdown marker is structurally impossible (investigated and rejected in #67). `finishShutdown` in server.c (verified at Redis 7.2.0 and 8.0.0) orders the final AOF flush, then the final RDB save, then the Shutdown module event, then the replica output-buffer flush, so a write from the event handler never reaches the persisted dataset; replicating that write instead trips `propagateNow`'s shutdown-pause assertion when replicas are attached and not fully acked (`prepareForShutdown` pauses client writes and `finishShutdown` never unpauses), aborting the server. Clean restarts and crashes are therefore indistinguishable, permanently: both appear as a `loaded` marker with no preceding `unloading` or `disabled`, bounded below by the last entry ID across the mirrored streams.
+
+The generation/checkpoint assessment is deliberately evidence-based:
+
+| State | Evidence | Meaning |
+|---|---|---|
+| healthy | checkpoints in one generation advance while `events-lost` stays flat | no loss observed; not proof of complete end-to-end delivery |
+| known loss | `events-lost` increases, or a consumer cursor predates retained history | at least one canonical event is unavailable |
+| uncertain restart | a new `loaded` generation follows one with no `unloading` | events may be missing after the old generation's last durable observation |
+| graceful boundary | an old generation writes `unloading` before the new generation loads | the module drained accepted work and closed its observable lifecycle |
+| stale | expected checkpoints stop while Redis remains reachable | capture/observability health is unknown |
+
+The last checkpoint narrows an uncertain restart window; it never closes it or
+produces an exact missing count. A checkpoint `XADD` can fail under the same
+OOM, topology, or persistence pressure that affects data entries. Consumers
+must also recognize when control-stream trimming removed the lower bound. The
+Rust client parses the additive fields and exposes generation-transition
+assessment, but reconciliation remains application-owned.
 <!-- ANCHOR_END: gap-markers -->
 
 ### Slow-consumer contract
@@ -736,7 +833,7 @@ The module's own writes run server-side with module privileges and are not subje
 
 ### INFO section
 
-One module INFO section via the wrapper's `InfoContext` builder (`#[info_command_handler]`). Redis prefixes module sections and fields with the module name. All counters are `AtomicU64` statics: process-lifetime, monotonic, reset on load, never persisted or replicated; `skipped_*` counters are incremented inside the notification callback (safe; only keyspace writes are not); `forwarded`, `control_markers`, and `dropped_*` at the write sites (the post-notification job for mirrored entries and pending markers, `deinit` for the unloading marker).
+One module INFO section via the wrapper's `InfoContext` builder (`#[info_command_handler]`). Redis prefixes module sections and fields with the module name. All counters are `AtomicU64` statics: process-lifetime, monotonic, reset on load, never persisted or replicated; `skipped_*` counters are incremented inside the notification callback (safe; only keyspace writes are not); `forwarded`, `control_markers`, `control_checkpoints`, and `dropped_*` at their write sites. Checkpoints persist selected counter values as stream fields, but do not make the process-local INFO counters themselves persistent.
 
 <!-- ANCHOR: counters-info -->
 ```text
@@ -762,6 +859,7 @@ eventstream_skipped_invalid:0
 eventstream_active_streams:1
 eventstream_registry_errors:0
 eventstream_control_markers:2
+eventstream_control_checkpoints:0
 eventstream_handler_panics:0
 eventstream_async_enqueued:0
 eventstream_async_fallbacks:0
@@ -785,7 +883,7 @@ eventstream_last_error_time:1752071011
 <!-- ANCHOR: counters-explanation -->
 `events_lost` is the total-loss SLO (issue #218): one increment per **selected logical event that produced no canonical record** — an individual stream entry in the stable modes or an ordered envelope element in Preview `envelope` mode — for any reason: `dropped_no_owned_slot`, `dropped_max_streams`, `dropped_encode_error`, `dropped_defer_error`, an OOM or `XADD` error on the canonical write, or a migration refusal still unrecovered after the one re-pin retry (`dropped_migrating`). It is per *event*: a firehose-copy failure after a successful canonical write does not touch it, and one event whose per-event entry and firehose copy both fail counts one in `events_lost` but two in `dropped`. It includes `dropped_no_owned_slot`, which `dropped` omits, so a zero-slot master's complete capture loss shows up here even though it does not move `dropped`. Alert on any increase.
 
-`dropped` is the count of **failed destination writes** (not lost events): the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, `dropped_migrating`, `dropped_max_streams`, and `dropped_encode_error`. Because a failure is counted per write, the firehose copy and the per-event entry contribute independently, so `dropped` can exceed `events_lost` (both writes for one event failed) or move without `events_lost` (only the auxiliary firehose copy failed). It deliberately excludes `dropped_no_owned_slot` (kept as a separate field, historically). Use `events_lost` for "did this node lose a selected event", `dropped` for "how many destination writes failed". `dropped_max_streams` counts events dropped because creating their destination stream would exceed `eventstream.max-streams` (section 7); the stream was never created and existing streams are unaffected. `dropped_encode_error` counts entries dropped because the configured `entry-format` could not encode the event (section 6); with the shipped formats only `json` can fail, on a non-UTF-8 event name, and it is first-failure-logged once per process like the other no-destination drop reasons. `skipped_key_filtered` and `skipped_db` count events dropped in the notification callback by the key-name glob filter and the source-db filter respectively (section 7), kept separate from `skipped_filtered` (the event-name/class filter) so a "forwarded flat while `expired_keys` rises" diagnosis can tell which filter is too narrow. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `autogroup_created` and `autogroup_failed` are the consumer-group auto-provisioning counters (`eventstream.auto-group`, sections 7 and 9): `autogroup_created` counts genuine `XGROUP CREATE` successes (a `BUSYGROUP` reply — the group already existed — is idempotent success and not counted), and `autogroup_failed` counts failures other than `BUSYGROUP`. Neither is part of the `dropped` sum: the triggering event was still captured, only the group side-effect failed. `autogroup_failed` follows the first-failure-log policy of the no-destination drop reasons, and the failed creation is retried on the stream's next write. `active_streams` counts distinct destination streams **created** since load, excluding the control stream: a stream is counted on its first successful `XADD`, independent of whether the follow-up registry `SADD` succeeds (issue #216), so it means "streams written", not "streams registered". The counter never resets — a flush clears the in-process cache, so a stream re-written after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `registry_errors` counts registry `SADD` failures (issue #216): the mirrored `XADD` succeeded but the write registering the stream in `<prefix>#streams` failed (for example a `WRONGTYPE` occupant, or an OOM on the set write while the stream write went through). It is not in the `dropped` sum and not in `events_lost` — the event was captured, only its discoverability side effect failed — but the affected stream will not appear in `EVENTSTREAM.STREAMS` until a later write registers it; `registered` stays false so the next write retries, and a recovery notice logs when it succeeds. First-failure logging latches like the other side-effect failures, re-armed on recovery. `control_markers` counts gap markers written since load (section 9); marker writes are not counted in `forwarded`, which remains a pure mirrored-event count. `handler_panics` counts panics caught at an FFI boundary, in either the notification callback or a post-notification job (section 5); it should always be 0, and any nonzero value is a bug in this module.
+`dropped` is the count of **failed destination writes** (not lost events): the sum of `dropped_xadd_error`, `dropped_oom`, `dropped_defer_error`, `dropped_migrating`, `dropped_max_streams`, and `dropped_encode_error`. Because a failure is counted per write, the firehose copy and the per-event entry contribute independently, so `dropped` can exceed `events_lost` (both writes for one event failed) or move without `events_lost` (only the auxiliary firehose copy failed). It deliberately excludes `dropped_no_owned_slot` (kept as a separate field, historically). Use `events_lost` for "did this node lose a selected event", `dropped` for "how many destination writes failed". `dropped_max_streams` counts events dropped because creating their destination stream would exceed `eventstream.max-streams` (section 7); the stream was never created and existing streams are unaffected. `dropped_encode_error` counts entries dropped because the configured `entry-format` could not encode the event (section 6); with the shipped formats only `json` can fail, on a non-UTF-8 event name, and it is first-failure-logged once per process like the other no-destination drop reasons. `skipped_key_filtered` and `skipped_db` count events dropped in the notification callback by the key-name glob filter and the source-db filter respectively (section 7), kept separate from `skipped_filtered` (the event-name/class filter) so a "forwarded flat while `expired_keys` rises" diagnosis can tell which filter is too narrow. `firehose_forwarded` counts copies written to the firehose stream (section 5) and is not included in `forwarded`, which remains a pure per-event mirrored count; failed firehose copies count in the `dropped_*` counters above. `autogroup_created` and `autogroup_failed` are the consumer-group auto-provisioning counters (`eventstream.auto-group`, sections 7 and 9): `autogroup_created` counts genuine `XGROUP CREATE` successes (a `BUSYGROUP` reply — the group already existed — is idempotent success and not counted), and `autogroup_failed` counts failures other than `BUSYGROUP`. Neither is part of the `dropped` sum: the triggering event was still captured, only the group side-effect failed. `autogroup_failed` follows the first-failure-log policy of the no-destination drop reasons, and the failed creation is retried on the stream's next write. `active_streams` counts distinct destination streams **created** since load, excluding the control stream: a stream is counted on its first successful `XADD`, independent of whether the follow-up registry `SADD` succeeds (issue #216), so it means "streams written", not "streams registered". The counter never resets — a flush clears the in-process cache, so a stream re-written after a flush counts again and the value can exceed the number of currently distinct streams (section 5). The firehose, when enabled, is a destination stream and counts. `registry_errors` counts registry `SADD` failures (issue #216): the mirrored `XADD` succeeded but the write registering the stream in `<prefix>#streams` failed (for example a `WRONGTYPE` occupant, or an OOM on the set write while the stream write went through). It is not in the `dropped` sum and not in `events_lost` — the event was captured, only its discoverability side effect failed — but the affected stream will not appear in `EVENTSTREAM.STREAMS` until a later write registers it; `registered` stays false so the next write retries, and a recovery notice logs when it succeeds. First-failure logging latches like the other side-effect failures, re-armed on recovery. `control_markers` counts lifecycle gap markers written since load; `control_checkpoints` counts periodic status entries. Neither is counted in `forwarded`. `handler_panics` counts panics caught at an FFI boundary, post-notification job, or checkpoint cron callback; it should always be 0, and any nonzero value is a bug in this module.
 
 The Preview worker counters (issue #265) make queue behavior measurable:
 `async_enqueued` counts accepted logical events and `async_fallbacks` triggering
@@ -917,7 +1015,17 @@ Integration tests spawn a real redis-server 7.2+ and load the built module (redi
 - Invalid `CONFIG SET eventstream.events` values are rejected with an error reply.
 - Binary (non-UTF-8) key bytes round-trip exactly through the `key` field.
 - Events fired in a non-zero database are mirrored to the db 0 streams with the correct `db` field (section 6).
-- Gap markers: `loaded` appears after the first post-load notification, `disabled`/`enabled` pair appears after toggling plus one subsequent event each, `unloading` on `MODULE UNLOAD`; any restart (clean or crash) yields a `loaded` marker with no preceding `unloading` or `disabled` (gap detection, section 9); a marker written before a restart survives in the persisted control stream and the server starts normally (pins the no-direct-write-in-init rule).
+- Gap markers: `loaded` appears after the first post-load notification (or the
+  first due checkpoint callback on an idle checkpoint-enabled instance),
+  `disabled`/`enabled` appear in order, and `unloading` lands on `MODULE
+  UNLOAD`; every entry from one load shares a 32-hex generation, a restart gets
+  a different one, and a persisted prior generation reloads safely.
+- Control checkpoints: the default creates no cron subscription or writes; a
+  100 ms opt-in cadence writes `loaded` then `checkpoint` while idle, persists logical loss
+  and Preview queue fields, increments `control_checkpoints` separately from
+  lifecycle `control_markers`, stops cleanly on unload, and is parsed by the
+  Rust client. A generation change with no `unloading` assesses as uncertain;
+  an unload/load pair assesses as graceful.
 - Asserted-unreachable counters (issue #185): three counters have no black-box trigger and are deliberately exercised only as zero. `dropped_defer_error` requires `add_post_notification_job` itself to fail (section 12: not expected in practice). `dropped_encode_error`'s only shipped failure mode, the `json` format on a non-UTF-8 event name, is unreachable through the notification path because the raw callback lossy-decodes the name first (section 6); the encoder's `Err` branch is unit-tested, while the counter increment and first-failure log wiring are not. `autogroup_failed` counts non-`BUSYGROUP` `XGROUP CREATE` failures after a successful `XADD` to the same key inside one job, which cannot be forced from outside (a WRONGTYPE occupant fails the `XADD` first, so the group creation is never reached); its retry-on-next-write claim (section 7) is likewise untestable without a seam. The shared count_drop machinery (increment, first-failure latch, `last_error_time`) is pinned through the sibling counters that do have triggers, so the untested surface is limited to per-call-site classification; a fault-injection seam for these three call sites was considered and declined as not worth the hot-path refactor (issue #185).
 - Load refusal on a pre-7.2 server: the version check is asserted via the mocked-version unit test `version_supported` (src/lib.rs) across the 6.2/7.0/7.1 (refused) and 7.2/7.4/8.x/9.x (accepted) boundaries, since spawning a pre-7.2 server is impractical (the CI matrix floor is Redis 7.2.8) and the real refusal aborts in the wrapper before `init` (section 14, issue #77). The supported side is pinned end to end in `tests/version_gate.rs`: on a >= 7.2 harness server the module loads and captures without emitting either refusal log line. Exercising the true pre-7.2 abort needs a dedicated old-server lane outside the CI matrix.
 

@@ -45,6 +45,26 @@ failed auxiliary firehose copy.
 Counters reset when the module reloads. Alert with `rate()` or `increase()`
 rather than assuming an absolute value remains monotonic across upgrades.
 
+## Watch the durable control signal
+
+When `eventstream.control-checkpoint-ms` is enabled, consume
+`<prefix>#control` alongside the data streams. Checkpoints persist the current
+generation, resolved logical-event count, known-loss counters, async queue
+state, and last error time.
+
+- A new generation with no prior `unloading` marker is an uncertain restart
+  boundary.
+- An `events-lost` increase is definite loss.
+- A missing expected checkpoint while Redis remains reachable is stale health,
+  not proof of loss.
+- A checkpoint or resume ID trimmed from `#control` means the lower bound of
+  the uncertainty window is itself gone.
+
+Track `eventstream_control_checkpoints` to verify successful writes, but do not
+treat a flat counter alone as proof of module failure: replicas do not create
+their own checkpoints, and a master under OOM or topology pressure may be
+unable to write the very signal describing that pressure.
+
 ## Inspect Preview worker pressure
 
 When a Preview worker mode is enabled:

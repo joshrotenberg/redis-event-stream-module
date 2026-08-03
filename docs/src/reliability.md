@@ -6,6 +6,12 @@ Those two stages have different guarantees.
 
 ## The guarantee in one paragraph
 
+Redis Event Stream is a best-effort, gap-aware live feed. "Best effort" does
+not mean silent loss: healthy stable-mode capture targets exact canonical
+records, definite failures increment `events_lost`, and generation checkpoints
+can identify an uncertain restart window. It does mean the module is not a
+transactional CDC log, application outbox, WAL, or Kafka replacement.
+
 With the stable default write mode, each selected event on a healthy capturing
 master produces exactly one canonical per-event stream entry, atomically with
 the keyspace change. Overall capture is at-most-once because events cannot be
@@ -76,6 +82,79 @@ node changed its stream tag.
 Two cases cannot write a closing marker: a crash and a clean server shutdown.
 The next `loaded` marker still tells a consumer that the process restarted, but
 Redis alone cannot distinguish the reason.
+
+## Persist health checkpoints
+
+Set a load-time cadence to persist low-volume status entries in the same
+control stream:
+
+```text
+loadmodule /path/to/libredis_event_stream_module.so \
+  control-checkpoint-ms 5000
+```
+
+`0` (the default) disables checkpoint writes. Positive values range from 100
+milliseconds to 24 hours and are immutable until the next module load. Start
+with one to five seconds unless the reconciliation objective requires a tighter
+uncertainty bound; write and persistence cost scales with checkpoint rate.
+
+Every lifecycle marker and checkpoint carries a random `generation` ID for the
+current module load. Checkpoints additionally carry `forwarded`, `events-lost`,
+`dropped`, Preview queue counters, `handler-panics`, and `last-error-time`.
+Interpret them as evidence:
+
+| State | Evidence |
+|---|---|
+| Healthy | Same generation advances and `events-lost` stays flat |
+| Known loss | `events-lost` increases or the consumer cursor was trimmed |
+| Uncertain restart | A new `loaded` generation follows one without `unloading` |
+| Graceful boundary | The old generation wrote `unloading` before the new one loaded |
+| Stale | Expected checkpoints stop while Redis remains reachable |
+
+The terms are intentionally narrow:
+
+- A **generation** is one module load on one Redis node.
+- A **checkpoint** is a durable, generation-local observation, not an
+  acknowledgement of every source command.
+- A generation is **closed** only when its `unloading` entry survives.
+- **Uncertain** means a later `loaded` generation has no durable closure for
+  the prior one; it does not assert that loss occurred.
+- **Retention overrun** means the consumer's resume point or the checkpoint
+  that bounded a gap is older than the first retained entry.
+
+## Consumer assessment algorithm
+
+Track each control stream independently; cluster nodes have independent
+generations and checkpoint histories.
+
+1. Persist the last processed control ID, generation, checkpoint counters, and
+   data-stream resume IDs.
+2. On each checkpoint in the same generation, compare `events-lost` with the
+   prior value. An increase is known loss. Otherwise the result is only “no
+   loss observed.”
+3. Treat checkpoints as stale when Redis is reachable but none arrives within
+   the locally chosen grace period, normally a small multiple of
+   `checkpoint-ms`.
+4. On a new `loaded` generation, classify the boundary as graceful only when
+   the previous generation wrote `unloading`; otherwise classify it as
+   uncertain. Bound reconciliation below by the prior generation's last
+   retained checkpoint when one exists.
+5. Before resuming any stream, compare the saved ID with its oldest retained
+   ID. If the saved position or the lower checkpoint bound was trimmed, report
+   retention overrun and reconcile from an independent source.
+6. Advance saved positions only after the downstream handling and state update
+   commit together.
+
+The last durable checkpoint narrows an uncertain window. It cannot prove that
+no events were lost, identify missing keys, or provide an exact missing count.
+In Preview worker modes, `async-queue-depth` is only the instantaneous queue:
+worker-held events may already have left it without reaching a stream.
+
+Checkpoint writes replicate, persist, trim, and fail like other writes. Size
+the `#control` retention window accordingly, for example with a
+`maxlen-overrides` entry. Absence of an error checkpoint is not proof of health
+because the same OOM or topology condition may block both data and control
+writes.
 
 ## Reconcile from an independent source
 

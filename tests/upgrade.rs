@@ -99,6 +99,16 @@ fn in_place_unload_load_swap() {
         versions.iter().all(|v| !v.is_empty()),
         "every marker must carry module-version"
     );
+    let generations = stream_field_strings(&mut c, CONTROL, "generation");
+    assert_eq!(generations.len(), 3);
+    assert_eq!(
+        generations[0], generations[1],
+        "loaded and unloading must close one generation"
+    );
+    assert_ne!(
+        generations[1], generations[2],
+        "the reloaded module must open a new generation"
+    );
 
     // The loss window is real and bounded: the gap event never made it into a
     // stream, while the before/after events did.

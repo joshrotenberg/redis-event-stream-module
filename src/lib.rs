@@ -335,12 +335,31 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     }
     recheck_eviction_risk(ctx);
 
+    // Checkpointing is opt-in. Subscribe to Redis's unload-safe cron-loop
+    // event only when configured, so the default path pays no callback cost.
+    // Unlike Redis module timers, a server-event subscription does not make
+    // MODULE UNLOAD refuse before our deinit callback can run.
+    if CONTROL_CHECKPOINT_MS.value.load(Ordering::Relaxed) > 0
+        && subscribe_server_event(
+            raw::REDISMODULE_EVENT_CRON_LOOP,
+            Some(raw_checkpoint_cron_event),
+        ) != raw::REDISMODULE_OK as i32
+    {
+        ctx.log_warning(
+            "eventstream: failed to subscribe to the cron-loop server event; \
+             refusing to load because control checkpoints were requested",
+        );
+        return Status::Err;
+    }
+
     if let Err(message) = start_dispatch_worker(ctx) {
         ctx.log_warning(&format!(
             "eventstream: cannot start experimental write dispatch: {message}; refusing to load"
         ));
         return Status::Err;
     }
+
+    initialize_generation(ctx);
 
     let prefix = PREFIX.value.lock(ctx).clone();
     let filter = FILTER.raw.lock(ctx).clone();
@@ -353,11 +372,14 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
     ctx.log_notice(&format!(
         "eventstream loaded: stream-prefix='{prefix}' events='{filter}' key-filter='{key_filter}' \
          source-dbs='{source_dbs}' maxlen={} maxlen-overrides={overrides_count} retention-ms={} \
-         verify-oom={} max-streams={} enabled={} extra-classes={:?}",
+         verify-oom={} max-streams={} control-checkpoint-ms={} generation={} enabled={} \
+         extra-classes={:?}",
         MAXLEN.value.load(Ordering::Relaxed),
         RETENTION_MS.value.load(Ordering::Relaxed),
         VERIFY_OOM.load(Ordering::Relaxed),
         MAX_STREAMS.value.load(Ordering::Relaxed),
+        CONTROL_CHECKPOINT_MS.value.load(Ordering::Relaxed),
+        GENERATION_ID.lock(ctx).as_str(),
         ENABLED.load(Ordering::Relaxed),
         extra,
     ));
@@ -378,6 +400,7 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
         }
     }
     MARKERS_DIRTY.store(true, Ordering::Relaxed);
+    start_checkpoint_schedule();
 
     Status::Ok
 }
@@ -505,6 +528,12 @@ redis_module! {
             ["async-queue-capacity", &ASYNC_QUEUE_CAPACITY, 65536, 1, 10000000, ConfigurationFlags::IMMUTABLE, None],
             ["async-batch-size", &ASYNC_BATCH_SIZE, 64, 1, 10000, ConfigurationFlags::IMMUTABLE, None],
             ["async-max-wait-ms", &ASYNC_MAX_WAIT_MS, 1, 1, 60000, ConfigurationFlags::IMMUTABLE, None],
+            // Opt-in durable `#control` checkpoints (issue #277). Immutable
+            // for the first implementation so cron subscription ownership
+            // cannot change underneath a loaded module. The custom setter
+            // accepts 0 or 100ms..24h and rejects the otherwise-valid 1..99ms
+            // range.
+            ["control-checkpoint-ms", &CONTROL_CHECKPOINT_MS, 0, 0, 86400000, ConfigurationFlags::IMMUTABLE, None],
         ],
         string: [
             ["stream-prefix", &*PREFIX, "events:", ConfigurationFlags::IMMUTABLE, None],

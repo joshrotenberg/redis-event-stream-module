@@ -1,0 +1,53 @@
+[
+  {
+    "cadence_ms": 0,
+    "foreground": {
+      "ops_per_sec": 133333.33,
+      "p50_ms": 0.327,
+      "p99_ms": 0.455,
+      "checkpoints_written": 0
+    },
+    "idle_persistence": {
+      "seconds": 10,
+      "checkpoints_written": 0,
+      "control_stream_entries": 0,
+      "control_stream_memory_bytes": 0,
+      "aof_current_size_bytes": 0,
+      "aof_bytes_over_disabled": 0
+    }
+  },
+  {
+    "cadence_ms": 1000,
+    "foreground": {
+      "ops_per_sec": 133333.33,
+      "p50_ms": 0.327,
+      "p99_ms": 0.447,
+      "checkpoints_written": 3
+    },
+    "idle_persistence": {
+      "seconds": 10,
+      "checkpoints_written": 10,
+      "control_stream_entries": 11,
+      "control_stream_memory_bytes": 3550,
+      "aof_current_size_bytes": 5601,
+      "aof_bytes_over_disabled": 5601
+    }
+  },
+  {
+    "cadence_ms": 100,
+    "foreground": {
+      "ops_per_sec": 133297.8,
+      "p50_ms": 0.327,
+      "p99_ms": 0.463,
+      "checkpoints_written": 37
+    },
+    "idle_persistence": {
+      "seconds": 10,
+      "checkpoints_written": 109,
+      "control_stream_entries": 110,
+      "control_stream_memory_bytes": 14197,
+      "aof_current_size_bytes": 58567,
+      "aof_bytes_over_disabled": 58567
+    }
+  }
+]
