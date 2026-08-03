@@ -27,7 +27,7 @@ variable "name_prefix" {
 }
 
 variable "ttl_hours" {
-  description = "Advisory expiry tag in hours. Terraform still requires an explicit destroy."
+  description = "Hard EC2 runtime limit and expiry tag in hours. Terraform still requires an explicit destroy."
   type        = number
   default     = 4
 

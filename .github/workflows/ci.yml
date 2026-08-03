@@ -67,6 +67,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Shellcheck
         run: git ls-files '*.sh' | xargs shellcheck -S style
+      - name: Check AWS lab contracts
+        run: infra/aws-smoke/tests/contract.sh
 
   # Lint the contrib/monitoring artifacts (issue #105): the Prometheus rules
   # with promtool, and the Grafana dashboard for JSON validity. jq is

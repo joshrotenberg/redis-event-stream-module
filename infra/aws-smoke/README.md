@@ -17,22 +17,50 @@ larger performance backlog.
 - Redis port 6379 is reachable only from the load-generator security group.
 - An encrypted, delete-on-termination gp3 root volume on each instance.
 - An EC2 role containing only the AWS-managed SSM core policy.
+- A tagged EventBridge Scheduler group and one-time action that stops both
+  instances at the configured expiry.
 
 The instances need public egress to install Docker and pull pinned public
 images. Public IPv4 addresses exist, but the security groups have no inbound
 management rules.
 
-All taggable resources carry project, environment, owner, and expiry tags. The
-expiry is advisory; it does **not** automatically delete resources. Always run
-the destroy and orphan-check steps.
+All taggable resources carry repository, campaign, environment, owner, and
+expiry tags. The expiry action stops compute, but it does **not** destroy the
+remaining network, storage, IAM, or Terraform state. Always run the destroy and
+orphan-check steps.
+
+## Reference shape and cost
+
+The reference campaign uses two
+[`c7i.large` instances][EC2 C7i instances] in one availability zone: one for
+Redis and one for the generator. This is a non-burstable x86_64
+shape with two vCPUs, matching the initial release target without CPU-credit
+noise. In the instrumented sweep, full capture saturated the Redis main thread
+at roughly 99% while the separate generator used about 112% of its available
+200% CPU. That is enough generator headroom to expose the observed Redis-side
+knee. The unloaded baseline approached the generator's limit, so a larger
+generator remains appropriate for measuring an absolute no-module ceiling.
+
+At the 2026-08-03 `us-west-2` on-demand rates, a campaign destroyed at the
+default four-hour limit is approximately $0.77 before data transfer and tax:
+$0.714 for two `c7i.large`
+hosts at $0.08925 per host-hour, about $0.04 for two public IPv4 addresses, and
+about $0.014 for 32 GiB of gp3 storage. Prices change; verify them against the
+[EC2 on-demand pricing], [VPC pricing], and [EBS pricing] pages before a larger
+campaign.
+
+`ttl_hours` defaults to four and is constrained to 1–24 hours. The scheduled
+hard stop limits EC2 and public-IPv4 runtime if the controller disappears.
+Stopped instances and their EBS volumes still require `./lab.sh down`.
 
 ## Prerequisites
 
 - Terraform 1.7 or newer
 - AWS CLI v2 with an authenticated profile
 - `jq`, `base64`, and Git
-- Permission to manage EC2 networking, instances, instance profiles, and the
-  `AmazonSSMManagedInstanceCore` role attachment
+- Permission to manage EC2 networking, instances, instance profiles,
+  EventBridge Scheduler schedules/groups, and the narrow IAM roles used by SSM
+  and the expiry action, including permission to pass those roles
 
 Choose an owner value used for cost attribution and cleanup:
 
@@ -58,8 +86,18 @@ cd infra/aws-smoke
 `plan`, `up`, and `down` accept additional Terraform arguments. For unattended
 execution, explicitly add `-auto-approve`; it is never implied by the wrapper.
 
+For a disposable smoke campaign, use the combined path. The explicit
+`-auto-approve` opts into unattended provisioning and cleanup; an exit trap
+attempts destroy and stale-resource detection if the run fails:
+
+```sh
+./lab.sh campaign -auto-approve
+```
+
 The run waits for instance health, SSM registration, cloud-init, and pinned
-image pulls. It then executes one million `SET` requests in each scenario:
+image pulls. By default it builds the module from the current checked-out Git
+commit in release mode, records the artifact digest, and then executes one
+million `SET` requests in each scenario:
 
 | Scenario | Server |
 |---|---|
@@ -103,11 +141,10 @@ Both baseline and filtered repetitions may be zero when a focused experiment
 needs only its explicit sync control. Set `BENCH_PLAN_ONLY=yes` to validate and
 print the randomized plan without reading Terraform state or contacting AWS.
 
-To benchmark code that has not yet shipped in the pinned image, set
-`BENCH_MODULE_SOURCE_COMMIT` to `HEAD` or a pushed Git commit. The server
-downloads that revision, builds the module in the repository's container build
-stage, and bind-mounts the resulting artifact into the otherwise pinned runtime
-image:
+`BENCH_MODULE_SOURCE_COMMIT` accepts `HEAD` or a pushed Git commit. The server
+downloads that exact revision, builds the module in the repository's container
+build stage, and bind-mounts the resulting artifact into the otherwise pinned
+runtime image. Set a commit explicitly when reproducing an earlier result:
 
 ```sh
 BENCH_MODULE_SOURCE_COMMIT=HEAD \
@@ -172,8 +209,16 @@ and decompressed text land under
 profiler metadata. Profiling is opt-in because call-stack collection adds
 overhead and changes the measured throughput.
 
+Before the trials, the harness also measures intrinsic scheduler latency on the
+server and single-client Redis PING latency over the private network. The host
+probe and trial collector record the OS, AMI, kernel, architecture, CPU model,
+Docker and load-generator versions, exact generator command, Redis version,
+complete Redis configuration, topology, persistence settings, storage, and
+network placement.
+
 Results land under `results/<UTC-run-id>/` and are ignored by Git:
 
+- `environment.json`: versioned physical/software environment contract
 - `result.json`: normalized run manifest, raw trials, and grouped summaries
 - `trials.json`: normalized per-trial results
 - `summary.json`: min/median/max values grouped by scenario and client level
@@ -227,7 +272,8 @@ capacity of a physical-entry limit depends on the envelope occupancy achieved
 by the workload, not merely the configured batch maximum. Telemetry samples
 Redis CPU, RSS, stream length/memory, worker queue depth, consumer lag, and
 load-generator container use every five seconds. Normalized and raw results
-land under `results/<UTC-run-id>-soak/`.
+land under `results/<UTC-run-id>-soak/`; the soak result embeds the same
+versioned environment contract as the short campaign.
 
 Validate the phase and probe configuration without AWS access:
 
@@ -280,7 +326,8 @@ start that server without `--loadmodule`, keeping the baseline binary constant.
 ## Cost and cleanup
 
 This creates billable EC2 instances, EBS volumes, and public IPv4 addresses.
-The four-hour expiry tag is a cleanup signal, not a shutdown mechanism.
+The one-time expiry action stops both EC2 instances after four hours by default;
+it is a runtime backstop, not a substitute for resource deletion.
 
 After every run:
 
@@ -291,3 +338,13 @@ After every run:
 
 If Terraform is interrupted, rerun `./lab.sh down`. The orphan check is
 read-only and lists any tagged resources still present in the selected region.
+
+The remote server, environment, and benchmark scripts accept an endpoint and
+container image and contain no AWS API calls. AWS-specific provisioning and SSM
+transport stay in the controller layer, preserving a path to another cloud or
+bare-metal controller without rewriting the workload contract.
+
+[EC2 on-demand pricing]: https://aws.amazon.com/ec2/pricing/on-demand/
+[EC2 C7i instances]: https://aws.amazon.com/ec2/instance-types/c7i/
+[VPC pricing]: https://aws.amazon.com/vpc/pricing/
+[EBS pricing]: https://aws.amazon.com/ebs/pricing/

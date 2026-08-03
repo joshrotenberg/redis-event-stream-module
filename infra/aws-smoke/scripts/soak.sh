@@ -17,6 +17,7 @@ probe_depth="${SOAK_PROBE_DEPTH:-10000}"
 probe_batch_events="${SOAK_PROBE_BATCH_EVENTS:-100000}"
 probe_max_batches="${SOAK_PROBE_MAX_BATCHES:-10}"
 audit_idle_ms="${SOAK_AUDIT_IDLE_MS:-2000}"
+environment_network_samples="${SOAK_ENVIRONMENT_NETWORK_SAMPLES:-10000}"
 module_source_commit="${SOAK_MODULE_SOURCE_COMMIT:-HEAD}"
 module_source_repo="${SOAK_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
 plan_only="${SOAK_PLAN_ONLY:-no}"
@@ -32,7 +33,7 @@ for value in \
   "$soak_seconds" "$target_rps" "$calibration_requests" "$payload" \
   "$keyspace" "$maxlen" "$queue_capacity" "$batch_size" "$max_wait_ms" \
   "$probe_depth" "$probe_batch_events" "$probe_max_batches" \
-  "$audit_idle_ms"; do
+  "$audit_idle_ms" "$environment_network_samples"; do
   if ! positive_integer "$value"; then
     echo "soak values must be positive integers: $value" >&2
     exit 2
@@ -299,6 +300,10 @@ run_remote \
   "$module_build_command" \
   "$results_dir/raw/branch-module-build"
 module_artifact="$(cat "$results_dir/raw/branch-module-build.stdout")"
+module_artifact="$(
+  jq --arg commit "$module_source_commit" '. + {git_commit: $commit}' \
+    <<<"$module_artifact"
+)"
 
 client_build_b64="$(encode_file "$root_dir/scripts/remote-client-build.sh")"
 client_image="eventstream-branch-client:soak-${module_source_commit:0:12}"
@@ -312,12 +317,78 @@ run_remote \
   "$client_build_command" \
   "$results_dir/raw/branch-client-build"
 client_artifact="$(cat "$results_dir/raw/branch-client-build.stdout")"
+client_artifact="$(
+  jq --arg commit "$module_source_commit" '. + {git_commit: $commit}' \
+    <<<"$client_artifact"
+)"
 
 server_script_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
+environment_script_b64="$(encode_file "$root_dir/scripts/remote-environment.sh")"
 calibration_script_b64="$(encode_file "$root_dir/scripts/remote-calibrate.sh")"
 workload_script_b64="$(encode_file "$root_dir/scripts/remote-soak-workload.sh")"
 probe_script_b64="$(encode_file "$root_dir/scripts/remote-restart-probe.sh")"
 audit_script_b64="$(encode_file "$root_dir/scripts/remote-consumer-audit.sh")"
+
+environment_server_start="printf '%s' '$server_script_b64' | base64 --decode > /tmp/eventstream-server.sh
+chmod 0700 /tmp/eventstream-server.sh
+/tmp/eventstream-server.sh s0 '$module_image' '$maxlen' '$module_override' '$queue_capacity' '$batch_size' '$max_wait_ms'"
+run_remote \
+  "$server_id" \
+  environment-server-start \
+  "$environment_server_start" \
+  "$results_dir/raw/environment-server-start"
+
+environment_server_command="printf '%s' '$environment_script_b64' | base64 --decode > /tmp/eventstream-environment.sh
+chmod 0700 /tmp/eventstream-environment.sh
+/tmp/eventstream-environment.sh server '$server_ip' '$loadgen_image' '$environment_network_samples'"
+run_remote \
+  "$server_id" \
+  environment-server \
+  "$environment_server_command" \
+  "$results_dir/raw/environment-server"
+
+environment_loadgen_command="printf '%s' '$environment_script_b64' | base64 --decode > /tmp/eventstream-environment.sh
+chmod 0700 /tmp/eventstream-environment.sh
+/tmp/eventstream-environment.sh loadgen '$server_ip' '$loadgen_image' '$environment_network_samples'"
+run_remote \
+  "$loadgen_id" \
+  environment-loadgen \
+  "$environment_loadgen_command" \
+  "$results_dir/raw/environment-loadgen"
+
+jq -e . "$results_dir/raw/environment-server.stdout" >/dev/null
+jq -e . "$results_dir/raw/environment-loadgen.stdout" >/dev/null
+
+aws_cli ec2 describe-instances \
+  --instance-ids "$server_id" "$loadgen_id" \
+  --output json >"$results_dir/raw/ec2-instances.json"
+aws_cli ec2 describe-volumes \
+  --filters "Name=attachment.instance-id,Values=$server_id,$loadgen_id" \
+  --output json >"$results_dir/raw/ec2-volumes.json"
+
+jq -n \
+  --arg schema_version "1" \
+  --arg collected_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg server_id "$server_id" \
+  --arg loadgen_id "$loadgen_id" \
+  --arg region "$region" \
+  --arg availability_zone "$(jq -r '.availability_zone.value' <<<"$terraform_output")" \
+  --arg vpc_id "$(jq -r '.vpc_id.value' <<<"$terraform_output")" \
+  --arg subnet_id "$(jq -r '.subnet_id.value' <<<"$terraform_output")" \
+  --arg server_private_ip "$server_ip" \
+  --arg expiry_stop_schedule_arn \
+    "$(jq -r '.expiry_stop_schedule_arn.value' <<<"$terraform_output")" \
+  --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
+  --arg root_volume_type "$(jq -r '.root_volume_type.value' <<<"$terraform_output")" \
+  --argjson root_volume_gib \
+    "$(jq -r '.root_volume_gib.value' <<<"$terraform_output")" \
+  --slurpfile server_host "$results_dir/raw/environment-server.stdout" \
+  --slurpfile loadgen_host "$results_dir/raw/environment-loadgen.stdout" \
+  --slurpfile instances "$results_dir/raw/ec2-instances.json" \
+  --slurpfile volumes "$results_dir/raw/ec2-volumes.json" \
+  -f "$root_dir/scripts/assemble-environment.jq" \
+  >"$results_dir/environment.json"
+jq -e . "$results_dir/environment.json" >/dev/null
 
 start_server() {
   local label="$1"
@@ -415,7 +486,7 @@ run_probe abrupt
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n \
-  --arg schema_version "1" \
+  --arg schema_version "2" \
   --arg run_id "$run_id" \
   --arg started_at "$started_at" \
   --arg completed_at "$completed_at" \
@@ -432,6 +503,7 @@ jq -n \
   --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
   --argjson module_artifact "$module_artifact" \
   --argjson client_artifact "$client_artifact" \
+  --slurpfile lab_environment "$results_dir/environment.json" \
   --slurpfile plan "$results_dir/plan.json" \
   --slurpfile calibration "$results_dir/calibration.json" \
   --slurpfile main "$results_dir/main/result.json" \

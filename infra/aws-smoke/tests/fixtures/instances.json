@@ -1,0 +1,30 @@
+{
+  "Reservations": [
+    {
+      "Instances": [
+        {
+          "InstanceId": "i-server",
+          "InstanceType": "c7i.large",
+          "ImageId": "ami-test",
+          "Architecture": "x86_64",
+          "PrivateIpAddress": "10.87.0.10",
+          "VpcId": "vpc-test",
+          "SubnetId": "subnet-test",
+          "Placement": {"AvailabilityZone": "us-west-2a"},
+          "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 2}
+        },
+        {
+          "InstanceId": "i-loadgen",
+          "InstanceType": "c7i.large",
+          "ImageId": "ami-test",
+          "Architecture": "x86_64",
+          "PrivateIpAddress": "10.87.0.11",
+          "VpcId": "vpc-test",
+          "SubnetId": "subnet-test",
+          "Placement": {"AvailabilityZone": "us-west-2a"},
+          "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 2}
+        }
+      ]
+    }
+  ]
+}

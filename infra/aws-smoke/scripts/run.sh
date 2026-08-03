@@ -22,8 +22,9 @@ async_queue_capacity="${BENCH_ASYNC_QUEUE_CAPACITY:-65536}"
 async_batch_size="${BENCH_ASYNC_BATCH_SIZE:-64}"
 async_max_wait_ms="${BENCH_ASYNC_MAX_WAIT_MS:-1}"
 async_configs="${BENCH_ASYNC_CONFIGS:-}"
-module_source_commit="${BENCH_MODULE_SOURCE_COMMIT:-}"
+module_source_commit="${BENCH_MODULE_SOURCE_COMMIT:-HEAD}"
 module_source_repo="${BENCH_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
+environment_network_samples="${BENCH_ENVIRONMENT_NETWORK_SAMPLES:-10000}"
 plan_only="${BENCH_PLAN_ONLY:-no}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 results_dir="${RESULTS_DIR:-$root_dir/results/$run_id}"
@@ -54,7 +55,7 @@ non_negative_integer() {
 for value in \
   "$requests" "$threads" "$payload" "$keyspace" "$maxlen" \
   "$repetitions" "$async_queue_capacity" \
-  "$async_batch_size" "$async_max_wait_ms"; do
+  "$async_batch_size" "$async_max_wait_ms" "$environment_network_samples"; do
   if ! positive_integer "$value"; then
     echo "benchmark values must be positive integers: $value" >&2
     exit 2
@@ -411,6 +412,72 @@ fi
 server_script_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 benchmark_script_b64="$(encode_file "$root_dir/scripts/remote-benchmark.sh")"
 profile_script_b64="$(encode_file "$root_dir/scripts/remote-profile.sh")"
+environment_script_b64="$(encode_file "$root_dir/scripts/remote-environment.sh")"
+
+# Capture the physical and software environment once per campaign. A clean s0
+# server supplies the exact Redis binary while avoiding module/workload noise
+# in the intrinsic and private-network latency probes.
+environment_server_start="printf '%s' '$server_script_b64' | base64 --decode > /tmp/eventstream-server.sh
+chmod 0700 /tmp/eventstream-server.sh
+/tmp/eventstream-server.sh s0 '$module_image' '$maxlen' '$module_override' '$async_queue_capacity' '$async_batch_size' '$async_max_wait_ms'"
+run_remote \
+  "$server_id" \
+  environment-server-start \
+  "$environment_server_start" \
+  "$results_dir/raw/environment-server-start"
+
+environment_server_command="printf '%s' '$environment_script_b64' | base64 --decode > /tmp/eventstream-environment.sh
+chmod 0700 /tmp/eventstream-environment.sh
+/tmp/eventstream-environment.sh server '$server_ip' '$loadgen_image' '$environment_network_samples'"
+run_remote \
+  "$server_id" \
+  environment-server \
+  "$environment_server_command" \
+  "$results_dir/raw/environment-server"
+
+environment_loadgen_command="printf '%s' '$environment_script_b64' | base64 --decode > /tmp/eventstream-environment.sh
+chmod 0700 /tmp/eventstream-environment.sh
+/tmp/eventstream-environment.sh loadgen '$server_ip' '$loadgen_image' '$environment_network_samples'"
+run_remote \
+  "$loadgen_id" \
+  environment-loadgen \
+  "$environment_loadgen_command" \
+  "$results_dir/raw/environment-loadgen"
+
+jq -e . "$results_dir/raw/environment-server.stdout" >/dev/null
+jq -e . "$results_dir/raw/environment-loadgen.stdout" >/dev/null
+
+aws_cli ec2 describe-instances \
+  --instance-ids "$server_id" "$loadgen_id" \
+  --output json >"$results_dir/raw/ec2-instances.json"
+aws_cli ec2 describe-volumes \
+  --filters "Name=attachment.instance-id,Values=$server_id,$loadgen_id" \
+  --output json >"$results_dir/raw/ec2-volumes.json"
+
+environment_collected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n \
+  --arg schema_version "1" \
+  --arg collected_at "$environment_collected_at" \
+  --arg server_id "$server_id" \
+  --arg loadgen_id "$loadgen_id" \
+  --arg region "$region" \
+  --arg availability_zone "$(jq -r '.availability_zone.value' <<<"$terraform_output")" \
+  --arg vpc_id "$(jq -r '.vpc_id.value' <<<"$terraform_output")" \
+  --arg subnet_id "$(jq -r '.subnet_id.value' <<<"$terraform_output")" \
+  --arg server_private_ip "$server_ip" \
+  --arg expiry_stop_schedule_arn \
+    "$(jq -r '.expiry_stop_schedule_arn.value' <<<"$terraform_output")" \
+  --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
+  --arg root_volume_type "$(jq -r '.root_volume_type.value' <<<"$terraform_output")" \
+  --argjson root_volume_gib \
+    "$(jq -r '.root_volume_gib.value' <<<"$terraform_output")" \
+  --slurpfile server_host "$results_dir/raw/environment-server.stdout" \
+  --slurpfile loadgen_host "$results_dir/raw/environment-loadgen.stdout" \
+  --slurpfile instances "$results_dir/raw/ec2-instances.json" \
+  --slurpfile volumes "$results_dir/raw/ec2-volumes.json" \
+  -f "$root_dir/scripts/assemble-environment.jq" \
+  >"$results_dir/environment.json"
+jq -e . "$results_dir/environment.json" >/dev/null
 
 trial_files=()
 trial_number=0
@@ -670,7 +737,7 @@ jq '
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 jq -n \
-  --arg schema_version "4" \
+  --arg schema_version "5" \
   --arg run_id "$run_id" \
   --arg started_at "$started_at" \
   --arg completed_at "$completed_at" \
@@ -684,7 +751,9 @@ jq -n \
   --arg loadgen_image "$loadgen_image" \
   --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
   --argjson module_artifact "$module_artifact_json" \
+  --slurpfile lab_environment "$results_dir/environment.json" \
   --arg capture_scenarios "$capture_scenarios" \
+  --argjson order_seed "$order_seed" \
   --argjson async_queue_capacity "$async_queue_capacity" \
   --argjson async_batch_size "$async_batch_size" \
   --argjson async_max_wait_ms "$async_max_wait_ms" \
@@ -697,6 +766,8 @@ jq -n \
     started_at: $started_at,
     completed_at: $completed_at,
     git_commit: $git_commit,
+    harness_git_commit: $git_commit,
+    order_seed: $order_seed,
     environment: {
       region: $region,
       availability_zone: $availability_zone,
@@ -704,9 +775,12 @@ jq -n \
       server_instance_type: $server_instance_type,
       loadgen_instance_type: $loadgen_instance_type,
       module_image: $module_image,
+      module_build_profile: "release",
       module_artifact: $module_artifact,
+      module_git_commit: $module_artifact.git_commit,
       loadgen_image: $loadgen_image,
-      expires_at: $expires_at
+      expires_at: $expires_at,
+      lab: $lab_environment[0]
     },
     capture_configuration: {
       scenarios: ($capture_scenarios | split(" ")),

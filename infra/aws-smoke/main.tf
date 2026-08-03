@@ -16,11 +16,13 @@ locals {
 
   common_tags = merge(
     {
+      Campaign    = terraform.workspace
       Environment = "aws-smoke"
       ExpiresAt   = time_offset.expiry.rfc3339
       ManagedBy   = "terraform"
       Owner       = var.owner
       Project     = "redis-event-stream-module"
+      Repository  = "joshrotenberg/redis-event-stream-module"
     },
     var.extra_tags,
   )
@@ -132,18 +134,21 @@ resource "aws_vpc_security_group_ingress_rule" "redis_from_loadgen" {
   referenced_security_group_id = aws_security_group.loadgen.id
   security_group_id            = aws_security_group.server.id
   to_port                      = 6379
+  tags                         = local.common_tags
 }
 
 resource "aws_vpc_security_group_egress_rule" "server" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
   security_group_id = aws_security_group.server.id
+  tags              = local.common_tags
 }
 
 resource "aws_vpc_security_group_egress_rule" "loadgen" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
   security_group_id = aws_security_group.loadgen.id
+  tags              = local.common_tags
 }
 
 resource "aws_iam_role" "ssm" {
@@ -235,4 +240,82 @@ resource "aws_instance" "loadgen" {
     Name = "${local.name}-loadgen"
     Role = "load-generator"
   })
+}
+
+# A controller interruption must not leave billable compute running until a
+# human notices the expiry tag. EventBridge Scheduler invokes the EC2
+# StopInstances API at ExpiresAt using a role restricted to these two instance
+# ARNs. Terraform destroy remains the resource-cleanup path; this is the hard
+# runtime backstop for the dominant compute and public-IPv4 charges.
+resource "aws_iam_role" "expiry_stop" {
+  name_prefix = "${local.name}-expiry-stop-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "scheduler.amazonaws.com"
+        }
+      },
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "expiry_stop" {
+  name_prefix = "stop-lab-instances-"
+  role        = aws_iam_role.expiry_stop.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "ec2:StopInstances"
+        Effect = "Allow"
+        Resource = [
+          aws_instance.server.arn,
+          aws_instance.loadgen.arn,
+        ]
+      },
+    ]
+  })
+}
+
+resource "aws_scheduler_schedule_group" "lab" {
+  name = "${local.name}-expiry"
+  tags = local.common_tags
+}
+
+resource "aws_scheduler_schedule" "expiry_stop" {
+  name                         = "${local.name}-expiry-stop"
+  description                  = "Hard-stop the disposable benchmark hosts at ExpiresAt"
+  schedule_expression          = "at(${formatdate("YYYY-MM-DD'T'hh:mm:ss", time_offset.expiry.rfc3339)})"
+  schedule_expression_timezone = "UTC"
+  action_after_completion      = "DELETE"
+  group_name                   = aws_scheduler_schedule_group.lab.name
+  depends_on                   = [aws_iam_role_policy.expiry_stop]
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
+    role_arn = aws_iam_role.expiry_stop.arn
+    input = jsonencode({
+      InstanceIds = [
+        aws_instance.server.id,
+        aws_instance.loadgen.id,
+      ]
+    })
+
+    retry_policy {
+      maximum_event_age_in_seconds = 3600
+      maximum_retry_attempts       = 3
+    }
+  }
 }
