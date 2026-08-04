@@ -436,7 +436,7 @@ collect_checkpoint() {
   local stream stream_memory stream_length
   mkdir -p "$checkpoint_dir"
   epoch_ms >"$checkpoint_dir/epoch-ms.txt"
-  for section in server clients memory stats cpu persistence keyspace commandstats eventstream; do
+  for section in server clients memory stats cpu persistence replication keyspace commandstats eventstream; do
     "${cli[@]}" --raw INFO "$section" >"$checkpoint_dir/info-$section.txt" 2>"$checkpoint_dir/info-$section.stderr" || true
   done
   "${cli_json[@]}" MODULE LIST >"$checkpoint_dir/module-list.json" 2>"$checkpoint_dir/module-list.stderr" || true
@@ -639,7 +639,8 @@ normalize_trial() {
   local before_main after_main before_total after_total main_cpu total_cpu
   local used_memory used_memory_rss used_memory_peak
   local retained_stream_entries stream_memory_bytes
-  local load_generator_metrics persistence_metrics
+  local load_generator_metrics persistence_metrics replication_metrics replica_metrics
+  local replica_line replica_state replica_offset replica_lag_seconds
   command_errors="$(command_error_count "$trial_dir/memtier.stderr")"
   connection_errors="$(connection_error_count "$trial_dir/memtier.json")"
   if [[ "$scenario" == custom-* ]]; then
@@ -748,7 +749,52 @@ normalize_trial() {
         }
       '
   )"
+  replica_line="$(
+    awk -F: '$1 ~ /^slave[0-9]+$/ { sub(/^[^:]*:/, ""); gsub(/\r/, ""); print; exit }' \
+      "$trial_dir/checkpoints/post/info-replication.txt"
+  )"
+  replica_state="$(
+    awk -F'[=,]' '{ for (i = 1; i <= NF; i++) if ($i == "state") { print $(i + 1); exit } }' \
+      <<<"$replica_line"
+  )"
+  replica_offset="$(
+    awk -F'[=,]' '{ for (i = 1; i <= NF; i++) if ($i == "offset") { print $(i + 1); exit } }' \
+      <<<"$replica_line"
+  )"
+  replica_lag_seconds="$(
+    awk -F'[=,]' '{ for (i = 1; i <= NF; i++) if ($i == "lag") { print $(i + 1); exit } }' \
+      <<<"$replica_line"
+  )"
+  replication_metrics="$(
+    jq -n \
+      --argjson operations "$(jq '(.["ALL STATS"].Totals.Count // 0)' "$trial_dir/memtier.json")" \
+      --arg role "$(awk -F: '$1 == "role" { gsub(/\r/, "", $2); print $2; exit }' "$trial_dir/checkpoints/post/info-replication.txt")" \
+      --argjson connected_replicas "$(awk -F: '$1 == "connected_slaves" { gsub(/\r/, "", $2); print $2; found=1; exit } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-replication.txt")" \
+      --argjson before_offset "$(awk -F: '$1 == "master_repl_offset" { gsub(/\r/, "", $2); print $2; found=1; exit } END { if (!found) print 0 }' "$trial_dir/checkpoints/pre/info-replication.txt")" \
+      --argjson after_offset "$(awk -F: '$1 == "master_repl_offset" { gsub(/\r/, "", $2); print $2; found=1; exit } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-replication.txt")" \
+      --arg replica_state "$replica_state" \
+      --arg replica_offset "$replica_offset" \
+      --arg replica_lag_seconds "$replica_lag_seconds" '
+        {
+          topology: (if $connected_replicas > 0 then "primary-replica" else "standalone" end),
+          role: $role,
+          connected_replicas: $connected_replicas,
+          master_repl_offset_before: $before_offset,
+          master_repl_offset_after: $after_offset,
+          replication_bytes_delta: ($after_offset - $before_offset),
+          replication_bytes_per_operation:
+            (if $operations > 0 then ($after_offset - $before_offset) / $operations else null end),
+          replica_state: (if $replica_state == "" then null else $replica_state end),
+          replica_offset: (if $replica_offset == "" then null else ($replica_offset | tonumber) end),
+          replica_lag_bytes:
+            (if $replica_offset == "" then null else $after_offset - ($replica_offset | tonumber) end),
+          replica_lag_seconds:
+            (if $replica_lag_seconds == "" then null else ($replica_lag_seconds | tonumber) end)
+        }
+      '
+  )"
   load_generator_metrics=null
+  replica_metrics=null
   if [[ -s "$trial_dir/checkpoints/pre/metrics-hook.stdout" &&
     -s "$trial_dir/checkpoints/post/metrics-hook.stdout" ]] &&
     jq -e '.schema == "linux-proc-stat-v1"' \
@@ -784,6 +830,33 @@ normalize_trial() {
         '
     )"
   fi
+  if [[ -s "$trial_dir/checkpoints/pre/metrics-hook.stdout" &&
+    -s "$trial_dir/checkpoints/post/metrics-hook.stdout" ]] &&
+    jq -e '.replica != null' "$trial_dir/checkpoints/pre/metrics-hook.stdout" >/dev/null 2>&1 &&
+    jq -e '.replica != null' "$trial_dir/checkpoints/post/metrics-hook.stdout" >/dev/null 2>&1; then
+    replica_metrics="$(
+      jq -n \
+        --slurpfile before "$trial_dir/checkpoints/pre/metrics-hook.stdout" \
+        --slurpfile after "$trial_dir/checkpoints/post/metrics-hook.stdout" '
+          (($after[0].epoch_ms - $before[0].epoch_ms) / 1000) as $duration |
+          (($after[0].replica.used_cpu_sys + $after[0].replica.used_cpu_user) -
+           ($before[0].replica.used_cpu_sys + $before[0].replica.used_cpu_user)) as $cpu_delta |
+          {
+            role: $after[0].replica.role,
+            link_status: $after[0].replica.link_status,
+            sync_in_progress: $after[0].replica.sync_in_progress,
+            observed_duration_seconds: $duration,
+            cpu_seconds: $cpu_delta,
+            core_percent: (if $duration > 0 then ($cpu_delta / $duration) * 100 else null end),
+            used_memory_bytes: $after[0].replica.used_memory_bytes,
+            used_memory_rss_bytes: $after[0].replica.used_memory_rss_bytes,
+            master_offset: $after[0].replica.master_offset,
+            replica_offset: $after[0].replica.replica_offset,
+            lag_bytes: ($after[0].replica.master_offset - $after[0].replica.replica_offset)
+          }
+        '
+    )"
+  fi
 
   jq -n \
     --argjson schema_version "$schema_version" \
@@ -808,6 +881,8 @@ normalize_trial() {
     --argjson retained_stream_entries "$retained_stream_entries" \
     --argjson stream_memory_bytes "$stream_memory_bytes" \
     --argjson persistence_metrics "$persistence_metrics" \
+    --argjson replication_metrics "$replication_metrics" \
+    --argjson replica_metrics "$replica_metrics" \
     --argjson load_generator_metrics "$load_generator_metrics" \
     --argjson command_errors "$command_errors" \
     --argjson connection_errors "$connection_errors" \
@@ -882,8 +957,10 @@ normalize_trial() {
             (if $retained_stream_entries > 0 then
                $stream_memory_bytes / $retained_stream_entries
              else null end),
-          persistence: $persistence_metrics
+          persistence: $persistence_metrics,
+          replication: $replication_metrics
         },
+        replica: $replica_metrics,
         load_generator: $load_generator_metrics,
         module: (
           if $module_loaded then
@@ -919,6 +996,15 @@ reconcile_trial() {
        (.server.persistence.aof_enabled == 1) and
        (.server.persistence.aof_last_write_status == "ok")
      end) and
+    (if .server.replication.connected_replicas > 0 then
+       (.server.replication.replica_state == "online") and
+       (.server.replication.replica_lag_bytes >= 0) and
+       (.replica != null) and
+       (.replica.role == "slave") and
+       (.replica.link_status == "up") and
+       (.replica.sync_in_progress == 0) and
+       (.replica.lag_bytes >= 0)
+     else true end) and
     (if (.scenario | startswith("expiry-")) then
       .expiry.overlap_proven == true and .expiry.drained == true
     else true end)
@@ -1230,6 +1316,22 @@ jq '
       ($trials | map(.server.persistence.aof_delayed_fsync_delta) | distribution),
     aof_pending_bio_fsync:
       ($trials | map(.server.persistence.aof_pending_bio_fsync) | distribution),
+    connected_replicas:
+      ($trials | map(.server.replication.connected_replicas) | distribution),
+    replication_bytes_per_operation:
+      ($trials | map(.server.replication.replication_bytes_per_operation) | distribution),
+    primary_reported_replica_lag_bytes:
+      ($trials | map(.server.replication.replica_lag_bytes) | distribution),
+    primary_reported_replica_lag_seconds:
+      ($trials | map(.server.replication.replica_lag_seconds) | distribution),
+    replica_core_percent:
+      ($trials | map(.replica.core_percent) | distribution),
+    replica_used_memory_bytes:
+      ($trials | map(.replica.used_memory_bytes) | distribution),
+    replica_used_memory_rss_bytes:
+      ($trials | map(.replica.used_memory_rss_bytes) | distribution),
+    replica_reported_lag_bytes:
+      ($trials | map(.replica.lag_bytes) | distribution),
     load_generator_host_cpu_percent:
       ($trials | map(.load_generator.host_cpu_percent) | distribution),
     load_generator_core_percent:

@@ -12,7 +12,7 @@ output "expires_at" {
 }
 
 output "expiry_stop_schedule_arn" {
-  description = "EventBridge Scheduler backstop that stops both hosts at expires_at."
+  description = "EventBridge Scheduler backstop that stops every lab host at expires_at."
   value       = aws_scheduler_schedule.expiry_stop.arn
 }
 
@@ -50,6 +50,22 @@ output "module_image" {
 
 output "region" {
   value = var.aws_region
+}
+
+output "replica_enabled" {
+  value = var.replica_enabled
+}
+
+output "replica_instance_id" {
+  value = try(aws_instance.replica[0].id, null)
+}
+
+output "replica_instance_type" {
+  value = try(aws_instance.replica[0].instance_type, null)
+}
+
+output "replica_private_ip" {
+  value = try(aws_instance.replica[0].private_ip, null)
 }
 
 output "server_instance_id" {

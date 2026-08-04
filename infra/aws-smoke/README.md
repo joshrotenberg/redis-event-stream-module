@@ -2,23 +2,25 @@
 
 This is the smallest cloud experiment for the event-stream module: one
 non-burstable Redis host and one separate load-generator host in the same
-availability zone. It is a smoke-quality comparison, not a published capacity
-claim.
+availability zone, with an optional third host for a Redis replica. It is a
+smoke-quality comparison, not a published capacity claim.
 
-The lab deliberately excludes Redis Enterprise, EKS, bare metal, replicas,
-cluster mode, Prometheus, long soaks, and failure injection. Those remain in the
-larger performance backlog.
+The lab deliberately excludes Redis Enterprise, EKS, bare metal, cluster mode,
+Prometheus, long soaks, promotion, and broad failure injection. Those remain
+in the larger performance backlog.
 
 ## What it creates
 
 - One VPC, public subnet, route table, and internet gateway.
-- One `c7i.large` server and one `c7i.large` load generator by default.
+- One `c7i.large` server and one `c7i.large` load generator by default, plus an
+  optional `c7i.large` replica.
 - No inbound SSH or management access. AWS Systems Manager drives both hosts.
-- Redis port 6379 is reachable only from the load-generator security group.
+- Redis port 6379 is reachable only from the load-generator security group and,
+  when enabled, between the primary and replica security-group members.
 - An encrypted, delete-on-termination gp3 root volume on each instance.
 - An EC2 role containing only the AWS-managed SSM core policy.
-- A tagged EventBridge Scheduler group and one-time action that stops both
-  instances at the configured expiry.
+- A tagged EventBridge Scheduler group and one-time action that stops every lab
+  instance at the configured expiry.
 
 The instances need public egress to install Docker and pull pinned public
 images. Public IPv4 addresses exist, but the security groups have no inbound
@@ -55,6 +57,11 @@ campaign.
 `ttl_hours` defaults to four and is constrained to 1–24 hours. The scheduled
 hard stop limits EC2 and public-IPv4 runtime if the controller disappears.
 Stopped instances and their EBS volumes still require `./lab.sh down`.
+
+Enabling the replica adds one instance, public IPv4 address, and root volume
+for the campaign duration. At the reference shape it increases the compute
+portion of the estimate below by 50%; verify current AWS pricing before a
+larger run.
 
 ## Prerequisites
 
@@ -152,6 +159,46 @@ SATURATION_MEASUREMENT_SECONDS=30 \
 Repeat the same matrix with `off` and `aof-always` rather than combining
 policies in one invocation. `SATURATION_PERSISTENCE_PROBE_EVENTS` changes the
 restart sample size and must not exceed `SATURATION_MAXLEN`.
+
+## Single-replica campaign
+
+Create the optional third host and select the replica-aware runner together;
+the controller rejects mismatched topology and mode settings. The replica
+loads the exact same module artifact with capture filters disabled, then follows
+the primary. Primary-generated stream writes replicate normally without the
+replica independently re-capturing the original commands.
+
+```sh
+export TF_VAR_replica_enabled=true
+export SATURATION_REPLICATION_MODE=replica
+
+SATURATION_PERSISTENCE_MODE=off \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_CLIENT_LEVELS=50 \
+SATURATION_THREAD_LEVELS=4 \
+SATURATION_RATE_LIMIT_LEVELS="375 500" \
+SATURATION_REPETITIONS=3 \
+SATURATION_WARMUP_SECONDS=10 \
+SATURATION_MEASUREMENT_SECONDS=30 \
+./lab.sh saturation-campaign -auto-approve
+```
+
+Each trial records primary offsets, bytes replicated over the measured window,
+replica link state, post-trial lag, and replica Redis CPU/RSS. After the matrix,
+the controller pauses the replica container, writes a unique captured sample
+to the primary, proves the replication offset gap is nonzero, resumes the
+replica, and measures catch-up. `replication-probe.json` must reconcile the
+exact source-key and canonical-stream counts on both nodes, with zero loss,
+drops, worker errors, panics, or replica-side re-capture. Change the bounded
+probe with `SATURATION_REPLICATION_PROBE_EVENTS` and
+`SATURATION_REPLICATION_PAUSE_SECONDS`.
+
+For the matched standalone control, destroy the replica campaign, unset
+`TF_VAR_replica_enabled`, and run the same matrix with
+`SATURATION_REPLICATION_MODE=off`. The request-counted and soak runners remain
+standalone-only and reject an enabled replica to avoid silently contaminating
+their existing environment contract.
 
 The one-command disposable form applies the lab, runs saturation, destroys the
 resources even when the workload fails, and performs the orphan check:
@@ -428,6 +475,8 @@ The runner fails unless:
 - [2026-07-30: async and batch write spike][async-batch]
 - [2026-07-30: Preview envelope tuning][envelope-tuning]
 - [2026-07-30: Preview envelope soak and restart-loss probe][envelope-soak]
+- [2026-08-04: single-node persistence baseline][persistence-baseline]
+- [2026-08-04: one-replica baseline and catch-up probe][replication-baseline]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
@@ -436,6 +485,8 @@ The runner fails unless:
 [async-batch]: observations/2026-07-30-async-batch-spike.md
 [envelope-tuning]: observations/2026-07-30-envelope-tuning.md
 [envelope-soak]: observations/2026-07-30-envelope-soak.md
+[persistence-baseline]: observations/2026-08-04-persistence-baseline.md
+[replication-baseline]: observations/2026-08-04-replication-baseline.md
 
 ## Image pins
 

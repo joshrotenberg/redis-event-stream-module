@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 6 ]]; then
-  echo "usage: remote-saturation.sh <server-ip> <redis-image> <memtier-image> <module-path-in-server> <harness-url> <result-dir>" >&2
+if [[ $# -lt 6 || $# -gt 7 ]]; then
+  echo "usage: remote-saturation.sh <server-ip> <redis-image> <memtier-image> <module-path-in-server> <harness-url> <result-dir> [replica-ip|-]" >&2
   exit 2
 fi
 
@@ -12,6 +12,7 @@ memtier_image="$3"
 module_path="$4"
 harness_url="$5"
 result_dir="$6"
+replica_ip="${7:--}"
 cli_container="eventstream-saturation-cli"
 
 if [[ "$result_dir" != /var/lib/eventstream-smoke/saturation ]]; then
@@ -61,6 +62,28 @@ cat >/tmp/eventstream-saturation-metrics.sh <<'WRAPPER'
 set -euo pipefail
 
 read -r _ user nice system idle iowait irq softirq steal _ </proc/stat
+replica=null
+if [[ "${SATURATION_REPLICA_IP:-}" != "-" ]]; then
+  replica_cpu="$(docker exec eventstream-saturation-cli redis-cli -h "$SATURATION_REPLICA_IP" --raw INFO cpu)"
+  replica_memory="$(docker exec eventstream-saturation-cli redis-cli -h "$SATURATION_REPLICA_IP" --raw INFO memory)"
+  replica_replication="$(docker exec eventstream-saturation-cli redis-cli -h "$SATURATION_REPLICA_IP" --raw INFO replication)"
+  replica="$(
+    jq -n \
+      --argjson used_cpu_sys "$(awk -F: '$1 == "used_cpu_sys" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_cpu")" \
+      --argjson used_cpu_user "$(awk -F: '$1 == "used_cpu_user" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_cpu")" \
+      --argjson used_memory "$(awk -F: '$1 == "used_memory" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_memory")" \
+      --argjson used_memory_rss "$(awk -F: '$1 == "used_memory_rss" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_memory")" \
+      --arg role "$(awk -F: '$1 == "role" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_replication")" \
+      --arg link_status "$(awk -F: '$1 == "master_link_status" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_replication")" \
+      --argjson sync_in_progress "$(awk -F: '$1 == "master_sync_in_progress" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_replication")" \
+      --argjson master_offset "$(awk -F: '$1 == "master_repl_offset" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_replication")" \
+      --argjson replica_offset "$(awk -F: '$1 == "slave_repl_offset" { gsub(/\r/, "", $2); print $2; exit }' <<<"$replica_replication")" \
+      '{used_cpu_sys: $used_cpu_sys, used_cpu_user: $used_cpu_user,
+        used_memory_bytes: $used_memory, used_memory_rss_bytes: $used_memory_rss,
+        role: $role, link_status: $link_status, sync_in_progress: $sync_in_progress,
+        master_offset: $master_offset, replica_offset: $replica_offset}'
+  )"
+fi
 jq -n \
   --arg schema linux-proc-stat-v1 \
   --argjson epoch_ms "$(date +%s%3N)" \
@@ -73,9 +96,11 @@ jq -n \
   --argjson irq "$irq" \
   --argjson softirq "$softirq" \
   --argjson steal "$steal" \
+  --argjson replica "$replica" \
   '{schema: $schema, epoch_ms: $epoch_ms, logical_cpus: $logical_cpus,
     cpu_ticks: {user: $user, nice: $nice, system: $system, idle: $idle,
-      iowait: $iowait, irq: $irq, softirq: $softirq, steal: $steal}}'
+      iowait: $iowait, irq: $irq, softirq: $softirq, steal: $steal},
+    replica: $replica}'
 WRAPPER
 chmod 0700 \
   /tmp/eventstream-saturation-bin/redis-cli \
@@ -83,6 +108,7 @@ chmod 0700 \
   /tmp/eventstream-saturation-metrics.sh
 
 export SATURATION_MEMTIER_IMAGE="$memtier_image"
+export SATURATION_REPLICA_IP="$replica_ip"
 export SATURATION_START_SERVER=no
 export SATURATION_BUILD_MODULE=no
 export SATURATION_HOST="$server_ip"

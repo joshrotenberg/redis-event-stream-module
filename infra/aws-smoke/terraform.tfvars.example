@@ -6,5 +6,7 @@ owner = "you@example.com"
 # availability_zone     = "us-west-2a"
 # server_instance_type  = "c7i.large"
 # loadgen_instance_type = "c7i.large"
+# replica_enabled       = true
+# replica_instance_type = "c7i.large"
 # ttl_hours             = 4
 # memtier_image         = "redislabs/memtier_benchmark@sha256:..."

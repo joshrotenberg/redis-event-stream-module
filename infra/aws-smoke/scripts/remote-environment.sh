@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Emit one host's reproducibility metadata. The server role measures intrinsic
-# scheduler latency inside the Redis container; the load-generator role records
-# private-network Redis PING latency to the server.
+# Emit one host's reproducibility metadata. Server roles measure intrinsic
+# scheduler latency inside their Redis container; the load-generator role
+# records private-network Redis PING latency to the primary.
 set -euo pipefail
 
 if [[ $# -ne 4 ]]; then
-  echo "usage: remote-environment.sh <server|loadgen> <server-ip> <loadgen-image> <samples>" >&2
+  echo "usage: remote-environment.sh <server|replica|loadgen> <server-ip> <loadgen-image> <samples>" >&2
   exit 2
 fi
 
@@ -14,8 +14,8 @@ server_ip="$2"
 loadgen_image="$3"
 samples="$4"
 
-if [[ "$role" != server && "$role" != loadgen ]]; then
-  echo "role must be server or loadgen" >&2
+if [[ "$role" != server && "$role" != replica && "$role" != loadgen ]]; then
+  echo "role must be server, replica, or loadgen" >&2
   exit 2
 fi
 if ! [[ "$samples" =~ ^[1-9][0-9]*$ ]]; then
@@ -42,9 +42,11 @@ network_p99_ms="null"
 network_max_ms="null"
 network_command="null"
 
-if [[ "$role" == server ]]; then
+if [[ "$role" == server || "$role" == replica ]]; then
+  redis_container=eventstream-server
+  [[ "$role" == replica ]] && redis_container=eventstream-replica
   intrinsic_raw="$(
-    docker exec eventstream-server redis-cli --intrinsic-latency 1 2>&1
+    docker exec "$redis_container" redis-cli --intrinsic-latency 1 2>&1
   )"
   intrinsic_max_us="$(
     awk '/Max latency so far:/ { value = $(NF - 1) } END { print value + 0 }' \
@@ -104,9 +106,9 @@ jq -n \
       version: (if $role == "loadgen" then $loadgen_version else null end)
     },
     intrinsic_latency: {
-      duration_seconds: (if $role == "server" then 1 else null end),
+      duration_seconds: (if $role == "loadgen" then null else 1 end),
       max_us: $intrinsic_max_us,
-      raw: (if $role == "server" then $intrinsic_raw else null end)
+      raw: (if $role == "loadgen" then null else $intrinsic_raw end)
     },
     private_network_ping: {
       command: $network_command,
