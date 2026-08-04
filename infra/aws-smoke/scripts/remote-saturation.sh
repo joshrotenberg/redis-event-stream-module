@@ -49,6 +49,7 @@ WRAPPER
 cat >/tmp/eventstream-saturation-bin/memtier_benchmark <<'WRAPPER'
 #!/usr/bin/env bash
 exec docker run --rm --network host \
+  --env EVENT_PRECISE_TIMER \
   --volume /var/lib/eventstream-smoke/saturation:/var/lib/eventstream-smoke/saturation \
   "$SATURATION_MEMTIER_IMAGE" "$@"
 WRAPPER

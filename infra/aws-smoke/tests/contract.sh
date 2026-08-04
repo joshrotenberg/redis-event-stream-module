@@ -57,7 +57,11 @@ grep -Fq 'exec docker exec eventstream-saturation-cli redis-cli "$@"' \
 grep -Fq 'linux-proc-stat-v1' "$root_dir/scripts/remote-saturation.sh"
 grep -Fq 'SATURATION_METRICS_HOOK=/tmp/eventstream-saturation-metrics.sh' \
   "$root_dir/scripts/remote-saturation.sh"
+grep -Fq -- '--env EVENT_PRECISE_TIMER' \
+  "$root_dir/scripts/remote-saturation.sh"
 grep -Fq 'SATURATION_RATE_LIMIT_LEVELS SATURATION_P99_BUDGET_MS' \
+  "$root_dir/scripts/saturation.sh"
+grep -Fq 'SATURATION_WORKLOAD_NAME SATURATION_PRECISE_TIMER' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'export SATURATION_COMMANDS_FILE=/tmp/eventstream-saturation-commands.json' \
   "$root_dir/scripts/saturation.sh"

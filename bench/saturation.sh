@@ -16,6 +16,8 @@ client_levels="${SATURATION_CLIENT_LEVELS:-50}"
 thread_levels="${SATURATION_THREAD_LEVELS:-4}"
 pipeline_levels="${SATURATION_PIPELINE_LEVELS:-1}"
 rate_limit_levels="${SATURATION_RATE_LIMIT_LEVELS:-0}"
+precise_timer="${SATURATION_PRECISE_TIMER:-1}"
+precise_timer_applied=null
 repetitions="${SATURATION_REPETITIONS:-5}"
 warmup_seconds="${SATURATION_WARMUP_SECONDS:-10}"
 measurement_seconds="${SATURATION_MEASUREMENT_SECONDS:-60}"
@@ -140,6 +142,20 @@ for value in $rate_limit_levels; do
   if ! non_negative_integer "$value"; then
     echo "rate limits must be non-negative integers: $value" >&2
     exit 2
+  fi
+done
+if [[ "$precise_timer" != 0 && "$precise_timer" != 1 ]]; then
+  echo "SATURATION_PRECISE_TIMER must be 0 or 1" >&2
+  exit 2
+fi
+for value in $rate_limit_levels; do
+  if ((value > 0)); then
+    # libevent's default timer resolution can make memtier's rate limiter
+    # oscillate on hosts such as Amazon Linux 2023 (CONFIG_HZ=100). Exporting
+    # this before the first memtier invocation keeps paced trials comparable.
+    export EVENT_PRECISE_TIMER="$precise_timer"
+    precise_timer_applied="$precise_timer"
+    break
   fi
 done
 if ! awk -v value="$p99_budget_ms" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value > 0) }'; then
@@ -1041,6 +1057,7 @@ jq -n \
   --arg threads "$thread_levels" \
   --arg pipelines "$pipeline_levels" \
   --arg rate_limits "$rate_limit_levels" \
+  --argjson precise_timer "$precise_timer_applied" \
   --arg workload_name "$workload_name" \
   --argjson p99_budget_ms "$p99_budget_ms" \
   --argjson achievement_ratio "$achievement_ratio" \
@@ -1051,7 +1068,8 @@ jq -n \
     source: {git_commit: $git_commit, module_path: $module_path,
       module_sha256: (if $module_sha256 == "null" then null else $module_sha256 end)},
     target: {host: $host, port: $port, server_version: $server_version},
-    generator: {name: "memtier_benchmark", version: $memtier_version},
+    generator: {name: "memtier_benchmark", version: $memtier_version,
+      precise_timer: $precise_timer},
     plan: {scenarios: ($scenarios | split(" ") | map(select(length > 0))),
       selectivity_percent: ($selectivities | split(" ") | map(tonumber)),
       clients_per_thread: ($clients | split(" ") | map(tonumber)),

@@ -152,6 +152,13 @@ SATURATION_ACHIEVEMENT_RATIO=0.98 \
 ./lab.sh saturation-campaign -auto-approve
 ```
 
+The AWS load generator uses Amazon Linux 2023. Rate-limited campaigns enable
+`EVENT_PRECISE_TIMER=1` inside the memtier container to avoid the timer
+oscillation documented in
+[memtier issue #361](https://github.com/redis/memtier_benchmark/issues/361).
+The manifest records this setting; use `SATURATION_PRECISE_TIMER=0` only to
+produce an explicit control.
+
 Choose the absolute p99 budget from a coarse matched S0 run on the same client
 geometry. A budget below the paced S0 tail makes every module comparison
 unhealthy and does not describe a module knee; the 6 ms example reflects the

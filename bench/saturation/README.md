@@ -83,6 +83,7 @@ All lists are whitespace-separated:
 | `SATURATION_THREAD_LEVELS` | `4` | memtier threads |
 | `SATURATION_PIPELINE_LEVELS` | `1` | Requests in flight per connection |
 | `SATURATION_RATE_LIMIT_LEVELS` | `0` | Requests/s per connection; `0` is unlimited |
+| `SATURATION_PRECISE_TIMER` | `1` | Set memtier/libevent's `EVENT_PRECISE_TIMER` for paced runs |
 | `SATURATION_REPETITIONS` | `5` | Independent trials per matrix cell |
 | `SATURATION_WARMUP_SECONDS` | `10` | Warmup duration |
 | `SATURATION_MEASUREMENT_SECONDS` | `60` | Measured duration |
@@ -114,6 +115,12 @@ SATURATION_P99_BUDGET_MS=2 \
 SATURATION_ACHIEVEMENT_RATIO=0.98 \
 bench/saturation.sh
 ```
+
+Paced runs export libevent's `EVENT_PRECISE_TIMER=1` by default. This avoids a
+documented memtier rate-limiter oscillation on Amazon Linux 2023 hosts whose
+kernel uses `CONFIG_HZ=100`; the selected value is recorded in the manifest.
+Set `SATURATION_PRECISE_TIMER=0` only for a deliberate control comparison.
+See [memtier issue #361](https://github.com/redis/memtier_benchmark/issues/361).
 
 `knee.json` classifies each repeated rate level as healthy when its median p99
 is within `SATURATION_P99_BUDGET_MS` and its median achieved throughput is at
