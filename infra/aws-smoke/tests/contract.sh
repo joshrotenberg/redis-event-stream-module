@@ -5,8 +5,6 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_dir="$root_dir/tests/fixtures"
 test_dir="$(mktemp -d)"
 
-grep -Eq '^[[:space:]]+Owner[[:space:]]+=[[:space:]]+var.owner$' \
-  "$root_dir/main.tf"
 grep -Eq '^[[:space:]]+owner[[:space:]]+=[[:space:]]+var.owner$' \
   "$root_dir/main.tf"
 

@@ -25,9 +25,10 @@ images. Public IPv4 addresses exist, but the security groups have no inbound
 management rules.
 
 All taggable resources carry repository, campaign, environment, owner, and
-expiry tags. Both `Owner` and lowercase `owner` are emitted because AWS tag
-keys are case-sensitive and account cleanup policies may require one exact
-spelling. The expiry action stops compute, but it does **not** destroy the
+expiry tags. The owner tag uses lowercase `owner`: EC2 tag keys are
+case-sensitive, the account cleanup policy requires that spelling, and IAM
+rejects case-only duplicate tag keys. The expiry action stops compute, but it
+does **not** destroy the
 remaining network, storage, IAM, or Terraform state. Always run the destroy and
 orphan-check steps.
 
