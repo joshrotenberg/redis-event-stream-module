@@ -49,12 +49,35 @@ WRAPPER
 cat >/tmp/eventstream-saturation-bin/memtier_benchmark <<'WRAPPER'
 #!/usr/bin/env bash
 exec docker run --rm --network host \
+  --env EVENT_PRECISE_TIMER \
   --volume /var/lib/eventstream-smoke/saturation:/var/lib/eventstream-smoke/saturation \
   "$SATURATION_MEMTIER_IMAGE" "$@"
 WRAPPER
+cat >/tmp/eventstream-saturation-metrics.sh <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+read -r _ user nice system idle iowait irq softirq steal _ </proc/stat
+jq -n \
+  --arg schema linux-proc-stat-v1 \
+  --argjson epoch_ms "$(date +%s%3N)" \
+  --argjson logical_cpus "$(getconf _NPROCESSORS_ONLN)" \
+  --argjson user "$user" \
+  --argjson nice "$nice" \
+  --argjson system "$system" \
+  --argjson idle "$idle" \
+  --argjson iowait "$iowait" \
+  --argjson irq "$irq" \
+  --argjson softirq "$softirq" \
+  --argjson steal "$steal" \
+  '{schema: $schema, epoch_ms: $epoch_ms, logical_cpus: $logical_cpus,
+    cpu_ticks: {user: $user, nice: $nice, system: $system, idle: $idle,
+      iowait: $iowait, irq: $irq, softirq: $softirq, steal: $steal}}'
+WRAPPER
 chmod 0700 \
   /tmp/eventstream-saturation-bin/redis-cli \
-  /tmp/eventstream-saturation-bin/memtier_benchmark
+  /tmp/eventstream-saturation-bin/memtier_benchmark \
+  /tmp/eventstream-saturation-metrics.sh
 
 export SATURATION_MEMTIER_IMAGE="$memtier_image"
 export SATURATION_START_SERVER=no
@@ -64,7 +87,10 @@ export SATURATION_PORT=6379
 export SATURATION_SERVER_MODULE_PATH="$module_path"
 export SATURATION_CLI_BIN=/tmp/eventstream-saturation-bin/redis-cli
 export SATURATION_MEMTIER_BIN=/tmp/eventstream-saturation-bin/memtier_benchmark
+export SATURATION_METRICS_HOOK=/tmp/eventstream-saturation-metrics.sh
 export SATURATION_RESULTS_DIR="$result_dir"
 
 /tmp/eventstream-saturation.sh
+tar -C "$result_dir" -czf /var/lib/eventstream-smoke/saturation-summary.tar.gz \
+  manifest.json trials.json summary.json knee.json result.json
 tar -C "$result_dir" -czf /var/lib/eventstream-smoke/saturation-results.tar.gz .

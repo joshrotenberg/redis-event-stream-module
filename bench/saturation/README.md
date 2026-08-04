@@ -82,15 +82,64 @@ All lists are whitespace-separated:
 | `SATURATION_CLIENT_LEVELS` | `50` | Connections per memtier thread |
 | `SATURATION_THREAD_LEVELS` | `4` | memtier threads |
 | `SATURATION_PIPELINE_LEVELS` | `1` | Requests in flight per connection |
+| `SATURATION_RATE_LIMIT_LEVELS` | `0` | Requests/s per connection; `0` is unlimited |
+| `SATURATION_PRECISE_TIMER` | `1` | Set memtier/libevent's `EVENT_PRECISE_TIMER` for paced runs |
 | `SATURATION_REPETITIONS` | `5` | Independent trials per matrix cell |
 | `SATURATION_WARMUP_SECONDS` | `10` | Warmup duration |
 | `SATURATION_MEASUREMENT_SECONDS` | `60` | Measured duration |
+| `SATURATION_P99_BUDGET_MS` | `2` | Healthy-knee median p99 ceiling |
+| `SATURATION_ACHIEVEMENT_RATIO` | `0.98` | Minimum median achieved/target rate |
+| `SATURATION_WORKLOAD_NAME` | `builtin-write-only` | Artifact label for separate workload runs |
 | `SATURATION_SEED` | `254` | Deterministic trial order and expiry jitter |
 
 The 0/1/10/100 mix uses separate string and hash keyspaces, avoiding accidental
 `WRONGTYPE` errors. The exact number of SET operations reported by memtier is
 reconciled with the module's `forwarded` counter; ratios are not inferred from
 elapsed time.
+
+## Offered-load knee search
+
+Set `SATURATION_RATE_LIMIT_LEVELS` to compare scenarios at the same offered
+load. memtier applies each value to every connection, so the aggregate target
+is `clients per thread * threads * rate limit`. The manifest and every trial
+record both the per-connection limit and aggregate target. For example, 50
+clients on four threads with levels `250 500 625 750` targets 50k, 100k, 125k,
+and 150k requests/s:
+
+```sh
+SATURATION_SCENARIOS="s0 s1 s2" \
+SATURATION_SELECTIVITIES="0 10 100" \
+SATURATION_RATE_LIMIT_LEVELS="250 500 625 750" \
+SATURATION_REPETITIONS=3 \
+SATURATION_P99_BUDGET_MS=2 \
+SATURATION_ACHIEVEMENT_RATIO=0.98 \
+bench/saturation.sh
+```
+
+Paced runs export libevent's `EVENT_PRECISE_TIMER=1` by default. This avoids a
+documented memtier rate-limiter oscillation on Amazon Linux 2023 hosts whose
+kernel uses `CONFIG_HZ=100`; the selected value is recorded in the manifest.
+Set `SATURATION_PRECISE_TIMER=0` only for a deliberate control comparison.
+See [memtier issue #361](https://github.com/redis/memtier_benchmark/issues/361).
+
+`knee.json` classifies each repeated rate level as healthy when its median p99
+is within `SATURATION_P99_BUDGET_MS` and its median achieved throughput is at
+least `SATURATION_ACHIEVEMENT_RATIO` of the target. It reports the highest
+healthy level plus its adjacent lower and higher points. A status of
+`ceiling-not-reached` means the sweep needs a higher coarse point;
+`no-healthy-point` means it needs a lower point or a revised latency budget;
+only `bracketed` locates both sides of the knee.
+
+The normalized trial also includes Redis process and, when the server exposes
+them, main-thread CPU deltas, CPU per operation, and post-trial memory/RSS.
+These values are meaningful only for a sufficiently long measured window;
+short smoke runs validate artifact shape rather than capacity.
+
+When `SATURATION_METRICS_HOOK` emits the built-in `linux-proc-stat-v1` shape,
+the normalized trial also reports load-generator host CPU, aggregate core use,
+and headroom over the exact pre/post interval. The AWS runner installs this
+hook automatically so a missed offered-load target cannot be attributed to
+Redis without first ruling out generator saturation.
 
 ## Mass-expiry contract
 
@@ -139,6 +188,14 @@ preserves the raw per-command output. Do not combine separately aggregated
 command percentiles as if they were an exact percentile for their union; use
 the `Totals` distribution or the saved server-side latency histograms.
 
+The checked-in `read-heavy.json`, `balanced.json`, and `write-heavy.json`
+specifications provide small representative mixes for knee campaigns. Use
+`custom-s0 custom-s1 custom-s2`, label the run with
+`SATURATION_WORKLOAD_NAME`, and set `SATURATION_CAPTURE_EVENTS` to the selected
+write events. Value size remains an explicit campaign control through
+`SATURATION_PAYLOAD_BYTES`; run matched campaigns rather than blending sizes
+into percentiles that cannot be separated later.
+
 ## Hooks and artifacts
 
 `SATURATION_METRICS_HOOK` runs at every pre/post checkpoint with
@@ -155,6 +212,7 @@ Each versioned result directory contains:
   output, and expiry timeline;
 - `trials.json`: normalized per-trial results with counter before/after/delta;
 - `summary.json`: min/median/max distributions by matrix cell; and
+- `knee.json`: equal-offered-load health classification and adjacent points;
 - `result.json`: machine-readable campaign status.
 
 Redis command errors are detected in memtier stderr because memtier can exit
