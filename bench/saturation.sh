@@ -205,6 +205,7 @@ for clients in $client_levels; do
   done
 done
 LC_ALL=C sort -n -k1,1 "$unsorted_plan" >"$plan"
+planned_trials="$(wc -l <"$plan" | tr -d '[:space:]')"
 
 if [[ "$plan_only" == yes ]]; then
   echo "order scenario selectivity-percent clients-per-thread threads pipeline repetition"
@@ -889,6 +890,11 @@ while IFS=$'\t' read -r _ scenario selectivity clients threads pipeline repetiti
   fi
   trial_files="$trial_files $results_dir/raw/$trial_id/trial.json"
 done <"$plan"
+
+if [[ "$trial_number" -ne "$planned_trials" ]]; then
+  echo "executed $trial_number trials but the plan contains $planned_trials" >&2
+  exit 1
+fi
 
 # shellcheck disable=SC2086
 jq -s '.' $trial_files >"$results_dir/trials.json"

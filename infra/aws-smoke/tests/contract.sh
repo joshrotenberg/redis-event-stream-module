@@ -33,7 +33,13 @@ awk '
   NR > 1 && $2 == "expiry-s2" { expiry_s2 += 1 }
   END { exit !(header && s0 == 1 && s1 == 1 && s2 == 4 && expiry_s0 == 1 && expiry_s2 == 1) }
 ' "$test_dir/saturation-plan.txt"
-grep -Fq 'docker exec -i eventstream-saturation-cli redis-cli "$@"' \
+# These are literal wrapper source assertions; expansion would invalidate them.
+# shellcheck disable=SC2016
+grep -Fq 'if [[ "$arg" == --pipe ]]; then' \
+  "$root_dir/scripts/remote-saturation.sh"
+grep -Fq 'exec docker exec -i eventstream-saturation-cli redis-cli "$@"' \
+  "$root_dir/scripts/remote-saturation.sh"
+grep -Fq 'exec docker exec eventstream-saturation-cli redis-cli "$@"' \
   "$root_dir/scripts/remote-saturation.sh"
 
 SOAK_PLAN_ONLY=yes RUN_ID=contract-soak-test \

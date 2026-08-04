@@ -36,8 +36,15 @@ docker run --detach --name "$cli_container" --network host \
 
 cat >/tmp/eventstream-saturation-bin/redis-cli <<'WRAPPER'
 #!/usr/bin/env bash
-# Keep stdin attached for redis-cli --pipe during the mass-expiry preload.
-exec docker exec -i eventstream-saturation-cli redis-cli "$@"
+# Keep stdin attached only for redis-cli --pipe during the mass-expiry preload.
+# Attaching it to ordinary commands would consume the harness plan redirected
+# into the outer trial loop.
+for arg in "$@"; do
+  if [[ "$arg" == --pipe ]]; then
+    exec docker exec -i eventstream-saturation-cli redis-cli "$@"
+  fi
+done
+exec docker exec eventstream-saturation-cli redis-cli "$@"
 WRAPPER
 cat >/tmp/eventstream-saturation-bin/memtier_benchmark <<'WRAPPER'
 #!/usr/bin/env bash
