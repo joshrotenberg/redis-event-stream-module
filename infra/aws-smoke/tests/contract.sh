@@ -20,6 +20,20 @@ awk '
   END { exit !(header && trials == 3) }
 ' "$test_dir/benchmark-plan.txt"
 
+SATURATION_PLAN_ONLY=yes \
+SATURATION_REPETITIONS=1 \
+SATURATION_RESULTS_DIR="$test_dir/saturation" \
+  "$root_dir/lab.sh" saturation >"$test_dir/saturation-plan.txt"
+awk '
+  NR == 1 && $1 == "order" { header = 1 }
+  NR > 1 && $2 == "s0" { s0 += 1 }
+  NR > 1 && $2 == "s1" { s1 += 1 }
+  NR > 1 && $2 == "s2" { s2 += 1 }
+  NR > 1 && $2 == "expiry-s0" { expiry_s0 += 1 }
+  NR > 1 && $2 == "expiry-s2" { expiry_s2 += 1 }
+  END { exit !(header && s0 == 1 && s1 == 1 && s2 == 4 && expiry_s0 == 1 && expiry_s2 == 1) }
+' "$test_dir/saturation-plan.txt"
+
 SOAK_PLAN_ONLY=yes RUN_ID=contract-soak-test \
   "$root_dir/lab.sh" soak >"$test_dir/soak-plan.json"
 jq -e '

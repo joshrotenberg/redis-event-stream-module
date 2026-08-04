@@ -5,7 +5,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'USAGE'
-usage: lab.sh <init|plan|up|run|soak|campaign|down|orphans> [terraform arguments]
+usage: lab.sh <init|plan|up|run|saturation|soak|campaign|down|orphans> [terraform arguments]
 
 Environment:
   AWS_PROFILE   optional AWS CLI/profile selection
@@ -17,6 +17,7 @@ Examples:
   ./lab.sh plan
   ./lab.sh up
   ./lab.sh run
+  ./lab.sh saturation
   ./lab.sh soak
   ./lab.sh campaign -auto-approve
   ./lab.sh down
@@ -45,6 +46,9 @@ case "$command" in
     ;;
   run)
     "$root_dir/scripts/run.sh" "$@"
+    ;;
+  saturation)
+    "$root_dir/scripts/saturation.sh" "$@"
     ;;
   soak)
     "$root_dir/scripts/soak.sh" "$@"

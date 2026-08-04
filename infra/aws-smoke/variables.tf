@@ -67,6 +67,12 @@ variable "loadgen_image" {
   default     = "redis:8.8.0@sha256:234c902a2db49461a129e2d4aeff85b28cf20187ed274a67f6e50995fa713c7b"
 }
 
+variable "memtier_image" {
+  description = "Pinned multi-architecture memtier_benchmark 2.5.1 image used by the saturation harness."
+  type        = string
+  default     = "redislabs/memtier_benchmark@sha256:5f15b74f657fd30ee73453af9caa1781de1614f4d934d46feee711dc19b758af"
+}
+
 variable "extra_tags" {
   description = "Additional tags applied to every taggable resource."
   type        = map(string)

@@ -7,3 +7,4 @@ owner = "you@example.com"
 # server_instance_type  = "c7i.large"
 # loadgen_instance_type = "c7i.large"
 # ttl_hours             = 4
+# memtier_image         = "redislabs/memtier_benchmark@sha256:..."

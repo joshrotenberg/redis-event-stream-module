@@ -1,0 +1,20 @@
+[
+  {
+    "command": "SET custom:string:__key__ __data__",
+    "ratio": 7,
+    "key_pattern": "R",
+    "expected_events_per_command": 1
+  },
+  {
+    "command": "HSET custom:hash:__key__ field __data__",
+    "ratio": 2,
+    "key_pattern": "R",
+    "expected_events_per_command": 1
+  },
+  {
+    "command": "MSET custom:mset:a:__key__ __data__ custom:mset:b:__key__ __data__",
+    "ratio": 1,
+    "key_pattern": "R",
+    "expected_events_per_command": 2
+  }
+]
