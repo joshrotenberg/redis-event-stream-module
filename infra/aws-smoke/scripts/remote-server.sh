@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 7 || $# -gt 9 ]]; then
-  echo "usage: remote-server.sh <scenario> <module-image> <maxlen> <module-so|-> <queue-capacity> <batch-size> <max-wait-ms> [off|aof-everysec|aof-always] [reset|preserve]" >&2
+  echo "usage: remote-server.sh <scenario> <module-image> <maxlen> <module-so|-> <queue-capacity> <batch-size> <max-wait-ms> [off|rdb|aof-everysec|aof-always] [reset|preserve]" >&2
   exit 2
 fi
 
@@ -19,9 +19,9 @@ module_path="/usr/local/lib/redis/modules/libredis_event_stream_module.so"
 data_dir="/var/lib/eventstream-smoke/persistence-$persistence_mode"
 
 case "$persistence_mode" in
-  off | aof-everysec | aof-always) ;;
+  off | rdb | aof-everysec | aof-always) ;;
   *)
-    echo "persistence mode must be off, aof-everysec, or aof-always" >&2
+    echo "persistence mode must be off, rdb, aof-everysec, or aof-always" >&2
     exit 2
     ;;
 esac
@@ -53,6 +53,9 @@ server_args=(
 case "$persistence_mode" in
   off)
     server_args+=(--appendonly no)
+    ;;
+  rdb)
+    server_args+=(--dir /data --appendonly no)
     ;;
   aof-everysec)
     server_args+=(

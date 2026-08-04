@@ -19,6 +19,11 @@ rate_limit_levels="${SATURATION_RATE_LIMIT_LEVELS:-0}"
 precise_timer="${SATURATION_PRECISE_TIMER:-1}"
 precise_timer_applied=null
 persistence_mode="${SATURATION_PERSISTENCE_MODE:-off}"
+background_action="${SATURATION_BACKGROUND_ACTION:-none}"
+background_delay_seconds="${SATURATION_BACKGROUND_DELAY_SECONDS:-5}"
+background_timeout_seconds="${SATURATION_BACKGROUND_TIMEOUT_SECONDS:-120}"
+prefill_keys="${SATURATION_PREFILL_KEYS:-0}"
+prefill_payload_bytes="${SATURATION_PREFILL_PAYLOAD_BYTES:-1024}"
 repetitions="${SATURATION_REPETITIONS:-5}"
 warmup_seconds="${SATURATION_WARMUP_SECONDS:-10}"
 measurement_seconds="${SATURATION_MEASUREMENT_SECONDS:-60}"
@@ -88,13 +93,16 @@ yes_or_no() { [[ "$1" == yes || "$1" == no ]]; }
 for value in \
   "$repetitions" "$measurement_seconds" "$payload_bytes" "$keyspace" \
   "$maxlen" "$expiry_keys" "$expiry_ttl_min_ms" "$expiry_clients" \
-  "$expiry_timeout_seconds"; do
+  "$expiry_timeout_seconds" "$background_timeout_seconds" \
+  "$prefill_payload_bytes"; do
   if ! positive_integer "$value"; then
     echo "expected a positive integer, got: $value" >&2
     exit 2
   fi
 done
-for value in "$warmup_seconds" "$expiry_ttl_spread_ms" "$seed"; do
+for value in \
+  "$warmup_seconds" "$expiry_ttl_spread_ms" "$seed" \
+  "$background_delay_seconds" "$prefill_keys"; do
   if ! non_negative_integer "$value"; then
     echo "expected a non-negative integer, got: $value" >&2
     exit 2
@@ -127,6 +135,10 @@ for scenario in $scenarios; do
     echo "$scenario requires SATURATION_COMMANDS_FILE or SATURATION_MONITOR_INPUT" >&2
     exit 2
   fi
+  if [[ "$scenario" == expiry-* && "$background_action" != none ]]; then
+    echo "background persistence actions are not supported for mass-expiry trials" >&2
+    exit 2
+  fi
 done
 for selection in $selectivities; do
   case "$selection" in 0 | 1 | 10 | 100) ;; *)
@@ -151,12 +163,35 @@ if [[ "$precise_timer" != 0 && "$precise_timer" != 1 ]]; then
   exit 2
 fi
 case "$persistence_mode" in
-  off | aof-everysec | aof-always) ;;
+  off | rdb | aof-everysec | aof-always) ;;
   *)
-    echo "SATURATION_PERSISTENCE_MODE must be off, aof-everysec, or aof-always" >&2
+    echo "SATURATION_PERSISTENCE_MODE must be off, rdb, aof-everysec, or aof-always" >&2
     exit 2
     ;;
 esac
+case "$background_action" in
+  none) ;;
+  bgsave)
+    if [[ "$persistence_mode" != rdb ]]; then
+      echo "SATURATION_BACKGROUND_ACTION=bgsave requires SATURATION_PERSISTENCE_MODE=rdb" >&2
+      exit 2
+    fi
+    ;;
+  bgrewriteaof)
+    if [[ "$persistence_mode" != aof-everysec && "$persistence_mode" != aof-always ]]; then
+      echo "SATURATION_BACKGROUND_ACTION=bgrewriteaof requires an AOF persistence mode" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "SATURATION_BACKGROUND_ACTION must be none, bgsave, or bgrewriteaof" >&2
+    exit 2
+    ;;
+esac
+if [[ "$background_action" != none ]] && ((background_delay_seconds >= measurement_seconds)); then
+  echo "SATURATION_BACKGROUND_DELAY_SECONDS must be shorter than the measurement window" >&2
+  exit 2
+fi
 for value in $rate_limit_levels; do
   if ((value > 0)); then
     # libevent's default timer resolution can make memtier's rate limiter
@@ -396,6 +431,8 @@ unload_module() {
 
 configure_scenario() {
   local scenario="$1"
+  local data_action="${2:-reset}"
+  case "$data_action" in reset | preserve) ;; *) return 2 ;; esac
   unload_module
   case "$scenario" in
     s0 | expiry-s0 | custom-s0) ;;
@@ -412,8 +449,128 @@ configure_scenario() {
       "${cli[@]}" MODULE LOAD "$server_module_path" events expired maxlen "$maxlen" >/dev/null
       ;;
   esac
-  "${cli[@]}" FLUSHALL >/dev/null
+  if [[ "$data_action" == reset ]]; then
+    "${cli[@]}" FLUSHALL >/dev/null
+  fi
   "${cli[@]}" LATENCY RESET >/dev/null 2>&1 || true
+}
+
+preload_background_dataset() {
+  local output errors
+  ((prefill_keys == 0)) && return
+  output="$(
+    awk -v count="$prefill_keys" -v bytes="$prefill_payload_bytes" '
+      BEGIN {
+        value = sprintf("%*s", bytes, "")
+        gsub(/ /, "x", value)
+        for (i = 1; i <= count; i++)
+          printf "SET eventstream:prefill:%d %s\r\n", i, value
+      }
+    ' | "${cli[@]}" --pipe
+  )"
+  errors="$(
+    sed -n 's/.*errors: \([0-9][0-9]*\).*/\1/p' <<<"$output" |
+      tail -n 1
+  )"
+  errors="${errors:-0}"
+  if [[ "$errors" -ne 0 || "$("${cli[@]}" --raw DBSIZE)" -ne "$prefill_keys" ]]; then
+    echo "background dataset prefill did not reconcile" >&2
+    return 1
+  fi
+}
+
+prepare_scenario() {
+  local scenario="$1"
+  unload_module
+  "${cli[@]}" FLUSHALL >/dev/null
+  preload_background_dataset
+  configure_scenario "$scenario" preserve
+}
+
+run_background_persistence() {
+  local trial_dir="$1"
+  local action_dir="$trial_dir/background-persistence"
+  local requested_at_ms completed_at_ms response command_status deadline
+  local in_progress status duration_seconds cow_size latest_fork_usec
+  local in_progress_field status_field duration_field cow_field
+  mkdir -p "$action_dir"
+
+  if [[ "$background_action" == none ]]; then
+    jq -n --arg action none --argjson configured_delay_seconds "$background_delay_seconds" \
+      '{action: $action, configured_delay_seconds: $configured_delay_seconds,
+        requested_at_ms: null, completed_at_ms: null, duration_ms: null,
+        command_response: null, status: null, completed: true,
+        reported_duration_seconds: null, cow_size_bytes: null,
+        latest_fork_usec: null}' >"$action_dir/raw.json"
+    return
+  fi
+
+  sleep "$background_delay_seconds"
+  "${cli[@]}" --raw INFO persistence >"$action_dir/info-before.txt"
+  "${cli[@]}" --raw INFO stats >"$action_dir/stats-before.txt"
+  requested_at_ms="$(epoch_ms)"
+  set +e
+  case "$background_action" in
+    bgsave)
+      response="$("${cli[@]}" --raw BGSAVE 2>"$action_dir/command.stderr")"
+      command_status="$?"
+      in_progress_field=rdb_bgsave_in_progress
+      status_field=rdb_last_bgsave_status
+      duration_field=rdb_last_bgsave_time_sec
+      cow_field=rdb_last_cow_size
+      ;;
+    bgrewriteaof)
+      response="$("${cli[@]}" --raw BGREWRITEAOF 2>"$action_dir/command.stderr")"
+      command_status="$?"
+      in_progress_field=aof_rewrite_in_progress
+      status_field=aof_last_bgrewrite_status
+      duration_field=aof_last_rewrite_time_sec
+      cow_field=aof_last_cow_size
+      ;;
+  esac
+  set -e
+  printf '%s\n' "$response" >"$action_dir/command.stdout"
+  if [[ "$command_status" -ne 0 ]]; then
+    echo "$background_action failed to start" >&2
+    return 1
+  fi
+
+  deadline=$((SECONDS + background_timeout_seconds))
+  while :; do
+    "${cli[@]}" --raw INFO persistence >"$action_dir/info-after.txt"
+    in_progress="$(awk -F: -v field="$in_progress_field" '$1 == field {gsub(/\r/, "", $2); print $2; exit}' "$action_dir/info-after.txt")"
+    status="$(awk -F: -v field="$status_field" '$1 == field {gsub(/\r/, "", $2); print $2; exit}' "$action_dir/info-after.txt")"
+    if [[ "${in_progress:-1}" == 0 && "$status" == ok ]]; then
+      break
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "$background_action did not complete within ${background_timeout_seconds}s" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  completed_at_ms="$(epoch_ms)"
+  "${cli[@]}" --raw INFO stats >"$action_dir/stats-after.txt"
+  duration_seconds="$(awk -F: -v field="$duration_field" '$1 == field {gsub(/\r/, "", $2); print $2; exit}' "$action_dir/info-after.txt")"
+  cow_size="$(awk -F: -v field="$cow_field" '$1 == field {gsub(/\r/, "", $2); print $2; exit}' "$action_dir/info-after.txt")"
+  latest_fork_usec="$(awk -F: '$1 == "latest_fork_usec" {gsub(/\r/, "", $2); print $2; exit}' "$action_dir/stats-after.txt")"
+  jq -n \
+    --arg action "$background_action" \
+    --arg response "$response" \
+    --arg status "$status" \
+    --argjson configured_delay_seconds "$background_delay_seconds" \
+    --argjson requested_at_ms "$requested_at_ms" \
+    --argjson completed_at_ms "$completed_at_ms" \
+    --argjson duration_seconds "${duration_seconds:-0}" \
+    --argjson cow_size "${cow_size:-0}" \
+    --argjson latest_fork_usec "${latest_fork_usec:-0}" \
+    '{action: $action, configured_delay_seconds: $configured_delay_seconds,
+      requested_at_ms: $requested_at_ms, completed_at_ms: $completed_at_ms,
+      duration_ms: ($completed_at_ms - $requested_at_ms),
+      command_response: $response, status: $status, completed: true,
+      reported_duration_seconds: $duration_seconds,
+      cow_size_bytes: $cow_size, latest_fork_usec: $latest_fork_usec}' \
+    >"$action_dir/raw.json"
 }
 
 module_stats_json() {
@@ -641,6 +798,17 @@ normalize_trial() {
   local retained_stream_entries stream_memory_bytes
   local load_generator_metrics persistence_metrics replication_metrics replica_metrics
   local replica_line replica_state replica_offset replica_lag_seconds
+  if [[ ! -f "$trial_dir/background-persistence/action.json" ]]; then
+    mkdir -p "$trial_dir/background-persistence"
+    jq -n --arg action none --argjson configured_delay_seconds "$background_delay_seconds" \
+      '{action: $action, configured_delay_seconds: $configured_delay_seconds,
+        requested_at_ms: null, completed_at_ms: null, duration_ms: null,
+        command_response: null, status: null, completed: true,
+        reported_duration_seconds: null, cow_size_bytes: null,
+        latest_fork_usec: null, measurement_started_at_ms: null,
+        measurement_finished_at_ms: null, overlap_proven: null}' \
+      >"$trial_dir/background-persistence/action.json"
+  fi
   command_errors="$(command_error_count "$trial_dir/memtier.stderr")"
   connection_errors="$(connection_error_count "$trial_dir/memtier.json")"
   if [[ "$scenario" == custom-* ]]; then
@@ -732,7 +900,10 @@ normalize_trial() {
       --argjson delayed_fsync "$(awk -F: '$1 == "aof_delayed_fsync" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
       --argjson pending_bio_fsync "$(awk -F: '$1 == "aof_pending_bio_fsync" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
       --arg last_write_status "$(awk -F: '$1 == "aof_last_write_status" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print "unknown" }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
-      --arg last_bgrewrite_status "$(awk -F: '$1 == "aof_last_bgrewrite_status" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print "unknown" }' "$trial_dir/checkpoints/post/info-persistence.txt")" '
+      --arg last_bgrewrite_status "$(awk -F: '$1 == "aof_last_bgrewrite_status" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print "unknown" }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --arg rdb_last_bgsave_status "$(awk -F: '$1 == "rdb_last_bgsave_status" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print "unknown" }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --argjson rdb_last_save_time "$(awk -F: '$1 == "rdb_last_save_time" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --slurpfile background "$trial_dir/background-persistence/action.json" '
         ($current_size - $before_size) as $growth |
         {
           mode: $mode,
@@ -745,7 +916,10 @@ normalize_trial() {
           aof_delayed_fsync_delta: ($delayed_fsync - $before_delayed_fsync),
           aof_pending_bio_fsync: $pending_bio_fsync,
           aof_last_write_status: $last_write_status,
-          aof_last_bgrewrite_status: $last_bgrewrite_status
+          aof_last_bgrewrite_status: $last_bgrewrite_status,
+          rdb_last_bgsave_status: $rdb_last_bgsave_status,
+          rdb_last_save_time: $rdb_last_save_time,
+          background: $background[0]
         }
       '
   )"
@@ -870,6 +1044,8 @@ normalize_trial() {
     --argjson repetition "$repetition" \
     --argjson warmup_seconds "$warmup_seconds" \
     --argjson measurement_seconds "$measurement_seconds" \
+    --argjson prefill_keys "$prefill_keys" \
+    --argjson prefill_payload_bytes "$prefill_payload_bytes" \
     --argjson expected "$expected" \
     --arg workload_name "$workload_name" \
     --argjson observed_duration_seconds "$observed_duration_seconds" \
@@ -910,6 +1086,10 @@ normalize_trial() {
             (if $rate_limit == 0 then null else $rate_limit * $clients * $threads end),
           warmup_seconds: $warmup_seconds,
           measurement_seconds: $measurement_seconds,
+          prefill: {
+            keys: $prefill_keys,
+            payload_bytes: $prefill_payload_bytes
+          },
           command: $command[0],
           operations: ($totals.Count // 0),
           expected_selected_events: $expected,
@@ -990,11 +1170,18 @@ reconcile_trial() {
       (.module.events_lost == 0) and (.module.dropped == 0) and
       (.module.handler_panics == 0) and (.module.async_worker_errors == 0)
     end) and
-    (if .server.persistence.mode == "off" then
+    (if (.server.persistence.mode == "off" or .server.persistence.mode == "rdb") then
        .server.persistence.aof_enabled == 0
      else
        (.server.persistence.aof_enabled == 1) and
        (.server.persistence.aof_last_write_status == "ok")
+     end) and
+    (if .server.persistence.background.action == "none" then
+       .server.persistence.background.completed == true
+     else
+       (.server.persistence.background.completed == true) and
+       (.server.persistence.background.status == "ok") and
+       (.server.persistence.background.overlap_proven == true)
      end) and
     (if .server.replication.connected_replicas > 0 then
        (.server.replication.replica_state == "online") and
@@ -1025,7 +1212,7 @@ run_normal_trial() {
   [[ "$scenario" == custom-* ]] && mode=custom
   mkdir -p "$trial_dir"
 
-  configure_scenario "$scenario"
+  prepare_scenario "$scenario"
   if ((warmup_seconds > 0)); then
     mkdir -p "$trial_dir/warmup"
     build_memtier_args "$trial_dir/warmup" "$warmup_seconds" "$clients" "$threads" "$pipeline" "$selectivity" "$mode" "warm:$trial_id:" "$rate_limit"
@@ -1035,12 +1222,52 @@ run_normal_trial() {
   # Reload after warmup because the module deliberately has no mutable counter
   # reset command. A reload makes measured counters exact without changing the
   # measured configuration.
-  configure_scenario "$scenario"
+  if ((prefill_keys > 0)); then
+    configure_scenario "$scenario" preserve
+  else
+    configure_scenario "$scenario" reset
+  fi
   collect_checkpoint pre "$trial_dir"
   run_hook start "$trial_id" "$trial_dir"
   build_memtier_args "$trial_dir" "$measurement_seconds" "$clients" "$threads" "$pipeline" "$selectivity" "$mode" "measure:$trial_id:" "$rate_limit"
-  run_memtier "$trial_dir"
+  epoch_ms >"$trial_dir/measurement-started-at-ms.txt"
+  run_background_persistence "$trial_dir" \
+    >"$trial_dir/background-persistence.stdout" \
+    2>"$trial_dir/background-persistence.stderr" &
+  local background_pid="$!"
+  local workload_status=0 background_status=0
+  run_memtier "$trial_dir" || workload_status="$?"
+  epoch_ms >"$trial_dir/measurement-finished-at-ms.txt"
+  set +e
+  wait "$background_pid"
+  background_status="$?"
+  set -e
   run_hook stop "$trial_id" "$trial_dir"
+  if [[ "$workload_status" -ne 0 ]]; then
+    return "$workload_status"
+  fi
+  if [[ "$background_status" -ne 0 ]]; then
+    cat "$trial_dir/background-persistence.stderr" >&2
+    return "$background_status"
+  fi
+  local measurement_started_at_ms measurement_finished_at_ms
+  measurement_started_at_ms="$(<"$trial_dir/measurement-started-at-ms.txt")"
+  measurement_finished_at_ms="$(<"$trial_dir/measurement-finished-at-ms.txt")"
+  jq \
+    --argjson measurement_started_at_ms "$measurement_started_at_ms" \
+    --argjson measurement_finished_at_ms "$measurement_finished_at_ms" '
+      . + {
+        measurement_started_at_ms: $measurement_started_at_ms,
+        measurement_finished_at_ms: $measurement_finished_at_ms,
+        overlap_proven:
+          (if .action == "none" then null
+           else (.requested_at_ms >= $measurement_started_at_ms) and
+             (.requested_at_ms < $measurement_finished_at_ms) and
+             (.completed_at_ms <= $measurement_finished_at_ms)
+           end)
+      }
+    ' "$trial_dir/background-persistence/raw.json" \
+    >"$trial_dir/background-persistence/action.json"
   collect_checkpoint post "$trial_dir"
   normalize_trial "$trial_id" "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$rate_limit" "$repetition" "$trial_dir"
   reconcile_trial "$trial_dir/trial.json"
@@ -1204,6 +1431,11 @@ jq -n \
   --arg rate_limits "$rate_limit_levels" \
   --argjson precise_timer "$precise_timer_applied" \
   --arg persistence_mode "$persistence_mode" \
+  --arg background_action "$background_action" \
+  --argjson background_delay_seconds "$background_delay_seconds" \
+  --argjson background_timeout_seconds "$background_timeout_seconds" \
+  --argjson prefill_keys "$prefill_keys" \
+  --argjson prefill_payload_bytes "$prefill_payload_bytes" \
   --arg workload_name "$workload_name" \
   --argjson p99_budget_ms "$p99_budget_ms" \
   --argjson achievement_ratio "$achievement_ratio" \
@@ -1225,6 +1457,12 @@ jq -n \
       repetitions: $repetitions, warmup_seconds: $warmup_seconds,
       measurement_seconds: $measurement_seconds,
       persistence_mode: $persistence_mode,
+      background_persistence: {
+        action: $background_action,
+        delay_seconds: $background_delay_seconds,
+        timeout_seconds: $background_timeout_seconds
+      },
+      prefill: {keys: $prefill_keys, payload_bytes: $prefill_payload_bytes},
       knee_criterion: {p99_budget_ms: $p99_budget_ms,
         minimum_target_achievement_ratio: $achievement_ratio},
       custom: {name: $workload_name, capture_events: $capture_events,
@@ -1316,6 +1554,15 @@ jq '
       ($trials | map(.server.persistence.aof_delayed_fsync_delta) | distribution),
     aof_pending_bio_fsync:
       ($trials | map(.server.persistence.aof_pending_bio_fsync) | distribution),
+    background_action: $trials[0].server.persistence.background.action,
+    background_duration_ms:
+      ($trials | map(.server.persistence.background.duration_ms) | distribution),
+    background_reported_duration_seconds:
+      ($trials | map(.server.persistence.background.reported_duration_seconds) | distribution),
+    background_cow_size_bytes:
+      ($trials | map(.server.persistence.background.cow_size_bytes) | distribution),
+    background_latest_fork_usec:
+      ($trials | map(.server.persistence.background.latest_fork_usec) | distribution),
     connected_replicas:
       ($trials | map(.server.replication.connected_replicas) | distribution),
     replication_bytes_per_operation:

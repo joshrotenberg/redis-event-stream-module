@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 5 ]]; then
-  echo "usage: remote-persistence-probe.sh <off|aof-everysec|aof-always> <module-image> <module-so|-> <maxlen> <event-count>" >&2
+  echo "usage: remote-persistence-probe.sh <off|rdb|aof-everysec|aof-always> <module-image> <module-so|-> <maxlen> <event-count>" >&2
   exit 2
 fi
 
@@ -15,9 +15,9 @@ container="eventstream-server"
 prefix="persistence-probe:"
 
 case "$persistence_mode" in
-  off | aof-everysec | aof-always) ;;
+  off | rdb | aof-everysec | aof-always) ;;
   *)
-    echo "persistence mode must be off, aof-everysec, or aof-always" >&2
+    echo "persistence mode must be off, rdb, aof-everysec, or aof-always" >&2
     exit 2
     ;;
 esac
@@ -65,9 +65,11 @@ module_snapshot() {
 }
 
 persistence_snapshot() {
-  local last_write_status
+  local last_write_status rdb_last_bgsave_status
   last_write_status="$(info_field persistence aof_last_write_status)"
   [[ "$last_write_status" == 0 ]] && last_write_status=unknown
+  rdb_last_bgsave_status="$(info_field persistence rdb_last_bgsave_status)"
+  [[ "$rdb_last_bgsave_status" == 0 ]] && rdb_last_bgsave_status=unknown
   jq -n \
     --argjson aof_enabled "$(info_field persistence aof_enabled)" \
     --argjson aof_current_size_bytes "$(info_field persistence aof_current_size)" \
@@ -75,12 +77,16 @@ persistence_snapshot() {
     --argjson aof_delayed_fsync "$(info_field persistence aof_delayed_fsync)" \
     --argjson aof_pending_bio_fsync "$(info_field persistence aof_pending_bio_fsync)" \
     --arg aof_last_write_status "$last_write_status" \
+    --arg rdb_last_bgsave_status "$rdb_last_bgsave_status" \
+    --argjson rdb_last_save_time "$(info_field persistence rdb_last_save_time)" \
     '{aof_enabled: $aof_enabled,
       aof_current_size_bytes: $aof_current_size_bytes,
       aof_base_size_bytes: $aof_base_size_bytes,
       aof_delayed_fsync: $aof_delayed_fsync,
       aof_pending_bio_fsync: $aof_pending_bio_fsync,
-      aof_last_write_status: $aof_last_write_status}'
+      aof_last_write_status: $aof_last_write_status,
+      rdb_last_bgsave_status: $rdb_last_bgsave_status,
+      rdb_last_save_time: $rdb_last_save_time}'
 }
 
 start_server() {
@@ -108,7 +114,20 @@ producer_errors="$(
 )"
 producer_errors="${producer_errors:-0}"
 
-if [[ "$persistence_mode" != off ]]; then
+if [[ "$persistence_mode" == rdb ]]; then
+  redis_raw BGSAVE >/dev/null
+  for _ in $(seq 1 600); do
+    if [[ "$(info_field persistence rdb_bgsave_in_progress)" == 0 ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "$(info_field persistence rdb_bgsave_in_progress)" != 0 ||
+    "$(info_field persistence rdb_last_bgsave_status)" != ok ]]; then
+    echo "RDB snapshot did not complete successfully" >&2
+    exit 1
+  fi
+elif [[ "$persistence_mode" != off ]]; then
   redis_raw WAITAOF 1 0 5000 >/dev/null
 fi
 
@@ -135,6 +154,8 @@ expected_aof_enabled=0
 if [[ "$persistence_mode" != off ]]; then
   expected_survival=true
   expected_after="$event_count"
+fi
+if [[ "$persistence_mode" == aof-everysec || "$persistence_mode" == aof-always ]]; then
   expected_aof_enabled=1
 fi
 
@@ -191,7 +212,11 @@ jq -n \
         ($after_module.handler_panics == 0) and
         ($after_module.async_worker_errors == 0) and
         ($after_persistence.aof_enabled == $expected_aof_enabled) and
-        (if $expected_aof_enabled == 1 then
+        (if $mode == "rdb" then
+           ($before_persistence.rdb_last_bgsave_status == "ok") and
+           ($before_persistence.rdb_last_save_time > 0) and
+           ($after_persistence.rdb_last_bgsave_status == "ok")
+         elif $expected_aof_enabled == 1 then
            ($before_persistence.aof_last_write_status == "ok") and
            ($after_persistence.aof_last_write_status == "ok")
          else true end)

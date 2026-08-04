@@ -136,12 +136,13 @@ otherwise has the same raw/normalized/summary layout and hard reconciliation
 checks as a local or non-AWS run.
 
 Set one persistence policy for a complete campaign. The runner configures the
-server before load, records per-trial AOF growth and fsync health, then performs
-a controlled restart with 5,000 captured SETs. `off` must lose the probe keys
-and stream; either AOF policy must recover both exactly, with the module's
-forwarded counter reset to zero after replay so AOF loading cannot duplicate
-events. The result is saved as `restart-probe.json` and embedded in the
-manifest.
+server before load, records per-trial persistence health, then performs a
+controlled restart with 5,000 captured SETs. `off` must lose the probe keys and
+stream; `rdb` takes a manual snapshot, and either AOF policy waits for the AOF.
+Every persistent mode must recover the keys and stream exactly, with the
+module's forwarded counter reset to zero after replay so loading cannot
+duplicate events. The result is saved as `restart-probe.json` and embedded in
+the manifest.
 
 ```sh
 SATURATION_PERSISTENCE_MODE=aof-everysec \
@@ -156,9 +157,38 @@ SATURATION_MEASUREMENT_SECONDS=30 \
 ./lab.sh saturation
 ```
 
-Repeat the same matrix with `off` and `aof-always` rather than combining
+Repeat the same matrix with `off`, `rdb`, and `aof-always` rather than combining
 policies in one invocation. `SATURATION_PERSISTENCE_PROBE_EVENTS` changes the
 restart sample size and must not exceed `SATURATION_MAXLEN`.
+
+To measure background persistence interference, run matched clean campaigns
+with `SATURATION_BACKGROUND_ACTION=none` and then the relevant action. Prefill
+creates a resident dataset while the module is unloaded; every measured trial
+then schedules the background command after the configured delay and requires
+it to finish before the foreground window closes.
+
+```sh
+SATURATION_PERSISTENCE_MODE=rdb \
+SATURATION_BACKGROUND_ACTION=bgsave \
+SATURATION_BACKGROUND_DELAY_SECONDS=5 \
+SATURATION_BACKGROUND_TIMEOUT_SECONDS=120 \
+SATURATION_PREFILL_KEYS=250000 \
+SATURATION_PREFILL_PAYLOAD_BYTES=1024 \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_CLIENT_LEVELS=50 \
+SATURATION_THREAD_LEVELS=4 \
+SATURATION_RATE_LIMIT_LEVELS=500 \
+SATURATION_REPETITIONS=3 \
+SATURATION_WARMUP_SECONDS=10 \
+SATURATION_MEASUREMENT_SECONDS=30 \
+./lab.sh saturation
+```
+
+Use `bgrewriteaof` with `aof-everysec` for the rewrite campaign. Trials and
+summaries include wall and Redis-reported action duration, copy-on-write bytes,
+latest fork time, status, and proven overlap. Keep automatic AOF rewrite
+disabled so the controller owns the only rewrite in the window.
 
 ## Single-replica campaign
 
@@ -477,6 +507,7 @@ The runner fails unless:
 - [2026-07-30: Preview envelope soak and restart-loss probe][envelope-soak]
 - [2026-08-04: single-node persistence baseline][persistence-baseline]
 - [2026-08-04: one-replica baseline and catch-up probe][replication-baseline]
+- [2026-08-04: background persistence interference][background-persistence]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
@@ -487,6 +518,7 @@ The runner fails unless:
 [envelope-soak]: observations/2026-07-30-envelope-soak.md
 [persistence-baseline]: observations/2026-08-04-persistence-baseline.md
 [replication-baseline]: observations/2026-08-04-replication-baseline.md
+[background-persistence]: observations/2026-08-04-background-persistence.md
 
 ## Image pins
 

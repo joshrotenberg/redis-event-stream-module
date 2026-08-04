@@ -10,6 +10,11 @@ module_source_commit="${SATURATION_MODULE_SOURCE_COMMIT:-HEAD}"
 module_source_repo="${SATURATION_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
 environment_network_samples="${SATURATION_ENVIRONMENT_NETWORK_SAMPLES:-10000}"
 persistence_mode="${SATURATION_PERSISTENCE_MODE:-off}"
+background_action="${SATURATION_BACKGROUND_ACTION:-none}"
+background_delay_seconds="${SATURATION_BACKGROUND_DELAY_SECONDS:-5}"
+background_timeout_seconds="${SATURATION_BACKGROUND_TIMEOUT_SECONDS:-120}"
+prefill_keys="${SATURATION_PREFILL_KEYS:-0}"
+prefill_payload_bytes="${SATURATION_PREFILL_PAYLOAD_BYTES:-1024}"
 replication_mode="${SATURATION_REPLICATION_MODE:-off}"
 maxlen="${SATURATION_MAXLEN:-10000}"
 persistence_probe_events="${SATURATION_PERSISTENCE_PROBE_EVENTS:-5000}"
@@ -17,9 +22,28 @@ replication_probe_events="${SATURATION_REPLICATION_PROBE_EVENTS:-5000}"
 replication_pause_seconds="${SATURATION_REPLICATION_PAUSE_SECONDS:-2}"
 
 case "$persistence_mode" in
-  off | aof-everysec | aof-always) ;;
+  off | rdb | aof-everysec | aof-always) ;;
   *)
-    echo "SATURATION_PERSISTENCE_MODE must be off, aof-everysec, or aof-always" >&2
+    echo "SATURATION_PERSISTENCE_MODE must be off, rdb, aof-everysec, or aof-always" >&2
+    exit 2
+    ;;
+esac
+case "$background_action" in
+  none) ;;
+  bgsave)
+    [[ "$persistence_mode" == rdb ]] || {
+      echo "bgsave requires SATURATION_PERSISTENCE_MODE=rdb" >&2
+      exit 2
+    }
+    ;;
+  bgrewriteaof)
+    [[ "$persistence_mode" == aof-everysec || "$persistence_mode" == aof-always ]] || {
+      echo "bgrewriteaof requires an AOF persistence mode" >&2
+      exit 2
+    }
+    ;;
+  *)
+    echo "SATURATION_BACKGROUND_ACTION must be none, bgsave, or bgrewriteaof" >&2
     exit 2
     ;;
 esac
@@ -31,8 +55,10 @@ case "$replication_mode" in
     ;;
 esac
 if ! [[ "$maxlen" =~ ^[1-9][0-9]*$ && "$persistence_probe_events" =~ ^[1-9][0-9]*$ &&
-  "$replication_probe_events" =~ ^[1-9][0-9]*$ && "$replication_pause_seconds" =~ ^[1-9][0-9]*$ ]]; then
-  echo "MAXLEN, probe event counts, and replication pause seconds must be positive integers" >&2
+  "$replication_probe_events" =~ ^[1-9][0-9]*$ && "$replication_pause_seconds" =~ ^[1-9][0-9]*$ &&
+  "$background_delay_seconds" =~ ^[0-9]+$ && "$background_timeout_seconds" =~ ^[1-9][0-9]*$ &&
+  "$prefill_keys" =~ ^[0-9]+$ && "$prefill_payload_bytes" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAXLEN, probe counts, background controls, and prefill controls are invalid" >&2
   exit 2
 fi
 if ((persistence_probe_events > maxlen || replication_probe_events > maxlen)); then
@@ -315,7 +341,9 @@ for name in \
   SATURATION_ACHIEVEMENT_RATIO SATURATION_WORKLOAD_NAME SATURATION_PRECISE_TIMER \
   SATURATION_WARMUP_SECONDS SATURATION_MEASUREMENT_SECONDS \
   SATURATION_PAYLOAD_BYTES SATURATION_KEYSPACE SATURATION_MAXLEN SATURATION_SEED \
-  SATURATION_PERSISTENCE_MODE \
+  SATURATION_PERSISTENCE_MODE SATURATION_BACKGROUND_ACTION \
+  SATURATION_BACKGROUND_DELAY_SECONDS SATURATION_BACKGROUND_TIMEOUT_SECONDS \
+  SATURATION_PREFILL_KEYS SATURATION_PREFILL_PAYLOAD_BYTES \
   SATURATION_EXPIRY_KEYS SATURATION_EXPIRY_TTL_MIN_MS \
   SATURATION_EXPIRY_TTL_SPREAD_MS SATURATION_EXPIRY_CLIENTS \
   SATURATION_EXPIRY_TIMEOUT_SECONDS SATURATION_EXPIRY_POLL_SECONDS \
