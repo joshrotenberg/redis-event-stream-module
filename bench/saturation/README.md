@@ -156,6 +156,8 @@ remain online with a nonnegative offset delta or the trial fails. The portable
 harness does not create replicas; the caller owns topology, while the AWS
 runner provides the reproducible one-replica setup, adds replica Redis CPU and
 memory snapshots through its checkpoint hook, and runs a pause/catch-up probe.
+Campaign summaries aggregate replication bytes per operation, replica CPU and
+memory, and the lag reported from both sides of the replication link.
 
 When `SATURATION_METRICS_HOOK` emits the built-in `linux-proc-stat-v1` shape,
 the normalized trial also reports load-generator host CPU, aggregate core use,

@@ -112,6 +112,8 @@ grep -Fq 'docker pause "$replica_container"' \
 grep -Fq 'replica_module.forwarded == 0' \
   "$root_dir/scripts/remote-replication-probe.sh"
 grep -Fq 'connected_replicas' "$root_dir/../../bench/saturation.sh"
+grep -Fq 'replication_bytes_per_operation:' "$root_dir/../../bench/saturation.sh"
+grep -Fq 'replica_core_percent:' "$root_dir/../../bench/saturation.sh"
 grep -Fq 'aof-everysec | aof-always' \
   "$root_dir/scripts/remote-server.sh"
 # shellcheck disable=SC2016

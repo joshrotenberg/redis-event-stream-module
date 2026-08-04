@@ -1316,6 +1316,22 @@ jq '
       ($trials | map(.server.persistence.aof_delayed_fsync_delta) | distribution),
     aof_pending_bio_fsync:
       ($trials | map(.server.persistence.aof_pending_bio_fsync) | distribution),
+    connected_replicas:
+      ($trials | map(.server.replication.connected_replicas) | distribution),
+    replication_bytes_per_operation:
+      ($trials | map(.server.replication.replication_bytes_per_operation) | distribution),
+    primary_reported_replica_lag_bytes:
+      ($trials | map(.server.replication.replica_lag_bytes) | distribution),
+    primary_reported_replica_lag_seconds:
+      ($trials | map(.server.replication.replica_lag_seconds) | distribution),
+    replica_core_percent:
+      ($trials | map(.replica.core_percent) | distribution),
+    replica_used_memory_bytes:
+      ($trials | map(.replica.used_memory_bytes) | distribution),
+    replica_used_memory_rss_bytes:
+      ($trials | map(.replica.used_memory_rss_bytes) | distribution),
+    replica_reported_lag_bytes:
+      ($trials | map(.replica.lag_bytes) | distribution),
     load_generator_host_cpu_percent:
       ($trials | map(.load_generator.host_cpu_percent) | distribution),
     load_generator_core_percent:
