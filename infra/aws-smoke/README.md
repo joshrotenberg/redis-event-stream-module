@@ -87,6 +87,10 @@ cd infra/aws-smoke
 ./lab.sh orphans
 ```
 
+The orphan report uses AWS's eventually consistent resource-tagging index, so
+recently deleted ARNs can remain visible briefly. Treat it as a discovery aid;
+verify a reported ARN with its owning AWS service before treating it as live.
+
 `plan`, `up`, and `down` accept additional Terraform arguments. For unattended
 execution, explicitly add `-auto-approve`; it is never implied by the wrapper.
 

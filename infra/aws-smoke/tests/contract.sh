@@ -7,6 +7,7 @@ test_dir="$(mktemp -d)"
 
 grep -Eq '^[[:space:]]+owner[[:space:]]+=[[:space:]]+var.owner$' \
   "$root_dir/main.tf"
+grep -Fq 'select(.Key == "owner")' "$root_dir/scripts/orphans.sh"
 
 cleanup() {
   rm -rf "$test_dir"

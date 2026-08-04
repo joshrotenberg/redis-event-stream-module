@@ -25,12 +25,14 @@ if [[ "$count" == "0" ]]; then
   exit 0
 fi
 
-echo "tagged aws-smoke resources still present in $region:"
+echo "aws-smoke entries remain in the eventually consistent tagging index for $region:"
+echo "verify current resource state with the owning AWS service before treating these as live"
 jq -r '
   .ResourceTagMappingList[]
   | [
       .ResourceARN,
-      ((.Tags[] | select(.Key == "Owner") | .Value) // "-"),
+      ((.Tags[] | select(.Key == "owner") | .Value) //
+       (.Tags[] | select(.Key == "Owner") | .Value) // "-"),
       ((.Tags[] | select(.Key == "ExpiresAt") | .Value) // "-")
     ]
   | @tsv
