@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "kind": "time-based-saturation-smoke-summary",
+  "completed_at": "2026-08-04T00:53:33Z",
+  "passed": true,
+  "source": {
+    "git_commit": "654fc2b1653537f10fedc733094f94bf0e8e17a8",
+    "module_sha256": "47f0e6f8e32c60e84b62df5f6209e05d8dc7d279d17337cb1467707bcb29f3d5"
+  },
+  "generator": {
+    "name": "memtier_benchmark",
+    "version": "2.5.1",
+    "image": "redislabs/memtier_benchmark@sha256:5f15b74f657fd30ee73453af9caa1781de1614f4d934d46feee711dc19b758af"
+  },
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "server_instance_type": "c7i.large",
+    "loadgen_instance_type": "c7i.large",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+    "logical_cpus_per_host": 2,
+    "private_network_ping_p99_ms": 0.103,
+    "server_intrinsic_latency_max_us": 73,
+    "redis_version": "8.8.0"
+  },
+  "configuration": {
+    "repetitions": 1,
+    "warmup_seconds": 2,
+    "measurement_seconds": 5,
+    "clients_per_thread": 50,
+    "threads": 4,
+    "pipeline": 1,
+    "expiry_keys": 50000
+  },
+  "trials": [
+    {
+      "scenario": "s0",
+      "operations": 1013998,
+      "ops_per_sec": 202121.85,
+      "latency_ms": {
+        "p50": 0.495,
+        "p95": 4.223,
+        "p99": 10.623,
+        "p99_9": 20.607,
+        "max": 37.631
+      },
+      "module_loaded": false
+    },
+    {
+      "scenario": "s1",
+      "operations": 995941,
+      "ops_per_sec": 198690.28,
+      "throughput_delta_vs_s0_percent": -1.6978,
+      "latency_ms": {
+        "p50": 0.503,
+        "p95": 4.223,
+        "p99": 10.367,
+        "p99_9": 17.407,
+        "max": 34.047
+      },
+      "reconciliation": {
+        "forwarded": 0,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "scenario": "s2",
+      "operations": 632429,
+      "ops_per_sec": 126106.45,
+      "throughput_delta_vs_s0_percent": -37.6087,
+      "latency_ms": {
+        "p50": 1.567,
+        "p95": 1.959,
+        "p99": 2.207,
+        "p99_9": 11.647,
+        "max": 35.327
+      },
+      "reconciliation": {
+        "expected": 632429,
+        "forwarded": 632429,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    },
+    {
+      "scenario": "expiry-s0",
+      "foreground_operations": 554984,
+      "foreground_ops_per_sec": 61011.25,
+      "foreground_p99_ms": 0.335,
+      "drain_seconds": 4.872,
+      "overlap_proven": true
+    },
+    {
+      "scenario": "expiry-s2",
+      "foreground_operations": 522115,
+      "foreground_ops_per_sec": 59209.09,
+      "foreground_throughput_delta_percent": -2.9538,
+      "foreground_p99_ms": 0.351,
+      "drain_seconds": 5.16,
+      "drain_delta_percent": 5.9113,
+      "overlap_proven": true,
+      "reconciliation": {
+        "expected": 50000,
+        "forwarded": 50000,
+        "events_lost": 0,
+        "dropped": 0,
+        "handler_panics": 0,
+        "async_worker_errors": 0
+      }
+    }
+  ]
+}
