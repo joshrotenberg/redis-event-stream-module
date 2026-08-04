@@ -161,4 +161,3 @@ Redis command errors are detected in memtier stderr because memtier can exit
 zero after receiving `-ERR` replies. Any connection error, command error,
 counter mismatch, drop, lost event, worker error, panic, or expiry-overlap
 failure stops the run immediately.
-

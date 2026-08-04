@@ -65,4 +65,3 @@ terminated and the volumes were deleting.
 
 The concise normalized sample is
 [`artifacts/2026-08-03-time-based-saturation-smoke.json`](artifacts/2026-08-03-time-based-saturation-smoke.json).
-
