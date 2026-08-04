@@ -542,6 +542,7 @@ The runner fails unless:
 - [2026-08-04: single-node persistence baseline][persistence-baseline]
 - [2026-08-04: one-replica baseline and catch-up probe][replication-baseline]
 - [2026-08-04: background persistence interference][background-persistence]
+- [2026-08-04: maxmemory pressure and `verify-oom`][maxmemory-pressure]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
@@ -553,6 +554,7 @@ The runner fails unless:
 [persistence-baseline]: observations/2026-08-04-persistence-baseline.md
 [replication-baseline]: observations/2026-08-04-replication-baseline.md
 [background-persistence]: observations/2026-08-04-background-persistence.md
+[maxmemory-pressure]: observations/2026-08-04-maxmemory-pressure.md
 
 ## Image pins
 
