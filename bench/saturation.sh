@@ -48,6 +48,7 @@ expected_events_override="${SATURATION_EXPECTED_EVENTS:-}"
 workload_name="${SATURATION_WORKLOAD_NAME:-builtin-write-only}"
 p99_budget_ms="${SATURATION_P99_BUDGET_MS:-2}"
 achievement_ratio="${SATURATION_ACHIEVEMENT_RATIO:-0.98}"
+knee_classifier="${SATURATION_KNEE_CLASSIFIER:-$repo_dir/bench/saturation/classify-knee.jq}"
 
 expiry_keys="${SATURATION_EXPIRY_KEYS:-100000}"
 expiry_ttl_min_ms="${SATURATION_EXPIRY_TTL_MIN_MS:-5000}"
@@ -165,6 +166,10 @@ fi
 if ! awk -v value="$achievement_ratio" \
   'BEGIN { exit !(value ~ /^0([.][0-9]+)?$|^1([.]0+)?$/ && value > 0 && value <= 1) }'; then
   echo "SATURATION_ACHIEVEMENT_RATIO must be greater than 0 and at most 1" >&2
+  exit 2
+fi
+if [[ ! -f "$knee_classifier" ]]; then
+  echo "knee classifier does not exist: $knee_classifier" >&2
   exit 2
 fi
 if [[ -n "$commands_file" ]]; then
@@ -1170,53 +1175,9 @@ jq '
 
 jq \
   --argjson p99_budget_ms "$p99_budget_ms" \
-  --argjson achievement_ratio "$achievement_ratio" '
-    def classified:
-      . + {
-        healthy:
-          ((.target_achievement_ratio.median // 0) >= $achievement_ratio and
-           .p99_ms.median != null and .p99_ms.median <= $p99_budget_ms)
-      };
-    [ .[] | select(.target_ops_per_sec != null) ] |
-    sort_by([.scenario, (.selectivity_percent // -1), .clients_per_thread,
-      .threads, .pipeline, .target_ops_per_sec]) |
-    group_by([.scenario, (.selectivity_percent // -1), .clients_per_thread,
-      .threads, .pipeline]) |
-    map(
-      map(classified) as $levels |
-      ([$levels[] | select(.healthy)] |
-        if length == 0 then null else max_by(.target_ops_per_sec) end) as $at |
-      {
-        scenario: $levels[0].scenario,
-        selectivity_percent: $levels[0].selectivity_percent,
-        clients_per_thread: $levels[0].clients_per_thread,
-        threads: $levels[0].threads,
-        pipeline: $levels[0].pipeline,
-        criterion: {
-          p99_budget_ms: $p99_budget_ms,
-          minimum_target_achievement_ratio: $achievement_ratio
-        },
-        status:
-          (if $at == null then "no-healthy-point"
-           elif ([$levels[] | select(.target_ops_per_sec > $at.target_ops_per_sec)] | length) == 0
-             then "ceiling-not-reached"
-           else "bracketed"
-           end),
-        below:
-          (if $at == null then null
-           else ([$levels[] | select(.target_ops_per_sec < $at.target_ops_per_sec)] |
-             if length == 0 then null else max_by(.target_ops_per_sec) end)
-           end),
-        at: $at,
-        above:
-          (if $at == null then ($levels | min_by(.target_ops_per_sec))
-           else ([$levels[] | select(.target_ops_per_sec > $at.target_ops_per_sec)] |
-             if length == 0 then null else min_by(.target_ops_per_sec) end)
-           end),
-        all_levels: $levels
-      }
-    )
-  ' "$results_dir/summary.json" >"$results_dir/knee.json"
+  --argjson achievement_ratio "$achievement_ratio" \
+  -f "$knee_classifier" \
+  "$results_dir/summary.json" >"$results_dir/knee.json"
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n \
