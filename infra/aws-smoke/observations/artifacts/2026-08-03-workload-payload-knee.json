@@ -1,0 +1,683 @@
+{
+  "schema_version": 1,
+  "campaign": {
+    "local_date": "2026-08-03",
+    "issue": 260,
+    "source_commits": [
+      "a3351a0c6a1d2516a5cd3f1300169662ee5ad69e",
+      "ca20d7343f30ae52197eb35119f3756d49c98cbe"
+    ],
+    "module_sha256": "47f0e6f8e32c60e84b62df5f6209e05d8dc7d279d17337cb1467707bcb29f3d5",
+    "completed_run_count": 9,
+    "trial_count": 152,
+    "operations": 266879888,
+    "primary_runs": [
+      {
+        "run_id": "20260804T0451-focused-read-heavy-64b",
+        "trial_count": 30,
+        "full_archive_sha256": "743fe2a0ca30ef0c578867a3ed3f9c2f7e12db870417a523051e315d70e9ee81",
+        "summary_archive_sha256": "e95cdebf6ebbcf8f5568af24c5368de46651f73050c5d4ac4b3d6e374d0b4525"
+      },
+      {
+        "run_id": "20260804T0530-focused-balanced-64b",
+        "trial_count": 30,
+        "full_archive_sha256": "522380aa34fb0807ea2e3de7e914030edaa7f146c9de5d6718c0986824329847",
+        "summary_archive_sha256": "ae886519579873ea23fccd361786f0011700a4c3e76fde4d838896a68b4910a9"
+      },
+      {
+        "run_id": "20260804T0555-focused-write-heavy-64b",
+        "trial_count": 30,
+        "full_archive_sha256": "cf892c044a7d9060380a33390a2e64c36d43ca180f42e626be68623434798766",
+        "summary_archive_sha256": "abf607bf885f5aa8344b4b8fa6f347f3c3cb2102beff24a3a4bc4299f98c654d"
+      },
+      {
+        "run_id": "20260804T0615-pilot-balanced-16k",
+        "trial_count": 8,
+        "full_archive_sha256": "8e435f0ce37964151607b2a1b3ff58e688b887877d557a9390c3e1fdc473e6de",
+        "summary_archive_sha256": "5d4a368a275c0d1efb705616968673caedd09c1bb8d74d3c0edbae88531ab993"
+      },
+      {
+        "run_id": "20260804T0620-focused-balanced-1k",
+        "trial_count": 18,
+        "full_archive_sha256": "0719d72c5f98eaabe078aa485741ae7aaa85cec0d417a9580eac5d3f2113c679",
+        "summary_archive_sha256": "9c43fc1a0116a86244524d9191d82976a5ce270e805537ffb7b2276ec7470108"
+      }
+    ],
+    "supporting_run_ids": [
+      "20260804T0433-pilot-read-heavy-64b",
+      "20260804T0440-pilot-balanced-64b",
+      "20260804T0446-pilot-write-heavy-64b",
+      "20260804T0610-pilot-balanced-1k"
+    ]
+  },
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "topology": {
+      "kind": "standalone",
+      "server_nodes": 1,
+      "load_generator_nodes": 1
+    },
+    "server_instance_type": "c7i.large",
+    "server_logical_cpus": 2,
+    "load_generator_instance_type": "c7i.xlarge",
+    "load_generator_logical_cpus": 4,
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+    "operating_system": {
+      "id": "amzn",
+      "version": "2023"
+    },
+    "kernel": "6.1.176-223.369.amzn2023.x86_64",
+    "redis_version": "8.8.0",
+    "memtier_version": "2.5.1",
+    "precise_timer": 1
+  },
+  "controls": {
+    "clients_per_thread": 50,
+    "threads": 4,
+    "connections": 200,
+    "pipeline": 1,
+    "keyspace": 100000,
+    "stream_maxlen": 10000,
+    "focused_repetitions": 3,
+    "focused_warmup_seconds": 3,
+    "focused_measurement_seconds": 12,
+    "p99_budget_ms": 6,
+    "minimum_target_achievement_ratio": 0.98
+  },
+  "filtered_control": {
+    "description": "balanced SET/GET at 200k; module loaded with default filter, no selected events",
+    "module_not_loaded": {
+      "target_ops_per_sec": 200000,
+      "ops_per_sec": 198149.41,
+      "target_achievement_ratio": 0.99074705,
+      "p99_ms": 1.455,
+      "main_thread_core_percent": 89.42895,
+      "cpu_us_per_operation": 4.50972047769709,
+      "load_generator_headroom_percent": 39.312726076948366,
+      "retained_stream_entries": 0,
+      "memory_bytes_per_retained_entry": null,
+      "healthy": true
+    },
+    "module_loaded_filtered": {
+      "target_ops_per_sec": 200000,
+      "ops_per_sec": 198156.42,
+      "target_achievement_ratio": 0.9907821000000001,
+      "p99_ms": 1.487,
+      "main_thread_core_percent": 91.743675,
+      "cpu_us_per_operation": 4.626238827181271,
+      "load_generator_headroom_percent": 42.96384315056866,
+      "retained_stream_entries": 0,
+      "memory_bytes_per_retained_entry": null,
+      "healthy": true
+    }
+  },
+  "workload_mixes": [
+    {
+      "name": "read-heavy",
+      "commands": "SET:GET = 1:9",
+      "selected_event_percent": 10,
+      "payload_bytes": 64,
+      "classification": {
+        "status": "non-monotonic",
+        "highest_healthy_target": 210000,
+        "first_unhealthy_above_target": 220000,
+        "non_monotonic_targets": [
+          205000
+        ]
+      },
+      "control_classification": {
+        "status": "non-monotonic",
+        "highest_healthy_target": 220000,
+        "first_unhealthy_above_target": null,
+        "non_monotonic_targets": [
+          205000
+        ]
+      },
+      "control_levels": [
+        {
+          "target_ops_per_sec": 200000,
+          "ops_per_sec": 198442.81,
+          "target_achievement_ratio": 0.99221405,
+          "p99_ms": 1.439,
+          "main_thread_core_percent": 87.02449166666668,
+          "cpu_us_per_operation": 4.384529122565422,
+          "load_generator_headroom_percent": 41.004184100418406,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 210000,
+          "ops_per_sec": 207879.15,
+          "target_achievement_ratio": 0.9899007142857142,
+          "p99_ms": 1.407,
+          "main_thread_core_percent": 90.67134999999999,
+          "cpu_us_per_operation": 4.358342155617482,
+          "load_generator_headroom_percent": 39.20095612088099,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 220000,
+          "ops_per_sec": 217386.28,
+          "target_achievement_ratio": 0.9881194545454546,
+          "p99_ms": 1.359,
+          "main_thread_core_percent": 93.771125,
+          "cpu_us_per_operation": 4.3092556970905935,
+          "load_generator_headroom_percent": 38.78892733564013,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ],
+      "capture_levels": [
+        {
+          "target_ops_per_sec": 200000,
+          "ops_per_sec": 197907.57,
+          "target_achievement_ratio": 0.98953785,
+          "p99_ms": 1.503,
+          "main_thread_core_percent": 95.22191666666666,
+          "cpu_us_per_operation": 4.815406976131669,
+          "load_generator_headroom_percent": 44.15381950459033,
+          "retained_stream_entries": 10011,
+          "memory_bytes_per_retained_entry": 79.86610795171106,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 205000,
+          "ops_per_sec": 199357.01,
+          "target_achievement_ratio": 0.9724732195121951,
+          "p99_ms": 1.479,
+          "main_thread_core_percent": 95.55362500000001,
+          "cpu_us_per_operation": 4.789400195055123,
+          "load_generator_headroom_percent": 44.98387674668578,
+          "retained_stream_entries": 10023,
+          "memory_bytes_per_retained_entry": 79.83474872614647,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 210000,
+          "ops_per_sec": 207246.39,
+          "target_achievement_ratio": 0.9868875714285715,
+          "p99_ms": 1.415,
+          "main_thread_core_percent": 98.21799166666666,
+          "cpu_us_per_operation": 4.740199816286773,
+          "load_generator_headroom_percent": 41.71536610519079,
+          "retained_stream_entries": 10018,
+          "memory_bytes_per_retained_entry": 79.90728938458474,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 220000,
+          "ops_per_sec": 211182.99,
+          "target_achievement_ratio": 0.9599226818181817,
+          "p99_ms": 1.367,
+          "main_thread_core_percent": 99.26233333333333,
+          "cpu_us_per_operation": 4.693704051999976,
+          "load_generator_headroom_percent": 43.46208362863217,
+          "retained_stream_entries": 10016,
+          "memory_bytes_per_retained_entry": 79.87709664536742,
+          "healthy": false
+        }
+      ]
+    },
+    {
+      "name": "balanced",
+      "commands": "SET:GET = 1:1",
+      "selected_event_percent": 50,
+      "payload_bytes": 64,
+      "classification": {
+        "status": "non-monotonic",
+        "highest_healthy_target": 170000,
+        "first_unhealthy_above_target": null,
+        "non_monotonic_targets": [
+          155000,
+          165000
+        ]
+      },
+      "control_classification": {
+        "status": "ceiling-not-reached",
+        "highest_healthy_target": 170000,
+        "first_unhealthy_above_target": null,
+        "non_monotonic_targets": []
+      },
+      "control_levels": [
+        {
+          "target_ops_per_sec": 150000,
+          "ops_per_sec": 149572.34,
+          "target_achievement_ratio": 0.9971489333333333,
+          "p99_ms": 1.599,
+          "main_thread_core_percent": 68.55698333333335,
+          "cpu_us_per_operation": 4.580888522879573,
+          "load_generator_headroom_percent": 57.08935259497057,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 159398.36,
+          "target_achievement_ratio": 0.9962397499999999,
+          "p99_ms": 1.591,
+          "main_thread_core_percent": 72.51072500000001,
+          "cpu_us_per_operation": 4.545613163513231,
+          "load_generator_headroom_percent": 53.93093313739897,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 170000,
+          "ops_per_sec": 169287.35,
+          "target_achievement_ratio": 0.9958079411764706,
+          "p99_ms": 1.519,
+          "main_thread_core_percent": 74.73550000000002,
+          "cpu_us_per_operation": 4.411286288440379,
+          "load_generator_headroom_percent": 45.03708379359318,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ],
+      "capture_levels": [
+        {
+          "target_ops_per_sec": 150000,
+          "ops_per_sec": 148340.82,
+          "target_achievement_ratio": 0.9889388,
+          "p99_ms": 1.847,
+          "main_thread_core_percent": 91.29166666666667,
+          "cpu_us_per_operation": 6.138262930527307,
+          "load_generator_headroom_percent": 56.2228779725742,
+          "retained_stream_entries": 10030,
+          "memory_bytes_per_retained_entry": 78.6469825436409,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 155000,
+          "ops_per_sec": 151871.98,
+          "target_achievement_ratio": 0.9798192258064516,
+          "p99_ms": 1.815,
+          "main_thread_core_percent": 92.73964166666667,
+          "cpu_us_per_operation": 6.107205617150001,
+          "load_generator_headroom_percent": 57.86456467216052,
+          "retained_stream_entries": 10004,
+          "memory_bytes_per_retained_entry": 78.69910269192422,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 158240.44,
+          "target_achievement_ratio": 0.98900275,
+          "p99_ms": 1.743,
+          "main_thread_core_percent": 94.80509166666667,
+          "cpu_us_per_operation": 5.997060707254139,
+          "load_generator_headroom_percent": 53.637423006492426,
+          "retained_stream_entries": 10030,
+          "memory_bytes_per_retained_entry": 78.70309072781654,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 165000,
+          "ops_per_sec": 161180.05,
+          "target_achievement_ratio": 0.9768487878787878,
+          "p99_ms": 1.719,
+          "main_thread_core_percent": 96.60763333333334,
+          "cpu_us_per_operation": 5.978859611329289,
+          "load_generator_headroom_percent": 59.03914590747331,
+          "retained_stream_entries": 10015,
+          "memory_bytes_per_retained_entry": 78.56588682263548,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 170000,
+          "ops_per_sec": 167686.74,
+          "target_achievement_ratio": 0.9863925882352941,
+          "p99_ms": 1.647,
+          "main_thread_core_percent": 98.987925,
+          "cpu_us_per_operation": 5.898977499019214,
+          "load_generator_headroom_percent": 57.40674318507891,
+          "retained_stream_entries": 10009,
+          "memory_bytes_per_retained_entry": 78.71565590968129,
+          "healthy": true
+        }
+      ]
+    },
+    {
+      "name": "mixed-writes",
+      "commands": "SET:HSET = 4:1",
+      "selected_event_percent": 100,
+      "payload_bytes": 64,
+      "classification": {
+        "status": "non-monotonic",
+        "highest_healthy_target": 130000,
+        "first_unhealthy_above_target": 135000,
+        "non_monotonic_targets": [
+          115000
+        ]
+      },
+      "control_classification": {
+        "status": "non-monotonic",
+        "highest_healthy_target": 135000,
+        "first_unhealthy_above_target": null,
+        "non_monotonic_targets": [
+          115000
+        ]
+      },
+      "control_levels": [
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 119866.04,
+          "target_achievement_ratio": 0.9988836666666666,
+          "p99_ms": 1.719,
+          "main_thread_core_percent": 58.58329166666667,
+          "cpu_us_per_operation": 4.883922554829208,
+          "load_generator_headroom_percent": 62.11362458988085,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 130000,
+          "ops_per_sec": 129857.24,
+          "target_achievement_ratio": 0.9989018461538461,
+          "p99_ms": 1.711,
+          "main_thread_core_percent": 62.641783333333336,
+          "cpu_us_per_operation": 4.8202802180185955,
+          "load_generator_headroom_percent": 56.667224360046845,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 135000,
+          "ops_per_sec": 134133.4,
+          "target_achievement_ratio": 0.9935807407407407,
+          "p99_ms": 1.687,
+          "main_thread_core_percent": 64.0698,
+          "cpu_us_per_operation": 4.771605957285188,
+          "load_generator_headroom_percent": 60.667396061269145,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ],
+      "capture_levels": [
+        {
+          "target_ops_per_sec": 115000,
+          "ops_per_sec": 112182.51,
+          "target_achievement_ratio": 0.9755000869565217,
+          "p99_ms": 2.287,
+          "main_thread_core_percent": 88.8727,
+          "cpu_us_per_operation": 7.91402833121851,
+          "load_generator_headroom_percent": 67.63107136594775,
+          "retained_stream_entries": 20034,
+          "memory_bytes_per_retained_entry": 78.31775980832585,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 118948.65,
+          "target_achievement_ratio": 0.99123875,
+          "p99_ms": 2.191,
+          "main_thread_core_percent": 93.04398333333333,
+          "cpu_us_per_operation": 7.815794392065424,
+          "load_generator_headroom_percent": 62.79458465652682,
+          "retained_stream_entries": 20016,
+          "memory_bytes_per_retained_entry": 78.24641518860854,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 125000,
+          "ops_per_sec": 123530.92,
+          "target_achievement_ratio": 0.98824736,
+          "p99_ms": 2.143,
+          "main_thread_core_percent": 94.81171666666667,
+          "cpu_us_per_operation": 7.680944628039074,
+          "load_generator_headroom_percent": 65.40652511651993,
+          "retained_stream_entries": 20053,
+          "memory_bytes_per_retained_entry": 78.25986136737646,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 130000,
+          "ops_per_sec": 128465.69,
+          "target_achievement_ratio": 0.9881976153846154,
+          "p99_ms": 2.063,
+          "main_thread_core_percent": 97.35130833333334,
+          "cpu_us_per_operation": 7.571886986403473,
+          "load_generator_headroom_percent": 67.40592619523723,
+          "retained_stream_entries": 20035,
+          "memory_bytes_per_retained_entry": 78.23588155989414,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 135000,
+          "ops_per_sec": 132059.06,
+          "target_achievement_ratio": 0.9782152592592592,
+          "p99_ms": 1.983,
+          "main_thread_core_percent": 99.2553,
+          "cpu_us_per_operation": 7.511488653854763,
+          "load_generator_headroom_percent": 64.4311797752809,
+          "retained_stream_entries": 20045,
+          "memory_bytes_per_retained_entry": 78.25722125218259,
+          "healthy": false
+        }
+      ]
+    }
+  ],
+  "payload_axis": [
+    {
+      "workload": "balanced",
+      "payload_bytes": 1024,
+      "classification": {
+        "status": "bracketed",
+        "highest_healthy_target": 160000,
+        "first_unhealthy_above_target": 170000,
+        "non_monotonic_targets": []
+      },
+      "control_classification": {
+        "status": "ceiling-not-reached",
+        "highest_healthy_target": 170000,
+        "first_unhealthy_above_target": null,
+        "non_monotonic_targets": []
+      },
+      "control_levels": [
+        {
+          "target_ops_per_sec": 150000,
+          "ops_per_sec": 149554.38,
+          "target_achievement_ratio": 0.9970292000000001,
+          "p99_ms": 1.647,
+          "main_thread_core_percent": 70.19165833333334,
+          "cpu_us_per_operation": 4.689905971542027,
+          "load_generator_headroom_percent": 50.343698854337156,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 159359.69,
+          "target_achievement_ratio": 0.9959980625,
+          "p99_ms": 1.575,
+          "main_thread_core_percent": 73.15036666666667,
+          "cpu_us_per_operation": 4.586749321644314,
+          "load_generator_headroom_percent": 45.437110436311336,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 170000,
+          "ops_per_sec": 169228.84,
+          "target_achievement_ratio": 0.9954637647058824,
+          "p99_ms": 1.527,
+          "main_thread_core_percent": 76.61535,
+          "cpu_us_per_operation": 4.524342882900439,
+          "load_generator_headroom_percent": 45.63291139240506,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ],
+      "capture_levels": [
+        {
+          "target_ops_per_sec": 150000,
+          "ops_per_sec": 148230.33,
+          "target_achievement_ratio": 0.9882021999999999,
+          "p99_ms": 1.855,
+          "main_thread_core_percent": 94.106975,
+          "cpu_us_per_operation": 6.339873830954588,
+          "load_generator_headroom_percent": 56.01567825494206,
+          "retained_stream_entries": 10007,
+          "memory_bytes_per_retained_entry": 78.66959912026392,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 158171.25,
+          "target_achievement_ratio": 0.9885703125,
+          "p99_ms": 1.751,
+          "main_thread_core_percent": 97.09122500000001,
+          "cpu_us_per_operation": 6.133572300576501,
+          "load_generator_headroom_percent": 55.998594765501494,
+          "retained_stream_entries": 10006,
+          "memory_bytes_per_retained_entry": 78.68806238752249,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 170000,
+          "ops_per_sec": 161840.46,
+          "target_achievement_ratio": 0.9520027058823529,
+          "p99_ms": 1.703,
+          "main_thread_core_percent": 99.29595833333332,
+          "cpu_us_per_operation": 6.13098841639641,
+          "load_generator_headroom_percent": 56.19165051964066,
+          "retained_stream_entries": 10010,
+          "memory_bytes_per_retained_entry": 78.60111910471623,
+          "healthy": false
+        }
+      ]
+    },
+    {
+      "workload": "balanced",
+      "payload_bytes": 16384,
+      "classification": "baseline-limited",
+      "reason": "S0 and capture both plateau near 48k; the 6 ms p99 budget is below S0 latency",
+      "control_levels": [
+        {
+          "target_ops_per_sec": 40000,
+          "ops_per_sec": 39973.43,
+          "target_achievement_ratio": 0.99933575,
+          "p99_ms": 10.751,
+          "main_thread_core_percent": 41.44699,
+          "cpu_us_per_operation": 10.356904047976013,
+          "load_generator_headroom_percent": 82.21238938053096,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 60000,
+          "ops_per_sec": 48065.76,
+          "target_achievement_ratio": 0.801096,
+          "p99_ms": 10.111,
+          "main_thread_core_percent": 49.89346,
+          "cpu_us_per_operation": 10.371697254285696,
+          "load_generator_headroom_percent": 73.51036269430051,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 80000,
+          "ops_per_sec": 48046.84,
+          "target_achievement_ratio": 0.6005855,
+          "p99_ms": 10.815,
+          "main_thread_core_percent": 50.45202,
+          "cpu_us_per_operation": 10.491458776510024,
+          "load_generator_headroom_percent": 72.3271790468012,
+          "retained_stream_entries": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": false
+        }
+      ],
+      "capture_levels": [
+        {
+          "target_ops_per_sec": 40000,
+          "ops_per_sec": 39973.94,
+          "target_achievement_ratio": 0.9993485000000001,
+          "p99_ms": 10.815,
+          "main_thread_core_percent": 49.74044,
+          "cpu_us_per_operation": 12.429037981009495,
+          "load_generator_headroom_percent": 82.22175468125394,
+          "retained_stream_entries": 10046,
+          "memory_bytes_per_retained_entry": 78.8565598248059,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 60000,
+          "ops_per_sec": 48078.81,
+          "target_achievement_ratio": 0.8013135,
+          "p99_ms": 10.239,
+          "main_thread_core_percent": 60.06015,
+          "cpu_us_per_operation": 12.481519116757788,
+          "load_generator_headroom_percent": 73.3008680923142,
+          "retained_stream_entries": 10033,
+          "memory_bytes_per_retained_entry": 78.92255556663012,
+          "healthy": false
+        },
+        {
+          "target_ops_per_sec": 80000,
+          "ops_per_sec": 48031.74,
+          "target_achievement_ratio": 0.6003967499999999,
+          "p99_ms": 10.815,
+          "main_thread_core_percent": 60.43187999999999,
+          "cpu_us_per_operation": 12.569917924697053,
+          "load_generator_headroom_percent": 72.20922815224324,
+          "retained_stream_entries": 10029,
+          "memory_bytes_per_retained_entry": 78.92601455778244,
+          "healthy": false
+        }
+      ]
+    }
+  ],
+  "correctness": {
+    "total_trials": 152,
+    "total_operations": 266879888,
+    "full_capture_trials": 74,
+    "selected_events_expected": 61023792,
+    "selected_events_forwarded": 61023792,
+    "events_lost": 0,
+    "dropped": 0,
+    "handler_panics": 0,
+    "async_worker_errors": 0,
+    "command_errors": 0,
+    "connection_errors": 0,
+    "maximum_observed_p99_ms": 10.815,
+    "maximum_observed_p99_9_ms": 13.439,
+    "maximum_observed_latency_ms": 23.935
+  },
+  "measurement_notes": {
+    "non_monotonic_classifier_added": true,
+    "owner_tag_contract": "lowercase owner",
+    "first_lab_cleanup_event": "account cleanup policy terminated uppercase-Owner instances",
+    "orphan_index_note": "Resource Groups Tagging API retained deleted ARNs after authoritative teardown"
+  },
+  "cleanup": {
+    "terraform_state_resource_count": 0,
+    "current_lab_instances": [
+      {
+        "instance_id": "i-03d18f6bfd96ee565",
+        "state": "terminated"
+      },
+      {
+        "instance_id": "i-0797b104864e1674c",
+        "state": "terminated"
+      }
+    ],
+    "project_tagged_live_volume_count": 0
+  }
+}
+

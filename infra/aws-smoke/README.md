@@ -25,7 +25,10 @@ images. Public IPv4 addresses exist, but the security groups have no inbound
 management rules.
 
 All taggable resources carry repository, campaign, environment, owner, and
-expiry tags. The expiry action stops compute, but it does **not** destroy the
+expiry tags. The owner tag uses lowercase `owner`: EC2 tag keys are
+case-sensitive, the account cleanup policy requires that spelling, and IAM
+rejects case-only duplicate tag keys. The expiry action stops compute, but it
+does **not** destroy the
 remaining network, storage, IAM, or Terraform state. Always run the destroy and
 orphan-check steps.
 
@@ -83,6 +86,10 @@ cd infra/aws-smoke
 ./lab.sh down
 ./lab.sh orphans
 ```
+
+The orphan report uses AWS's eventually consistent resource-tagging index, so
+recently deleted ARNs can remain visible briefly. Treat it as a discovery aid;
+verify a reported ARN with its owning AWS service before treating it as live.
 
 `plan`, `up`, and `down` accept additional Terraform arguments. For unattended
 execution, explicitly add `-auto-approve`; it is never implied by the wrapper.

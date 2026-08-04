@@ -128,7 +128,11 @@ least `SATURATION_ACHIEVEMENT_RATIO` of the target. It reports the highest
 healthy level plus its adjacent lower and higher points. A status of
 `ceiling-not-reached` means the sweep needs a higher coarse point;
 `no-healthy-point` means it needs a lower point or a revised latency budget;
-only `bracketed` locates both sides of the knee.
+only `bracketed` locates both sides of the knee. A `non-monotonic` status means
+a lower offered-load point failed while a higher point passed. Treat that as a
+pacing or measurement irregularity that needs investigation; do not report the
+highest healthy point as a clean knee. The offending cells are preserved in
+`non_monotonic_levels`.
 
 The normalized trial also includes Redis process and, when the server exposes
 them, main-thread CPU deltas, CPU per operation, and post-trial memory/RSS.

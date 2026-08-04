@@ -29,6 +29,9 @@ install -d -m 0755 "$result_dir" /tmp/eventstream-saturation-bin
 curl --fail --location --silent --show-error \
   "$harness_url" >/tmp/eventstream-saturation.sh
 chmod 0700 /tmp/eventstream-saturation.sh
+classifier_url="${harness_url%/saturation.sh}/saturation/classify-knee.jq"
+curl --fail --location --silent --show-error \
+  "$classifier_url" >/tmp/eventstream-classify-knee.jq
 
 docker rm -f "$cli_container" >/dev/null 2>&1 || true
 docker run --detach --name "$cli_container" --network host \
@@ -88,6 +91,7 @@ export SATURATION_SERVER_MODULE_PATH="$module_path"
 export SATURATION_CLI_BIN=/tmp/eventstream-saturation-bin/redis-cli
 export SATURATION_MEMTIER_BIN=/tmp/eventstream-saturation-bin/memtier_benchmark
 export SATURATION_METRICS_HOOK=/tmp/eventstream-saturation-metrics.sh
+export SATURATION_KNEE_CLASSIFIER=/tmp/eventstream-classify-knee.jq
 export SATURATION_RESULTS_DIR="$result_dir"
 
 /tmp/eventstream-saturation.sh

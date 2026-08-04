@@ -20,7 +20,7 @@ locals {
       Environment = "aws-smoke"
       ExpiresAt   = time_offset.expiry.rfc3339
       ManagedBy   = "terraform"
-      Owner       = var.owner
+      owner       = var.owner
       Project     = "redis-event-stream-module"
       Repository  = "joshrotenberg/redis-event-stream-module"
     },
