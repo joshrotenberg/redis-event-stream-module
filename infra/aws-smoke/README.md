@@ -121,6 +121,16 @@ exact module commit and artifact digest, and the pinned generator image. It
 otherwise has the same raw/normalized/summary layout and hard reconciliation
 checks as a local or non-AWS run.
 
+The one-command disposable form applies the lab, runs saturation, destroys the
+resources even when the workload fails, and performs the orphan check:
+
+```sh
+SATURATION_REPETITIONS=1 \
+SATURATION_WARMUP_SECONDS=5 \
+SATURATION_MEASUREMENT_SECONDS=15 \
+./lab.sh saturation-campaign -auto-approve
+```
+
 For a disposable smoke campaign, use the combined path. The explicit
 `-auto-approve` opts into unattended provisioning and cleanup; an exit trap
 attempts destroy and stale-resource detection if the run fails:

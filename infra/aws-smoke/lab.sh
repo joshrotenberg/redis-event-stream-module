@@ -5,7 +5,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'USAGE'
-usage: lab.sh <init|plan|up|run|saturation|soak|campaign|down|orphans> [terraform arguments]
+usage: lab.sh <init|plan|up|run|saturation|soak|campaign|saturation-campaign|down|orphans> [terraform arguments]
 
 Environment:
   AWS_PROFILE   optional AWS CLI/profile selection
@@ -20,6 +20,7 @@ Examples:
   ./lab.sh saturation
   ./lab.sh soak
   ./lab.sh campaign -auto-approve
+  ./lab.sh saturation-campaign -auto-approve
   ./lab.sh down
   ./lab.sh orphans
 USAGE
@@ -71,6 +72,29 @@ case "$command" in
     terraform -chdir="$root_dir" init
     terraform -chdir="$root_dir" apply "${campaign_args[@]}"
     "$root_dir/scripts/run.sh"
+    terraform -chdir="$root_dir" destroy "${campaign_args[@]}"
+    cleanup_needed=false
+    "$root_dir/scripts/orphans.sh"
+    trap - EXIT
+    ;;
+  saturation-campaign)
+    campaign_args=("$@")
+    cleanup_needed=true
+    cleanup_saturation_campaign() {
+      local status="$?"
+      trap - EXIT
+      if [[ "$cleanup_needed" == true ]]; then
+        echo "cleaning up saturation campaign resources..." >&2
+        terraform -chdir="$root_dir" destroy "${campaign_args[@]}" || true
+        "$root_dir/scripts/orphans.sh" || true
+      fi
+      exit "$status"
+    }
+    trap cleanup_saturation_campaign EXIT
+
+    terraform -chdir="$root_dir" init
+    terraform -chdir="$root_dir" apply "${campaign_args[@]}"
+    "$root_dir/scripts/saturation.sh"
     terraform -chdir="$root_dir" destroy "${campaign_args[@]}"
     cleanup_needed=false
     "$root_dir/scripts/orphans.sh"
