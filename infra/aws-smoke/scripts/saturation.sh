@@ -204,6 +204,8 @@ remote_exports=""
 for name in \
   SATURATION_SCENARIOS SATURATION_SELECTIVITIES SATURATION_CLIENT_LEVELS \
   SATURATION_THREAD_LEVELS SATURATION_PIPELINE_LEVELS SATURATION_REPETITIONS \
+  SATURATION_RATE_LIMIT_LEVELS SATURATION_P99_BUDGET_MS \
+  SATURATION_ACHIEVEMENT_RATIO SATURATION_WORKLOAD_NAME \
   SATURATION_WARMUP_SECONDS SATURATION_MEASUREMENT_SECONDS \
   SATURATION_PAYLOAD_BYTES SATURATION_KEYSPACE SATURATION_MAXLEN SATURATION_SEED \
   SATURATION_EXPIRY_KEYS SATURATION_EXPIRY_TTL_MIN_MS \
@@ -217,8 +219,25 @@ for name in \
   fi
 done
 
+remote_workload_setup=""
+if [[ -n "${SATURATION_COMMANDS_FILE:-}" ]]; then
+  if [[ ! -f "$SATURATION_COMMANDS_FILE" ]]; then
+    echo "SATURATION_COMMANDS_FILE does not exist: $SATURATION_COMMANDS_FILE" >&2
+    exit 2
+  fi
+  if [[ "$(wc -c <"$SATURATION_COMMANDS_FILE")" -gt 8192 ]]; then
+    echo "SATURATION_COMMANDS_FILE must be at most 8192 bytes for SSM transport" >&2
+    exit 2
+  fi
+  commands_b64="$(encode_file "$SATURATION_COMMANDS_FILE")"
+  remote_workload_setup="printf '%s' '$commands_b64' | base64 --decode >/tmp/eventstream-saturation-commands.json
+export SATURATION_COMMANDS_FILE=/tmp/eventstream-saturation-commands.json
+"
+fi
+
 run_remote "$loadgen_id" saturation \
   "$remote_exports
+$remote_workload_setup
 printf '%s' '$remote_saturation_b64' | base64 --decode >/tmp/eventstream-remote-saturation.sh
 chmod 0700 /tmp/eventstream-remote-saturation.sh
 /tmp/eventstream-remote-saturation.sh '$server_ip' '$redis_image' '$memtier_image' '/usr/local/lib/redis/modules/libredis_event_stream_module.so' '$harness_url' '$remote_result_dir'" \

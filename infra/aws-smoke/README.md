@@ -131,6 +131,33 @@ SATURATION_MEASUREMENT_SECONDS=15 \
 ./lab.sh saturation-campaign -auto-approve
 ```
 
+For an equal-offered-load knee sweep, keep the connection geometry fixed and
+set per-connection rate levels. With 50 clients on four threads, the following
+targets 50k, 100k, 125k, 150k, and 180k requests/s. The harness writes the
+repeated health classification and adjacent below/at/above points to
+`knee.json`:
+
+```sh
+SATURATION_SCENARIOS="s0 s1 s2" \
+SATURATION_SELECTIVITIES="0 10 100" \
+SATURATION_CLIENT_LEVELS=50 \
+SATURATION_THREAD_LEVELS=4 \
+SATURATION_RATE_LIMIT_LEVELS="250 500 625 750 900" \
+SATURATION_REPETITIONS=3 \
+SATURATION_WARMUP_SECONDS=10 \
+SATURATION_MEASUREMENT_SECONDS=30 \
+SATURATION_P99_BUDGET_MS=2 \
+SATURATION_ACHIEVEMENT_RATIO=0.98 \
+./lab.sh saturation-campaign -auto-approve
+```
+
+Use `SATURATION_WORKLOAD_NAME` to label separate campaigns and
+`SATURATION_PAYLOAD_BYTES` for matched value-size points. The portable harness
+also ships read-heavy, balanced, and write-heavy command specifications under
+`bench/saturation/workloads/`. `SATURATION_COMMANDS_FILE` is copied to the
+load-generator host through SSM (up to 8 KiB), so these specifications work
+unchanged in the AWS runner.
+
 For a disposable smoke campaign, use the combined path. The explicit
 `-auto-approve` opts into unattended provisioning and cleanup; an exit trap
 attempts destroy and stale-resource detection if the run fails:

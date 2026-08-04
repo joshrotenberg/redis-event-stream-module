@@ -33,6 +33,19 @@ awk '
   NR > 1 && $2 == "expiry-s2" { expiry_s2 += 1 }
   END { exit !(header && s0 == 1 && s1 == 1 && s2 == 4 && expiry_s0 == 1 && expiry_s2 == 1) }
 ' "$test_dir/saturation-plan.txt"
+SATURATION_PLAN_ONLY=yes \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES="100" \
+SATURATION_RATE_LIMIT_LEVELS="250 500" \
+SATURATION_REPETITIONS=1 \
+SATURATION_RESULTS_DIR="$test_dir/knee" \
+  "$root_dir/lab.sh" saturation >"$test_dir/knee-plan.txt"
+awk '
+  NR == 1 && $7 == "rate-limit-per-connection" { header = 1 }
+  NR > 1 && $2 == "s0" && ($7 == 250 || $7 == 500) { s0 += 1 }
+  NR > 1 && $2 == "s2" && ($7 == 250 || $7 == 500) { s2 += 1 }
+  END { exit !(header && s0 == 2 && s2 == 2) }
+' "$test_dir/knee-plan.txt"
 # These are literal wrapper source assertions; expansion would invalidate them.
 # shellcheck disable=SC2016
 grep -Fq 'if [[ "$arg" == --pipe ]]; then' \
@@ -41,6 +54,10 @@ grep -Fq 'exec docker exec -i eventstream-saturation-cli redis-cli "$@"' \
   "$root_dir/scripts/remote-saturation.sh"
 grep -Fq 'exec docker exec eventstream-saturation-cli redis-cli "$@"' \
   "$root_dir/scripts/remote-saturation.sh"
+grep -Fq 'SATURATION_RATE_LIMIT_LEVELS SATURATION_P99_BUDGET_MS' \
+  "$root_dir/scripts/saturation.sh"
+grep -Fq 'export SATURATION_COMMANDS_FILE=/tmp/eventstream-saturation-commands.json' \
+  "$root_dir/scripts/saturation.sh"
 
 SOAK_PLAN_ONLY=yes RUN_ID=contract-soak-test \
   "$root_dir/lab.sh" soak >"$test_dir/soak-plan.json"

@@ -15,6 +15,7 @@ selectivities="${SATURATION_SELECTIVITIES:-0 1 10 100}"
 client_levels="${SATURATION_CLIENT_LEVELS:-50}"
 thread_levels="${SATURATION_THREAD_LEVELS:-4}"
 pipeline_levels="${SATURATION_PIPELINE_LEVELS:-1}"
+rate_limit_levels="${SATURATION_RATE_LIMIT_LEVELS:-0}"
 repetitions="${SATURATION_REPETITIONS:-5}"
 warmup_seconds="${SATURATION_WARMUP_SECONDS:-10}"
 measurement_seconds="${SATURATION_MEASUREMENT_SECONDS:-60}"
@@ -42,6 +43,9 @@ commands_file="${SATURATION_COMMANDS_FILE:-}"
 monitor_input="${SATURATION_MONITOR_INPUT:-}"
 capture_events="${SATURATION_CAPTURE_EVENTS:-set}"
 expected_events_override="${SATURATION_EXPECTED_EVENTS:-}"
+workload_name="${SATURATION_WORKLOAD_NAME:-builtin-write-only}"
+p99_budget_ms="${SATURATION_P99_BUDGET_MS:-2}"
+achievement_ratio="${SATURATION_ACHIEVEMENT_RATIO:-0.98}"
 
 expiry_keys="${SATURATION_EXPIRY_KEYS:-100000}"
 expiry_ttl_min_ms="${SATURATION_EXPIRY_TTL_MIN_MS:-5000}"
@@ -132,6 +136,21 @@ for value in $client_levels $thread_levels $pipeline_levels; do
     exit 2
   fi
 done
+for value in $rate_limit_levels; do
+  if ! non_negative_integer "$value"; then
+    echo "rate limits must be non-negative integers: $value" >&2
+    exit 2
+  fi
+done
+if ! awk -v value="$p99_budget_ms" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value > 0) }'; then
+  echo "SATURATION_P99_BUDGET_MS must be a positive number" >&2
+  exit 2
+fi
+if ! awk -v value="$achievement_ratio" \
+  'BEGIN { exit !(value ~ /^0([.][0-9]+)?$|^1([.]0+)?$/ && value > 0 && value <= 1) }'; then
+  echo "SATURATION_ACHIEVEMENT_RATIO must be greater than 0 and at most 1" >&2
+  exit 2
+fi
 if [[ -n "$commands_file" ]]; then
   jq -e '
     type == "array" and length > 0 and
@@ -163,42 +182,49 @@ add_trial() {
   local clients="$3"
   local threads="$4"
   local pipeline="$5"
-  local repetition="$6"
+  local rate_limit="$6"
+  local repetition="$7"
   local order_key
   order_key="$(
-    printf '%s' "$seed:$scenario:$selectivity:$clients:$threads:$pipeline:$repetition" |
+    printf '%s' "$seed:$scenario:$selectivity:$clients:$threads:$pipeline:$rate_limit:$repetition" |
       cksum | awk '{ print $1 }'
   )"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$order_key" "$scenario" "$selectivity" "$clients" "$threads" \
-    "$pipeline" "$repetition" >>"$unsorted_plan"
+    "$pipeline" "$rate_limit" "$repetition" >>"$unsorted_plan"
 }
 
 for clients in $client_levels; do
   for threads in $thread_levels; do
     for pipeline in $pipeline_levels; do
-      for repetition in $(seq 1 "$repetitions"); do
-        for scenario in $scenarios; do
-          case "$scenario" in
-            s2)
-              for selectivity in $selectivities; do
-                add_trial "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$repetition"
-              done
-              ;;
-            expiry-*)
-              # Expiry has a separate foreground client control and no SET
-              # selectivity dimension; avoid multiplying identical drains by
-              # every normal-load connection setting.
-              if [[ "$clients" == "${client_levels%% *}" && \
-                "$threads" == "${thread_levels%% *}" && \
-                "$pipeline" == "${pipeline_levels%% *}" ]]; then
-                add_trial "$scenario" - "$expiry_clients" 1 1 "$repetition"
-              fi
-              ;;
-            *)
-              add_trial "$scenario" 100 "$clients" "$threads" "$pipeline" "$repetition"
-              ;;
-          esac
+      for rate_limit in $rate_limit_levels; do
+        for repetition in $(seq 1 "$repetitions"); do
+          for scenario in $scenarios; do
+            case "$scenario" in
+              s2)
+                for selectivity in $selectivities; do
+                  add_trial "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$rate_limit" "$repetition"
+                done
+                ;;
+              custom-*)
+                add_trial "$scenario" - "$clients" "$threads" "$pipeline" "$rate_limit" "$repetition"
+                ;;
+              expiry-*)
+                # Expiry has a separate foreground client control and no SET
+                # selectivity or rate-limit dimension; avoid multiplying
+                # identical drains by ordinary-load sweep settings.
+                if [[ "$clients" == "${client_levels%% *}" && \
+                  "$threads" == "${thread_levels%% *}" && \
+                  "$pipeline" == "${pipeline_levels%% *}" && \
+                  "$rate_limit" == "${rate_limit_levels%% *}" ]]; then
+                  add_trial "$scenario" - "$expiry_clients" 1 1 0 "$repetition"
+                fi
+                ;;
+              *)
+                add_trial "$scenario" 100 "$clients" "$threads" "$pipeline" "$rate_limit" "$repetition"
+                ;;
+            esac
+          done
         done
       done
     done
@@ -208,7 +234,7 @@ LC_ALL=C sort -n -k1,1 "$unsorted_plan" >"$plan"
 planned_trials="$(wc -l <"$plan" | tr -d '[:space:]')"
 
 if [[ "$plan_only" == yes ]]; then
-  echo "order scenario selectivity-percent clients-per-thread threads pipeline repetition"
+  echo "order scenario selectivity-percent clients-per-thread threads pipeline rate-limit-per-connection repetition"
   cat "$plan"
   echo
   echo "trial plan: $plan"
@@ -369,6 +395,7 @@ collect_checkpoint() {
   local phase="$1"
   local trial_dir="$2"
   local checkpoint_dir="$trial_dir/checkpoints/$phase"
+  local stream stream_memory stream_length
   mkdir -p "$checkpoint_dir"
   epoch_ms >"$checkpoint_dir/epoch-ms.txt"
   for section in server clients memory stats cpu persistence keyspace commandstats eventstream; do
@@ -382,10 +409,18 @@ collect_checkpoint() {
     module_stats_json >"$checkpoint_dir/eventstream-stats.json"
     "${cli_json[@]}" EVENTSTREAM.STREAMS WITHSTATS >"$checkpoint_dir/eventstream-streams-withstats.json"
     "${cli_json[@]}" EVENTSTREAM.STREAMS VERBOSE >"$checkpoint_dir/eventstream-streams-verbose.json"
+    : >"$checkpoint_dir/eventstream-stream-memory.tsv"
+    while IFS= read -r stream; do
+      stream_memory="$("${cli[@]}" --raw MEMORY USAGE "$stream" 2>/dev/null || true)"
+      stream_length="$("${cli[@]}" --raw XLEN "$stream" 2>/dev/null || true)"
+      printf '%s\t%s\t%s\n' "$stream" "${stream_length:-0}" "${stream_memory:-0}" \
+        >>"$checkpoint_dir/eventstream-stream-memory.tsv"
+    done < <(jq -r '.[] | .[0]' "$checkpoint_dir/eventstream-streams-withstats.json")
   else
     printf 'null\n' >"$checkpoint_dir/eventstream-stats.json"
     printf 'null\n' >"$checkpoint_dir/eventstream-streams-withstats.json"
     printf 'null\n' >"$checkpoint_dir/eventstream-streams-verbose.json"
+    : >"$checkpoint_dir/eventstream-stream-memory.tsv"
   fi
   if [[ -n "$metrics_hook" ]]; then
     SATURATION_HOOK_PHASE="$phase" SATURATION_HOOK_DIR="$checkpoint_dir" \
@@ -438,6 +473,7 @@ build_memtier_args() {
   local selectivity="$6"
   local mode="$7"
   local prefix="$8"
+  local rate_limit="$9"
   memtier_args=(
     "$memtier_bin" "${memtier_connection[@]}"
     --protocol redis
@@ -457,6 +493,9 @@ build_memtier_args() {
     --hdr-file-prefix "$trial_dir/memtier-hdr"
     --show-config
   )
+  if ((rate_limit > 0)); then
+    memtier_args+=(--rate-limiting "$rate_limit")
+  fi
   append_command_specs "$selectivity" "$mode"
 }
 
@@ -553,10 +592,15 @@ normalize_trial() {
   local clients="$4"
   local threads="$5"
   local pipeline="$6"
-  local repetition="$7"
-  local trial_dir="$8"
-  local expiry_json="${9:-null}"
+  local rate_limit="$7"
+  local repetition="$8"
+  local trial_dir="$9"
+  local expiry_json="${10:-null}"
+  local observed_duration_seconds="${11:-$measurement_seconds}"
   local command_errors connection_errors expected module_stats module_loaded_json
+  local before_main after_main before_total after_total main_cpu total_cpu
+  local used_memory used_memory_rss used_memory_peak
+  local retained_stream_entries stream_memory_bytes
   command_errors="$(command_error_count "$trial_dir/memtier.stderr")"
   connection_errors="$(connection_error_count "$trial_dir/memtier.json")"
   if [[ "$scenario" == custom-* ]]; then
@@ -590,6 +634,53 @@ normalize_trial() {
   )"
   if [[ "$module_stats" == null ]]; then module_loaded_json=false; else module_loaded_json=true; fi
 
+  if grep -q '^used_cpu_sys_main_thread:' "$trial_dir/checkpoints/pre/info-cpu.txt" &&
+    grep -q '^used_cpu_sys_main_thread:' "$trial_dir/checkpoints/post/info-cpu.txt"; then
+    before_main="$(
+      awk -F: '
+        $1 == "used_cpu_sys_main_thread" { sys=$2 }
+        $1 == "used_cpu_user_main_thread" { user=$2 }
+        END { printf "%.6f", sys + user }
+      ' "$trial_dir/checkpoints/pre/info-cpu.txt"
+    )"
+    after_main="$(
+      awk -F: '
+        $1 == "used_cpu_sys_main_thread" { sys=$2 }
+        $1 == "used_cpu_user_main_thread" { user=$2 }
+        END { printf "%.6f", sys + user }
+      ' "$trial_dir/checkpoints/post/info-cpu.txt"
+    )"
+    main_cpu="$(awk -v before="$before_main" -v after="$after_main" 'BEGIN { printf "%.6f", after - before }')"
+  else
+    main_cpu=null
+  fi
+  before_total="$(
+    awk -F: '
+      $1 == "used_cpu_sys" { sys=$2 }
+      $1 == "used_cpu_user" { user=$2 }
+      END { printf "%.6f", sys + user }
+    ' "$trial_dir/checkpoints/pre/info-cpu.txt"
+  )"
+  after_total="$(
+    awk -F: '
+      $1 == "used_cpu_sys" { sys=$2 }
+      $1 == "used_cpu_user" { user=$2 }
+      END { printf "%.6f", sys + user }
+    ' "$trial_dir/checkpoints/post/info-cpu.txt"
+  )"
+  total_cpu="$(awk -v before="$before_total" -v after="$after_total" 'BEGIN { printf "%.6f", after - before }')"
+  used_memory="$(awk -F: '$1 == "used_memory" { gsub(/\r/, "", $2); print $2; exit }' "$trial_dir/checkpoints/post/info-memory.txt")"
+  used_memory_rss="$(awk -F: '$1 == "used_memory_rss" { gsub(/\r/, "", $2); print $2; exit }' "$trial_dir/checkpoints/post/info-memory.txt")"
+  used_memory_peak="$(awk -F: '$1 == "used_memory_peak" { gsub(/\r/, "", $2); print $2; exit }' "$trial_dir/checkpoints/post/info-memory.txt")"
+  retained_stream_entries="$(
+    awk -F'\t' '{ total += $2 } END { print total + 0 }' \
+      "$trial_dir/checkpoints/post/eventstream-stream-memory.tsv"
+  )"
+  stream_memory_bytes="$(
+    awk -F'\t' '{ total += $3 } END { print total + 0 }' \
+      "$trial_dir/checkpoints/post/eventstream-stream-memory.tsv"
+  )"
+
   jq -n \
     --argjson schema_version "$schema_version" \
     --arg trial_id "$trial_id" \
@@ -598,10 +689,20 @@ normalize_trial() {
     --argjson clients "$clients" \
     --argjson threads "$threads" \
     --argjson pipeline "$pipeline" \
+    --argjson rate_limit "$rate_limit" \
     --argjson repetition "$repetition" \
     --argjson warmup_seconds "$warmup_seconds" \
     --argjson measurement_seconds "$measurement_seconds" \
     --argjson expected "$expected" \
+    --arg workload_name "$workload_name" \
+    --argjson observed_duration_seconds "$observed_duration_seconds" \
+    --argjson main_cpu_seconds "$main_cpu" \
+    --argjson total_cpu_seconds "$total_cpu" \
+    --argjson used_memory_bytes "${used_memory:-0}" \
+    --argjson used_memory_rss_bytes "${used_memory_rss:-0}" \
+    --argjson used_memory_peak_bytes "${used_memory_peak:-0}" \
+    --argjson retained_stream_entries "$retained_stream_entries" \
+    --argjson stream_memory_bytes "$stream_memory_bytes" \
     --argjson command_errors "$command_errors" \
     --argjson connection_errors "$connection_errors" \
     --argjson module_loaded "$module_loaded_json" \
@@ -619,17 +720,28 @@ normalize_trial() {
         selectivity_percent: (if $selectivity == "-" then null else ($selectivity | tonumber) end),
         repetition: $repetition,
         workload: {
+          name: $workload_name,
           clients_per_thread: $clients,
           threads: $threads,
           pipeline: $pipeline,
+          rate_limit_per_connection: (if $rate_limit == 0 then null else $rate_limit end),
+          target_ops_per_sec:
+            (if $rate_limit == 0 then null else $rate_limit * $clients * $threads end),
           warmup_seconds: $warmup_seconds,
           measurement_seconds: $measurement_seconds,
           command: $command[0],
           operations: ($totals.Count // 0),
-          expected_selected_events: $expected
+          expected_selected_events: $expected,
+          observed_selectivity_percent:
+            (if ($totals.Count // 0) > 0 then ($expected / $totals.Count) * 100
+             else null end)
         },
         result: {
           ops_per_sec: ($totals."Ops/sec" // 0),
+          target_achievement_ratio:
+            (if $rate_limit == 0 then null
+             else ($totals."Ops/sec" // 0) / ($rate_limit * $clients * $threads)
+             end),
           errors: {connection: $connection_errors, command: $command_errors},
           latency_ms: {
             p50: ($latency."p50.00" // null),
@@ -638,6 +750,32 @@ normalize_trial() {
             p99_9: ($latency."p99.90" // null),
             max: ($latency."p100.0" // $totals.Max // null)
           }
+        },
+        server: {
+          observed_duration_seconds: $observed_duration_seconds,
+          main_thread_cpu_seconds: $main_cpu_seconds,
+          main_thread_core_percent:
+            (if $main_cpu_seconds != null and $observed_duration_seconds > 0 then
+               ($main_cpu_seconds / $observed_duration_seconds) * 100
+             else null end),
+          total_cpu_seconds: $total_cpu_seconds,
+          total_core_percent:
+            (if $observed_duration_seconds > 0 then
+               ($total_cpu_seconds / $observed_duration_seconds) * 100
+             else 0 end),
+          cpu_us_per_operation:
+            (if ($totals.Count // 0) > 0 then
+               ($total_cpu_seconds * 1000000) / $totals.Count
+             else null end),
+          used_memory_bytes: $used_memory_bytes,
+          used_memory_rss_bytes: $used_memory_rss_bytes,
+          used_memory_peak_bytes: $used_memory_peak_bytes,
+          retained_stream_entries: $retained_stream_entries,
+          stream_memory_bytes: $stream_memory_bytes,
+          memory_bytes_per_retained_entry:
+            (if $retained_stream_entries > 0 then
+               $stream_memory_bytes / $retained_stream_entries
+             else null end)
         },
         module: (
           if $module_loaded then
@@ -680,7 +818,8 @@ run_normal_trial() {
   local clients="$4"
   local threads="$5"
   local pipeline="$6"
-  local repetition="$7"
+  local rate_limit="$7"
+  local repetition="$8"
   local trial_dir="$results_dir/raw/$trial_id"
   local mode=builtin
   [[ "$scenario" == custom-* ]] && mode=custom
@@ -689,7 +828,7 @@ run_normal_trial() {
   configure_scenario "$scenario"
   if ((warmup_seconds > 0)); then
     mkdir -p "$trial_dir/warmup"
-    build_memtier_args "$trial_dir/warmup" "$warmup_seconds" "$clients" "$threads" "$pipeline" "$selectivity" "$mode" "warm:$trial_id:"
+    build_memtier_args "$trial_dir/warmup" "$warmup_seconds" "$clients" "$threads" "$pipeline" "$selectivity" "$mode" "warm:$trial_id:" "$rate_limit"
     run_memtier "$trial_dir/warmup"
   fi
 
@@ -699,11 +838,11 @@ run_normal_trial() {
   configure_scenario "$scenario"
   collect_checkpoint pre "$trial_dir"
   run_hook start "$trial_id" "$trial_dir"
-  build_memtier_args "$trial_dir" "$measurement_seconds" "$clients" "$threads" "$pipeline" "$selectivity" "$mode" "measure:$trial_id:"
+  build_memtier_args "$trial_dir" "$measurement_seconds" "$clients" "$threads" "$pipeline" "$selectivity" "$mode" "measure:$trial_id:" "$rate_limit"
   run_memtier "$trial_dir"
   run_hook stop "$trial_id" "$trial_dir"
   collect_checkpoint post "$trial_dir"
-  normalize_trial "$trial_id" "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$repetition" "$trial_dir"
+  normalize_trial "$trial_id" "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$rate_limit" "$repetition" "$trial_dir"
   reconcile_trial "$trial_dir/trial.json"
 }
 
@@ -732,6 +871,7 @@ run_expiry_trial() {
   local repetition="$4"
   local trial_dir="$results_dir/raw/$trial_id"
   local started_ms finished_ms drain_start_ms=0 drain_end_ms=0
+  local observed_duration_seconds
   local initial left deadline memtier_pid memtier_status overlap=false drained=false
   mkdir -p "$trial_dir"
   configure_scenario "$scenario"
@@ -825,7 +965,12 @@ run_expiry_trial() {
         overlap_proven: $overlap_proven,
         drain_seconds: (($drain_completed_ms - $drain_started_ms) / 1000)}'
   )"
-  normalize_trial "$trial_id" "$scenario" - "$clients" 1 1 "$repetition" "$trial_dir" "$expiry_json"
+  observed_duration_seconds="$(
+    awk -v started="$started_ms" -v finished="$finished_ms" \
+      'BEGIN { printf "%.6f", (finished - started) / 1000 }'
+  )"
+  normalize_trial "$trial_id" "$scenario" - "$clients" 1 1 0 "$repetition" \
+    "$trial_dir" "$expiry_json" "$observed_duration_seconds"
   reconcile_trial "$trial_dir/trial.json"
 }
 
@@ -856,6 +1001,10 @@ jq -n \
   --arg clients "$client_levels" \
   --arg threads "$thread_levels" \
   --arg pipelines "$pipeline_levels" \
+  --arg rate_limits "$rate_limit_levels" \
+  --arg workload_name "$workload_name" \
+  --argjson p99_budget_ms "$p99_budget_ms" \
+  --argjson achievement_ratio "$achievement_ratio" \
   --arg capture_events "$capture_events" \
   --arg commands_file "$commands_file" \
   --arg monitor_input "$monitor_input" \
@@ -869,24 +1018,27 @@ jq -n \
       clients_per_thread: ($clients | split(" ") | map(tonumber)),
       threads: ($threads | split(" ") | map(tonumber)),
       pipelines: ($pipelines | split(" ") | map(tonumber)),
+      rate_limit_per_connection: ($rate_limits | split(" ") | map(tonumber)),
       repetitions: $repetitions, warmup_seconds: $warmup_seconds,
       measurement_seconds: $measurement_seconds,
-      custom: {capture_events: $capture_events,
+      knee_criterion: {p99_budget_ms: $p99_budget_ms,
+        minimum_target_achievement_ratio: $achievement_ratio},
+      custom: {name: $workload_name, capture_events: $capture_events,
         commands_file: (if $commands_file == "" then null else $commands_file end),
         monitor_input: (if $monitor_input == "" then null else $monitor_input end)}}}' >"$results_dir/manifest.json"
 
 trial_files=""
 trial_number=0
-while IFS=$'\t' read -r _ scenario selectivity clients threads pipeline repetition; do
+while IFS=$'\t' read -r _ scenario selectivity clients threads pipeline rate_limit repetition; do
   trial_number=$((trial_number + 1))
   selection_id="$selectivity"
   [[ "$selection_id" == - ]] && selection_id=na
-  trial_id="${scenario}-sel${selection_id}-c${clients}-t${threads}-p${pipeline}-r${repetition}"
+  trial_id="${scenario}-sel${selection_id}-c${clients}-t${threads}-p${pipeline}-rl${rate_limit}-r${repetition}"
   echo "[$trial_number] $trial_id" >&2
   if [[ "$scenario" == expiry-* ]]; then
     run_expiry_trial "$trial_id" "$scenario" "$clients" "$repetition"
   else
-    run_normal_trial "$trial_id" "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$repetition"
+    run_normal_trial "$trial_id" "$scenario" "$selectivity" "$clients" "$threads" "$pipeline" "$rate_limit" "$repetition"
   fi
   trial_files="$trial_files $results_dir/raw/$trial_id/trial.json"
 done <"$plan"
@@ -913,25 +1065,95 @@ jq '
        max: $v[-1]}
     end;
   sort_by([.scenario, (.selectivity_percent // -1), .workload.clients_per_thread,
-    .workload.threads, .workload.pipeline]) |
+    .workload.threads, .workload.pipeline, (.workload.rate_limit_per_connection // 0)]) |
   group_by([.scenario, (.selectivity_percent // -1), .workload.clients_per_thread,
-    .workload.threads, .workload.pipeline]) |
+    .workload.threads, .workload.pipeline, (.workload.rate_limit_per_connection // 0)]) |
   map(. as $trials | {
     scenario: $trials[0].scenario,
     selectivity_percent: $trials[0].selectivity_percent,
     clients_per_thread: $trials[0].workload.clients_per_thread,
     threads: $trials[0].workload.threads,
     pipeline: $trials[0].workload.pipeline,
+    rate_limit_per_connection: $trials[0].workload.rate_limit_per_connection,
+    target_ops_per_sec: $trials[0].workload.target_ops_per_sec,
     repetitions: ($trials | length),
     ops_per_sec: ($trials | map(.result.ops_per_sec) | distribution),
+    target_achievement_ratio:
+      ($trials | map(.result.target_achievement_ratio) | distribution),
     p50_ms: ($trials | map(.result.latency_ms.p50) | distribution),
     p95_ms: ($trials | map(.result.latency_ms.p95) | distribution),
     p99_ms: ($trials | map(.result.latency_ms.p99) | distribution),
     p99_9_ms: ($trials | map(.result.latency_ms.p99_9) | distribution),
     max_ms: ($trials | map(.result.latency_ms.max) | distribution),
+    main_thread_core_percent:
+      ($trials | map(.server.main_thread_core_percent) | distribution),
+    total_core_percent:
+      ($trials | map(.server.total_core_percent) | distribution),
+    cpu_us_per_operation:
+      ($trials | map(.server.cpu_us_per_operation) | distribution),
+    used_memory_bytes:
+      ($trials | map(.server.used_memory_bytes) | distribution),
+    used_memory_rss_bytes:
+      ($trials | map(.server.used_memory_rss_bytes) | distribution),
+    retained_stream_entries:
+      ($trials | map(.server.retained_stream_entries) | distribution),
+    stream_memory_bytes:
+      ($trials | map(.server.stream_memory_bytes) | distribution),
+    memory_bytes_per_retained_entry:
+      ($trials | map(.server.memory_bytes_per_retained_entry) | distribution),
     expiry_drain_seconds: ($trials | map(.expiry.drain_seconds) | distribution)
   })
 ' "$results_dir/trials.json" >"$results_dir/summary.json"
+
+jq \
+  --argjson p99_budget_ms "$p99_budget_ms" \
+  --argjson achievement_ratio "$achievement_ratio" '
+    def classified:
+      . + {
+        healthy:
+          ((.target_achievement_ratio.median // 0) >= $achievement_ratio and
+           .p99_ms.median != null and .p99_ms.median <= $p99_budget_ms)
+      };
+    [ .[] | select(.target_ops_per_sec != null) ] |
+    sort_by([.scenario, (.selectivity_percent // -1), .clients_per_thread,
+      .threads, .pipeline, .target_ops_per_sec]) |
+    group_by([.scenario, (.selectivity_percent // -1), .clients_per_thread,
+      .threads, .pipeline]) |
+    map(
+      map(classified) as $levels |
+      ([$levels[] | select(.healthy)] |
+        if length == 0 then null else max_by(.target_ops_per_sec) end) as $at |
+      {
+        scenario: $levels[0].scenario,
+        selectivity_percent: $levels[0].selectivity_percent,
+        clients_per_thread: $levels[0].clients_per_thread,
+        threads: $levels[0].threads,
+        pipeline: $levels[0].pipeline,
+        criterion: {
+          p99_budget_ms: $p99_budget_ms,
+          minimum_target_achievement_ratio: $achievement_ratio
+        },
+        status:
+          (if $at == null then "no-healthy-point"
+           elif ([$levels[] | select(.target_ops_per_sec > $at.target_ops_per_sec)] | length) == 0
+             then "ceiling-not-reached"
+           else "bracketed"
+           end),
+        below:
+          (if $at == null then null
+           else ([$levels[] | select(.target_ops_per_sec < $at.target_ops_per_sec)] |
+             if length == 0 then null else max_by(.target_ops_per_sec) end)
+           end),
+        at: $at,
+        above:
+          (if $at == null then ($levels | min_by(.target_ops_per_sec))
+           else ([$levels[] | select(.target_ops_per_sec > $at.target_ops_per_sec)] |
+             if length == 0 then null else min_by(.target_ops_per_sec) end)
+           end),
+        all_levels: $levels
+      }
+    )
+  ' "$results_dir/summary.json" >"$results_dir/knee.json"
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n \
