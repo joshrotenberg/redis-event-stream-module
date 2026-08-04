@@ -50,6 +50,23 @@ awk '
   NR > 1 && $2 == "s2" && ($7 == 250 || $7 == 500) { s2 += 1 }
   END { exit !(header && s0 == 2 && s2 == 2) }
 ' "$test_dir/knee-plan.txt"
+SATURATION_PLAN_ONLY=yes \
+SATURATION_PERSISTENCE_MODE=aof-always \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_REPETITIONS=1 \
+SATURATION_RESULTS_DIR="$test_dir/persistence" \
+  "$root_dir/lab.sh" saturation >"$test_dir/persistence-plan.txt"
+awk '
+  NR > 1 && $2 == "s0" { s0 += 1 }
+  NR > 1 && $2 == "s2" { s2 += 1 }
+  END { exit !(s0 == 1 && s2 == 1) }
+' "$test_dir/persistence-plan.txt"
+if SATURATION_PLAN_ONLY=yes SATURATION_PERSISTENCE_MODE=invalid \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "invalid persistence mode unexpectedly passed" >&2
+  exit 1
+fi
 # These are literal wrapper source assertions; expansion would invalidate them.
 # shellcheck disable=SC2016
 grep -Fq 'if [[ "$arg" == --pipe ]]; then' \
@@ -69,6 +86,15 @@ grep -Fq 'SATURATION_RATE_LIMIT_LEVELS SATURATION_P99_BUDGET_MS' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'SATURATION_WORKLOAD_NAME SATURATION_PRECISE_TIMER' \
   "$root_dir/scripts/saturation.sh"
+grep -Fq 'SATURATION_PERSISTENCE_MODE' \
+  "$root_dir/scripts/saturation.sh"
+grep -Fq 'persistence-restart-probe' \
+  "$root_dir/scripts/saturation.sh"
+grep -Fq 'aof-everysec | aof-always' \
+  "$root_dir/scripts/remote-server.sh"
+# shellcheck disable=SC2016
+grep -Fq '($after_module.forwarded == 0)' \
+  "$root_dir/scripts/remote-persistence-probe.sh"
 grep -Fq 'export SATURATION_COMMANDS_FILE=/tmp/eventstream-saturation-commands.json' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'run_remote_for_fetch' "$root_dir/scripts/saturation.sh"

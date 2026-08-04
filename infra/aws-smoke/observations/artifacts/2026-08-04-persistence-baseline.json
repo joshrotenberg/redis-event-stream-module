@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "campaign": "single-node-aof-baseline",
+  "issue": 259,
+  "source": {
+    "git_commit": "f850358b3bdf328d3c5c60d4465c75c92b5d21d7",
+    "module_sha256": "47f0e6f8e32c60e84b62df5f6209e05d8dc7d279d17337cb1467707bcb29f3d5"
+  },
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "server_instance_type": "c7i.large",
+    "root_volume": {
+      "type": "gp3",
+      "gib": 16,
+      "iops": 3000,
+      "throughput_mib_per_second": 125
+    },
+    "redis_version": "8.8.0",
+    "memtier_version": "2.5.1"
+  },
+  "workload": {
+    "commands": "SET only",
+    "payload_bytes": 64,
+    "keyspace": 100000,
+    "capture": "events set",
+    "maxlen": 10000,
+    "clients": 200,
+    "pipeline": 1,
+    "offered_ops_per_sec": [75000, 100000],
+    "repetitions": 3,
+    "warmup_seconds": 10,
+    "measurement_seconds": 30
+  },
+  "totals": {
+    "trials": 36,
+    "operations": 74567172,
+    "expected_selected_events": 36376496,
+    "forwarded_events": 36376496,
+    "events_lost": 0,
+    "dropped": 0,
+    "handler_panics": 0,
+    "async_worker_errors": 0
+  },
+  "modes": [
+    {
+      "mode": "off",
+      "operations": 30932549,
+      "expected_selected_events": 15449271,
+      "forwarded_events": 15449271,
+      "cells": [
+        {"scenario": "s0", "target_ops_per_sec": 75000, "median_ops_per_sec": 73134.71, "median_p99_ms": 3.535, "median_cpu_us_per_operation": 5.610884185148503, "median_aof_bytes_per_operation": 0},
+        {"scenario": "s0", "target_ops_per_sec": 100000, "median_ops_per_sec": 98810.81, "median_p99_ms": 3.759, "median_cpu_us_per_operation": 5.330895393956887, "median_aof_bytes_per_operation": 0},
+        {"scenario": "s2", "target_ops_per_sec": 75000, "median_ops_per_sec": 72906.55, "median_p99_ms": 2.831, "median_cpu_us_per_operation": 9.02498589458055, "median_aof_bytes_per_operation": 0},
+        {"scenario": "s2", "target_ops_per_sec": 100000, "median_ops_per_sec": 98632.12, "median_p99_ms": 2.719, "median_cpu_us_per_operation": 8.662806471154454, "median_aof_bytes_per_operation": 0}
+      ],
+      "restart_probe": {
+        "passed": true,
+        "expected_survival": false,
+        "before_source_keys": 5000,
+        "before_stream_entries": 5000,
+        "after_source_keys": 0,
+        "after_stream_entries": 0,
+        "after_forwarded": 0
+      }
+    },
+    {
+      "mode": "aof-everysec",
+      "operations": 30825297,
+      "expected_selected_events": 15349710,
+      "forwarded_events": 15349710,
+      "cells": [
+        {"scenario": "s0", "target_ops_per_sec": 75000, "median_ops_per_sec": 73000.04, "median_p99_ms": 3.439, "median_cpu_us_per_operation": 6.289544804559481, "median_aof_bytes_per_operation": 143.8867288098851},
+        {"scenario": "s0", "target_ops_per_sec": 100000, "median_ops_per_sec": 98837.04, "median_p99_ms": 3.151, "median_cpu_us_per_operation": 6.034080760709782, "median_aof_bytes_per_operation": 143.88851945888126},
+        {"scenario": "s2", "target_ops_per_sec": 75000, "median_ops_per_sec": 72871.07, "median_p99_ms": 3.247, "median_cpu_us_per_operation": 10.885488595677481, "median_aof_bytes_per_operation": 361.69001858414924},
+        {"scenario": "s2", "target_ops_per_sec": 100000, "median_ops_per_sec": 97675.31, "median_p99_ms": 2.863, "median_cpu_us_per_operation": 10.020759725150628, "median_aof_bytes_per_operation": 361.7182619939544}
+      ],
+      "restart_probe": {
+        "passed": true,
+        "expected_survival": true,
+        "before_source_keys": 5000,
+        "before_stream_entries": 5000,
+        "after_source_keys": 5000,
+        "after_stream_entries": 5000,
+        "after_forwarded": 0
+      }
+    },
+    {
+      "mode": "aof-always",
+      "operations": 12809326,
+      "expected_selected_events": 5577515,
+      "forwarded_events": 5577515,
+      "cells": [
+        {"scenario": "s0", "target_ops_per_sec": 75000, "median_ops_per_sec": 40083.39, "median_p99_ms": 6.303, "median_cpu_us_per_operation": 5.1010700092223535, "median_aof_bytes_per_operation": 143.89390800764733},
+        {"scenario": "s0", "target_ops_per_sec": 100000, "median_ops_per_sec": 40283.54, "median_p99_ms": 6.207, "median_cpu_us_per_operation": 4.971500356028459, "median_aof_bytes_per_operation": 143.89376250227315},
+        {"scenario": "s2", "target_ops_per_sec": 75000, "median_ops_per_sec": 30972.27, "median_p99_ms": 8.255, "median_cpu_us_per_operation": 10.800436088882961, "median_aof_bytes_per_operation": 361.6224520524436},
+        {"scenario": "s2", "target_ops_per_sec": 100000, "median_ops_per_sec": 30825.37, "median_p99_ms": 8.319, "median_cpu_us_per_operation": 10.88775170577467, "median_aof_bytes_per_operation": 361.6200543455214}
+      ],
+      "restart_probe": {
+        "passed": true,
+        "expected_survival": true,
+        "before_source_keys": 5000,
+        "before_stream_entries": 5000,
+        "after_source_keys": 5000,
+        "after_stream_entries": 5000,
+        "after_forwarded": 0
+      }
+    }
+  ],
+  "comparison_at_100k": {
+    "off_capture_penalty_percent": 0.18084053758895546,
+    "everysec_capture_penalty_percent": 1.1753994251547772,
+    "always_capture_penalty_percent": 23.478994149967956,
+    "everysec_capture_throughput_change_vs_off_percent": -0.9700795237900128,
+    "always_capture_throughput_change_vs_off_percent": -68.74712821746101,
+    "everysec_capture_p99_change_ms": 0.14400000000000013,
+    "always_capture_p99_change_ms": 5.600000000000001,
+    "everysec_additional_aof_bytes_per_captured_operation": 217.82974253507314
+  },
+  "aof_health": {
+    "delayed_fsyncs_across_all_trials": 0,
+    "pending_bio_fsync_at_all_post_checkpoints": 0,
+    "last_write_status": "ok",
+    "automatic_rewrite_enabled": false
+  }
+}

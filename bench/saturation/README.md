@@ -84,6 +84,7 @@ All lists are whitespace-separated:
 | `SATURATION_PIPELINE_LEVELS` | `1` | Requests in flight per connection |
 | `SATURATION_RATE_LIMIT_LEVELS` | `0` | Requests/s per connection; `0` is unlimited |
 | `SATURATION_PRECISE_TIMER` | `1` | Set memtier/libevent's `EVENT_PRECISE_TIMER` for paced runs |
+| `SATURATION_PERSISTENCE_MODE` | `off` | Fixed server policy: `off`, `aof-everysec`, or `aof-always` |
 | `SATURATION_REPETITIONS` | `5` | Independent trials per matrix cell |
 | `SATURATION_WARMUP_SECONDS` | `10` | Warmup duration |
 | `SATURATION_MEASUREMENT_SECONDS` | `60` | Measured duration |
@@ -138,6 +139,15 @@ The normalized trial also includes Redis process and, when the server exposes
 them, main-thread CPU deltas, CPU per operation, and post-trial memory/RSS.
 These values are meaningful only for a sufficiently long measured window;
 short smoke runs validate artifact shape rather than capacity.
+
+Each trial also records normalized AOF state: enabled status, current/base
+size, growth and bytes per operation over the measured interval, delayed
+fsyncs, pending background fsyncs, and Redis's last write/rewrite status. Run
+one persistence policy per campaign so server configuration and accumulated
+AOF state cannot vary inside a randomized matrix. With
+`SATURATION_START_SERVER=no`, the caller is responsible for configuring the
+remote server to match `SATURATION_PERSISTENCE_MODE`; the harness verifies the
+reported AOF state on every trial.
 
 When `SATURATION_METRICS_HOOK` emits the built-in `linux-proc-stat-v1` shape,
 the normalized trial also reports load-generator host CPU, aggregate core use,

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 7 ]]; then
-  echo "usage: remote-server.sh <scenario> <module-image> <maxlen> <module-so|-> <queue-capacity> <batch-size> <max-wait-ms>" >&2
+if [[ $# -lt 7 || $# -gt 9 ]]; then
+  echo "usage: remote-server.sh <scenario> <module-image> <maxlen> <module-so|-> <queue-capacity> <batch-size> <max-wait-ms> [off|aof-everysec|aof-always] [reset|preserve]" >&2
   exit 2
 fi
 
@@ -13,18 +13,64 @@ module_override="$4"
 queue_capacity="$5"
 batch_size="$6"
 max_wait_ms="$7"
+persistence_mode="${8:-off}"
+data_action="${9:-reset}"
 module_path="/usr/local/lib/redis/modules/libredis_event_stream_module.so"
+data_dir="/var/lib/eventstream-smoke/persistence-$persistence_mode"
+
+case "$persistence_mode" in
+  off | aof-everysec | aof-always) ;;
+  *)
+    echo "persistence mode must be off, aof-everysec, or aof-always" >&2
+    exit 2
+    ;;
+esac
+case "$data_action" in
+  reset | preserve) ;;
+  *)
+    echo "data action must be reset or preserve" >&2
+    exit 2
+    ;;
+esac
 
 docker rm -f eventstream-server >/dev/null 2>&1 || true
+
+if [[ "$persistence_mode" != off ]]; then
+  if [[ "$data_action" == reset ]]; then
+    rm -rf "$data_dir"
+  fi
+  install -d -m 0777 "$data_dir"
+fi
 
 server_args=(
   redis-server
   --bind 0.0.0.0
   --protected-mode no
   --save ""
-  --appendonly no
   --enable-module-command yes
 )
+
+case "$persistence_mode" in
+  off)
+    server_args+=(--appendonly no)
+    ;;
+  aof-everysec)
+    server_args+=(
+      --dir /data
+      --appendonly yes
+      --appendfsync everysec
+      --auto-aof-rewrite-percentage 0
+    )
+    ;;
+  aof-always)
+    server_args+=(
+      --dir /data
+      --appendonly yes
+      --appendfsync always
+      --auto-aof-rewrite-percentage 0
+    )
+    ;;
+esac
 
 case "$scenario" in
   s0)
@@ -74,6 +120,9 @@ if [[ "$module_override" != "-" ]]; then
   test -f "$module_override"
   docker_args+=(--volume "$module_override:$module_path:ro")
 fi
+if [[ "$persistence_mode" != off ]]; then
+  docker_args+=(--volume "$data_dir:/data")
+fi
 
 docker run \
   "${docker_args[@]}" \
@@ -106,4 +155,4 @@ else
   fi
 fi
 
-echo "server ready: $scenario"
+echo "server ready: $scenario ($persistence_mode, $data_action)"

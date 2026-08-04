@@ -9,6 +9,25 @@ results_dir="${SATURATION_RESULTS_DIR:-$root_dir/results/$run_id}"
 module_source_commit="${SATURATION_MODULE_SOURCE_COMMIT:-HEAD}"
 module_source_repo="${SATURATION_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
 environment_network_samples="${SATURATION_ENVIRONMENT_NETWORK_SAMPLES:-10000}"
+persistence_mode="${SATURATION_PERSISTENCE_MODE:-off}"
+maxlen="${SATURATION_MAXLEN:-10000}"
+persistence_probe_events="${SATURATION_PERSISTENCE_PROBE_EVENTS:-5000}"
+
+case "$persistence_mode" in
+  off | aof-everysec | aof-always) ;;
+  *)
+    echo "SATURATION_PERSISTENCE_MODE must be off, aof-everysec, or aof-always" >&2
+    exit 2
+    ;;
+esac
+if ! [[ "$maxlen" =~ ^[1-9][0-9]*$ && "$persistence_probe_events" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SATURATION_MAXLEN and SATURATION_PERSISTENCE_PROBE_EVENTS must be positive integers" >&2
+  exit 2
+fi
+if ((persistence_probe_events > maxlen)); then
+  echo "SATURATION_PERSISTENCE_PROBE_EVENTS must not exceed SATURATION_MAXLEN" >&2
+  exit 2
+fi
 
 if [[ "$plan_only" == yes ]]; then
   SATURATION_PLAN_ONLY=yes \
@@ -170,7 +189,7 @@ server_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 run_remote "$server_id" server-start \
   "printf '%s' '$server_b64' | base64 --decode >/tmp/eventstream-server.sh
 chmod 0700 /tmp/eventstream-server.sh
-/tmp/eventstream-server.sh s0 '$module_image' 10000 '$module_override' 65536 64 1" \
+/tmp/eventstream-server.sh s0 '$module_image' '$maxlen' '$module_override' 65536 64 1 '$persistence_mode' reset" \
   "$results_dir/raw/server-start"
 
 # Capture the same versioned physical environment manifest as the request-counted
@@ -224,6 +243,7 @@ for name in \
   SATURATION_ACHIEVEMENT_RATIO SATURATION_WORKLOAD_NAME SATURATION_PRECISE_TIMER \
   SATURATION_WARMUP_SECONDS SATURATION_MEASUREMENT_SECONDS \
   SATURATION_PAYLOAD_BYTES SATURATION_KEYSPACE SATURATION_MAXLEN SATURATION_SEED \
+  SATURATION_PERSISTENCE_MODE \
   SATURATION_EXPIRY_KEYS SATURATION_EXPIRY_TTL_MIN_MS \
   SATURATION_EXPIRY_TTL_SPREAD_MS SATURATION_EXPIRY_CLIENTS \
   SATURATION_EXPIRY_TIMEOUT_SECONDS SATURATION_EXPIRY_POLL_SECONDS \
@@ -259,6 +279,18 @@ chmod 0700 /tmp/eventstream-remote-saturation.sh
 /tmp/eventstream-remote-saturation.sh '$server_ip' '$redis_image' '$memtier_image' '/usr/local/lib/redis/modules/libredis_event_stream_module.so' '$harness_url' '$remote_result_dir'" \
   "$results_dir/raw/saturation"
 
+persistence_probe_b64="$(encode_file "$root_dir/scripts/remote-persistence-probe.sh")"
+run_remote "$server_id" persistence-restart-probe \
+  "printf '%s' '$persistence_probe_b64' | base64 --decode >/tmp/eventstream-persistence-probe.sh
+chmod 0700 /tmp/eventstream-persistence-probe.sh
+/tmp/eventstream-persistence-probe.sh '$persistence_mode' '$module_image' '$module_override' '$maxlen' '$persistence_probe_events'" \
+  "$results_dir/raw/persistence-restart-probe"
+jq -e --arg mode "$persistence_mode" \
+  '.passed == true and .mode == $mode' \
+  "$results_dir/raw/persistence-restart-probe.stdout" >/dev/null
+cp "$results_dir/raw/persistence-restart-probe.stdout" \
+  "$results_dir/restart-probe.json"
+
 fetch_remote_file "$loadgen_id" saturation-summary \
   /var/lib/eventstream-smoke/saturation-summary.tar.gz \
   "$results_dir/raw/saturation-summary.tar.gz"
@@ -275,10 +307,12 @@ jq \
   --arg module_sha "$module_sha" \
   --arg image "$memtier_image" \
   --slurpfile environment "$results_dir/environment.json" \
+  --slurpfile restart_probe "$results_dir/restart-probe.json" \
   '.source.git_commit = $commit |
    .source.module_sha256 = $module_sha |
    .generator.image = $image |
-   .environment = $environment[0]' \
+   .environment = $environment[0] |
+   .validation.persistence_restart = $restart_probe[0]' \
   "$results_dir/manifest.json" >"$results_dir/manifest.enriched.json"
 mv "$results_dir/manifest.enriched.json" "$results_dir/manifest.json"
 

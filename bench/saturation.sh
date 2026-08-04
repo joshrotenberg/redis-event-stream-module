@@ -18,6 +18,7 @@ pipeline_levels="${SATURATION_PIPELINE_LEVELS:-1}"
 rate_limit_levels="${SATURATION_RATE_LIMIT_LEVELS:-0}"
 precise_timer="${SATURATION_PRECISE_TIMER:-1}"
 precise_timer_applied=null
+persistence_mode="${SATURATION_PERSISTENCE_MODE:-off}"
 repetitions="${SATURATION_REPETITIONS:-5}"
 warmup_seconds="${SATURATION_WARMUP_SECONDS:-10}"
 measurement_seconds="${SATURATION_MEASUREMENT_SECONDS:-60}"
@@ -149,6 +150,13 @@ if [[ "$precise_timer" != 0 && "$precise_timer" != 1 ]]; then
   echo "SATURATION_PRECISE_TIMER must be 0 or 1" >&2
   exit 2
 fi
+case "$persistence_mode" in
+  off | aof-everysec | aof-always) ;;
+  *)
+    echo "SATURATION_PERSISTENCE_MODE must be off, aof-everysec, or aof-always" >&2
+    exit 2
+    ;;
+esac
 for value in $rate_limit_levels; do
   if ((value > 0)); then
     # libevent's default timer resolution can make memtier's rate limiter
@@ -331,12 +339,21 @@ else
 fi
 
 if [[ "$start_server" == yes ]]; then
+  persistence_args=(--appendonly no)
+  case "$persistence_mode" in
+    aof-everysec)
+      persistence_args=(--appendonly yes --appendfsync everysec --auto-aof-rewrite-percentage 0)
+      ;;
+    aof-always)
+      persistence_args=(--appendonly yes --appendfsync always --auto-aof-rewrite-percentage 0)
+      ;;
+  esac
   "$server_bin" \
     --bind "$host" \
     --port "$port" \
     --dir "$server_dir" \
     --save '' \
-    --appendonly no \
+    "${persistence_args[@]}" \
     --enable-module-command yes \
     --latency-tracking yes \
     --logfile "$server_log" &
@@ -622,7 +639,7 @@ normalize_trial() {
   local before_main after_main before_total after_total main_cpu total_cpu
   local used_memory used_memory_rss used_memory_peak
   local retained_stream_entries stream_memory_bytes
-  local load_generator_metrics
+  local load_generator_metrics persistence_metrics
   command_errors="$(command_error_count "$trial_dir/memtier.stderr")"
   connection_errors="$(connection_error_count "$trial_dir/memtier.json")"
   if [[ "$scenario" == custom-* ]]; then
@@ -702,6 +719,35 @@ normalize_trial() {
     awk -F'\t' '{ total += $3 } END { print total + 0 }' \
       "$trial_dir/checkpoints/post/eventstream-stream-memory.tsv"
   )"
+  persistence_metrics="$(
+    jq -n \
+      --arg mode "$persistence_mode" \
+      --argjson operations "$(jq '(.["ALL STATS"].Totals.Count // 0)' "$trial_dir/memtier.json")" \
+      --argjson enabled "$(awk -F: '$1 == "aof_enabled" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --argjson before_size "$(awk -F: '$1 == "aof_current_size" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/pre/info-persistence.txt")" \
+      --argjson current_size "$(awk -F: '$1 == "aof_current_size" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --argjson base_size "$(awk -F: '$1 == "aof_base_size" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --argjson before_delayed_fsync "$(awk -F: '$1 == "aof_delayed_fsync" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/pre/info-persistence.txt")" \
+      --argjson delayed_fsync "$(awk -F: '$1 == "aof_delayed_fsync" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --argjson pending_bio_fsync "$(awk -F: '$1 == "aof_pending_bio_fsync" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print 0 }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --arg last_write_status "$(awk -F: '$1 == "aof_last_write_status" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print "unknown" }' "$trial_dir/checkpoints/post/info-persistence.txt")" \
+      --arg last_bgrewrite_status "$(awk -F: '$1 == "aof_last_bgrewrite_status" { gsub(/\r/, "", $2); print $2; found=1 } END { if (!found) print "unknown" }' "$trial_dir/checkpoints/post/info-persistence.txt")" '
+        ($current_size - $before_size) as $growth |
+        {
+          mode: $mode,
+          aof_enabled: $enabled,
+          aof_current_size_bytes: $current_size,
+          aof_base_size_bytes: $base_size,
+          aof_growth_bytes: $growth,
+          aof_bytes_per_operation:
+            (if $operations > 0 then $growth / $operations else null end),
+          aof_delayed_fsync_delta: ($delayed_fsync - $before_delayed_fsync),
+          aof_pending_bio_fsync: $pending_bio_fsync,
+          aof_last_write_status: $last_write_status,
+          aof_last_bgrewrite_status: $last_bgrewrite_status
+        }
+      '
+  )"
   load_generator_metrics=null
   if [[ -s "$trial_dir/checkpoints/pre/metrics-hook.stdout" &&
     -s "$trial_dir/checkpoints/post/metrics-hook.stdout" ]] &&
@@ -761,6 +807,7 @@ normalize_trial() {
     --argjson used_memory_peak_bytes "${used_memory_peak:-0}" \
     --argjson retained_stream_entries "$retained_stream_entries" \
     --argjson stream_memory_bytes "$stream_memory_bytes" \
+    --argjson persistence_metrics "$persistence_metrics" \
     --argjson load_generator_metrics "$load_generator_metrics" \
     --argjson command_errors "$command_errors" \
     --argjson connection_errors "$connection_errors" \
@@ -834,7 +881,8 @@ normalize_trial() {
           memory_bytes_per_retained_entry:
             (if $retained_stream_entries > 0 then
                $stream_memory_bytes / $retained_stream_entries
-             else null end)
+             else null end),
+          persistence: $persistence_metrics
         },
         load_generator: $load_generator_metrics,
         module: (
@@ -865,6 +913,12 @@ reconcile_trial() {
       (.module.events_lost == 0) and (.module.dropped == 0) and
       (.module.handler_panics == 0) and (.module.async_worker_errors == 0)
     end) and
+    (if .server.persistence.mode == "off" then
+       .server.persistence.aof_enabled == 0
+     else
+       (.server.persistence.aof_enabled == 1) and
+       (.server.persistence.aof_last_write_status == "ok")
+     end) and
     (if (.scenario | startswith("expiry-")) then
       .expiry.overlap_proven == true and .expiry.drained == true
     else true end)
@@ -1063,6 +1117,7 @@ jq -n \
   --arg pipelines "$pipeline_levels" \
   --arg rate_limits "$rate_limit_levels" \
   --argjson precise_timer "$precise_timer_applied" \
+  --arg persistence_mode "$persistence_mode" \
   --arg workload_name "$workload_name" \
   --argjson p99_budget_ms "$p99_budget_ms" \
   --argjson achievement_ratio "$achievement_ratio" \
@@ -1083,6 +1138,7 @@ jq -n \
       rate_limit_per_connection: ($rate_limits | split(" ") | map(tonumber)),
       repetitions: $repetitions, warmup_seconds: $warmup_seconds,
       measurement_seconds: $measurement_seconds,
+      persistence_mode: $persistence_mode,
       knee_criterion: {p99_budget_ms: $p99_budget_ms,
         minimum_target_achievement_ratio: $achievement_ratio},
       custom: {name: $workload_name, capture_events: $capture_events,
@@ -1137,6 +1193,7 @@ jq '
     threads: $trials[0].workload.threads,
     pipeline: $trials[0].workload.pipeline,
     rate_limit_per_connection: $trials[0].workload.rate_limit_per_connection,
+    persistence_mode: $trials[0].server.persistence.mode,
     target_ops_per_sec: $trials[0].workload.target_ops_per_sec,
     repetitions: ($trials | length),
     ops_per_sec: ($trials | map(.result.ops_per_sec) | distribution),
@@ -1163,6 +1220,16 @@ jq '
       ($trials | map(.server.stream_memory_bytes) | distribution),
     memory_bytes_per_retained_entry:
       ($trials | map(.server.memory_bytes_per_retained_entry) | distribution),
+    aof_current_size_bytes:
+      ($trials | map(.server.persistence.aof_current_size_bytes) | distribution),
+    aof_growth_bytes:
+      ($trials | map(.server.persistence.aof_growth_bytes) | distribution),
+    aof_bytes_per_operation:
+      ($trials | map(.server.persistence.aof_bytes_per_operation) | distribution),
+    aof_delayed_fsync_delta:
+      ($trials | map(.server.persistence.aof_delayed_fsync_delta) | distribution),
+    aof_pending_bio_fsync:
+      ($trials | map(.server.persistence.aof_pending_bio_fsync) | distribution),
     load_generator_host_cpu_percent:
       ($trials | map(.load_generator.host_cpu_percent) | distribution),
     load_generator_core_percent:

@@ -128,6 +128,31 @@ exact module commit and artifact digest, and the pinned generator image. It
 otherwise has the same raw/normalized/summary layout and hard reconciliation
 checks as a local or non-AWS run.
 
+Set one persistence policy for a complete campaign. The runner configures the
+server before load, records per-trial AOF growth and fsync health, then performs
+a controlled restart with 5,000 captured SETs. `off` must lose the probe keys
+and stream; either AOF policy must recover both exactly, with the module's
+forwarded counter reset to zero after replay so AOF loading cannot duplicate
+events. The result is saved as `restart-probe.json` and embedded in the
+manifest.
+
+```sh
+SATURATION_PERSISTENCE_MODE=aof-everysec \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_CLIENT_LEVELS=50 \
+SATURATION_THREAD_LEVELS=4 \
+SATURATION_RATE_LIMIT_LEVELS="375 500" \
+SATURATION_REPETITIONS=3 \
+SATURATION_WARMUP_SECONDS=10 \
+SATURATION_MEASUREMENT_SECONDS=30 \
+./lab.sh saturation
+```
+
+Repeat the same matrix with `off` and `aof-always` rather than combining
+policies in one invocation. `SATURATION_PERSISTENCE_PROBE_EVENTS` changes the
+restart sample size and must not exceed `SATURATION_MAXLEN`.
+
 The one-command disposable form applies the lab, runs saturation, destroys the
 resources even when the workload fails, and performs the orphan check:
 
