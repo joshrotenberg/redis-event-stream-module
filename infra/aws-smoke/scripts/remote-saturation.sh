@@ -36,7 +36,8 @@ docker run --detach --name "$cli_container" --network host \
 
 cat >/tmp/eventstream-saturation-bin/redis-cli <<'WRAPPER'
 #!/usr/bin/env bash
-exec docker exec eventstream-saturation-cli redis-cli "$@"
+# Keep stdin attached for redis-cli --pipe during the mass-expiry preload.
+exec docker exec -i eventstream-saturation-cli redis-cli "$@"
 WRAPPER
 cat >/tmp/eventstream-saturation-bin/memtier_benchmark <<'WRAPPER'
 #!/usr/bin/env bash

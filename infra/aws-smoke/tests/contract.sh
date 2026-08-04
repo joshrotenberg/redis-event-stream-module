@@ -33,6 +33,8 @@ awk '
   NR > 1 && $2 == "expiry-s2" { expiry_s2 += 1 }
   END { exit !(header && s0 == 1 && s1 == 1 && s2 == 4 && expiry_s0 == 1 && expiry_s2 == 1) }
 ' "$test_dir/saturation-plan.txt"
+grep -Fq 'docker exec -i eventstream-saturation-cli redis-cli "$@"' \
+  "$root_dir/scripts/remote-saturation.sh"
 
 SOAK_PLAN_ONLY=yes RUN_ID=contract-soak-test \
   "$root_dir/lab.sh" soak >"$test_dir/soak-plan.json"
