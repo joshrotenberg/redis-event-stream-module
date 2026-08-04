@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "campaign": "maxmemory-pressure",
+  "issue": 259,
+  "source": {
+    "git_commit": "e4f23789d2712cf4b003f66bbc2a28da40ec0835",
+    "module_sha256": "47f0e6f8e32c60e84b62df5f6209e05d8dc7d279d17337cb1467707bcb29f3d5"
+  },
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "instance_type": "c7i.large",
+    "hosts": 2,
+    "root_volume": {
+      "type": "gp3",
+      "gib": 16,
+      "iops": 3000,
+      "throughput_mib_per_second": 125
+    },
+    "redis_version": "8.8.0",
+    "memtier_version": "2.5.1"
+  },
+  "configuration": {
+    "persistence": "off",
+    "replication": "off",
+    "prefill_keys": 50000,
+    "prefill_payload_bytes": 1024,
+    "events_per_case": 15000,
+    "write_payload_bytes": 64,
+    "maxmemory_percent": 90,
+    "maxlen": 50000,
+    "churn_keys_per_round": 50000,
+    "maximum_churn_rounds": 6
+  },
+  "preflight_smoke": {
+    "repetitions": 1,
+    "offered_ops_per_second": 100000,
+    "s0": {
+      "operations_per_second": 99028.20,
+      "p99_ms": 4.063,
+      "main_thread_core_percent": 51.16856
+    },
+    "s2": {
+      "operations": 1482801,
+      "expected_selected_events": 1482801,
+      "forwarded_events": 1482801,
+      "events_lost": 0,
+      "dropped": 0,
+      "operations_per_second": 98762.37,
+      "p99_ms": 2.591,
+      "main_thread_core_percent": 85.254
+    }
+  },
+  "totals": {
+    "source_operations": 60000,
+    "producer_errors": 0,
+    "forwarded_events": 54805,
+    "events_lost": 5195,
+    "dropped": 5195,
+    "dropped_oom": 5195,
+    "evicted_keys": 65648,
+    "cases_passed": 4,
+    "cases_run": 4
+  },
+  "cases": [
+    {
+      "name": "noeviction-verify-yes",
+      "policy": "noeviction",
+      "verify_oom": true,
+      "source_operations": 15000,
+      "producer_errors": 0,
+      "forwarded_events": 9805,
+      "events_lost": 5195,
+      "dropped": 5195,
+      "dropped_oom": 5195,
+      "stream_entries_after": 9805,
+      "evicted_keys": 0,
+      "elapsed_ms": 200,
+      "operations_per_second": 75000,
+      "passed": true
+    },
+    {
+      "name": "noeviction-verify-no",
+      "policy": "noeviction",
+      "verify_oom": false,
+      "source_operations": 15000,
+      "producer_errors": 0,
+      "forwarded_events": 15000,
+      "events_lost": 0,
+      "dropped": 0,
+      "dropped_oom": 0,
+      "stream_entries_after": 15000,
+      "evicted_keys": 0,
+      "elapsed_ms": 200,
+      "operations_per_second": 75000,
+      "passed": true
+    },
+    {
+      "name": "volatile-lru",
+      "policy": "volatile-lru",
+      "verify_oom": true,
+      "source_operations": 15000,
+      "producer_errors": 0,
+      "forwarded_events": 15000,
+      "events_lost": 0,
+      "dropped": 0,
+      "dropped_oom": 0,
+      "stream_entries_after": 15000,
+      "evicted_keys": 2654,
+      "elapsed_ms": 230,
+      "operations_per_second": 65217.391304347824,
+      "passed": true
+    },
+    {
+      "name": "allkeys-lru",
+      "policy": "allkeys-lru",
+      "verify_oom": true,
+      "source_operations": 15000,
+      "producer_errors": 0,
+      "forwarded_events": 15000,
+      "events_lost": 0,
+      "dropped": 0,
+      "dropped_oom": 0,
+      "eviction_risk": 1,
+      "stream_entries_after_capture": 15000,
+      "stream_entries_after_churn": 0,
+      "stream_exists_after_churn": false,
+      "churn_rounds": 1,
+      "churn_keys": 50000,
+      "evicted_keys": 62994,
+      "counters_changed_during_churn": false,
+      "silent_history_loss": true,
+      "passed": true
+    }
+  ],
+  "cleanup": {
+    "terraform_state_empty": true,
+    "instances_terminated": 2,
+    "volumes_deleted": 1,
+    "volumes_deleting": 1,
+    "verified_directly_with_ec2": true
+  }
+}
