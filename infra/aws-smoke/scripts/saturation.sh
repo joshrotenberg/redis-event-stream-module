@@ -20,6 +20,15 @@ maxlen="${SATURATION_MAXLEN:-10000}"
 persistence_probe_events="${SATURATION_PERSISTENCE_PROBE_EVENTS:-5000}"
 replication_probe_events="${SATURATION_REPLICATION_PROBE_EVENTS:-5000}"
 replication_pause_seconds="${SATURATION_REPLICATION_PAUSE_SECONDS:-2}"
+maxmemory_probe="${SATURATION_MAXMEMORY_PROBE:-off}"
+maxmemory_prefill_keys="${SATURATION_MAXMEMORY_PREFILL_KEYS:-50000}"
+maxmemory_payload_bytes="${SATURATION_MAXMEMORY_PAYLOAD_BYTES:-1024}"
+maxmemory_delete_events="${SATURATION_MAXMEMORY_DELETE_EVENTS:-15000}"
+maxmemory_write_events="${SATURATION_MAXMEMORY_WRITE_EVENTS:-15000}"
+maxmemory_write_payload_bytes="${SATURATION_MAXMEMORY_WRITE_PAYLOAD_BYTES:-64}"
+maxmemory_percent="${SATURATION_MAXMEMORY_PERCENT:-90}"
+maxmemory_churn_keys="${SATURATION_MAXMEMORY_CHURN_KEYS:-50000}"
+maxmemory_churn_rounds="${SATURATION_MAXMEMORY_CHURN_ROUNDS:-6}"
 
 case "$persistence_mode" in
   off | rdb | aof-everysec | aof-always) ;;
@@ -54,16 +63,49 @@ case "$replication_mode" in
     exit 2
     ;;
 esac
+case "$maxmemory_probe" in
+  off | on) ;;
+  *)
+    echo "SATURATION_MAXMEMORY_PROBE must be off or on" >&2
+    exit 2
+    ;;
+esac
 if ! [[ "$maxlen" =~ ^[1-9][0-9]*$ && "$persistence_probe_events" =~ ^[1-9][0-9]*$ &&
   "$replication_probe_events" =~ ^[1-9][0-9]*$ && "$replication_pause_seconds" =~ ^[1-9][0-9]*$ &&
   "$background_delay_seconds" =~ ^[0-9]+$ && "$background_timeout_seconds" =~ ^[1-9][0-9]*$ &&
-  "$prefill_keys" =~ ^[0-9]+$ && "$prefill_payload_bytes" =~ ^[1-9][0-9]*$ ]]; then
-  echo "MAXLEN, probe counts, background controls, and prefill controls are invalid" >&2
+  "$prefill_keys" =~ ^[0-9]+$ && "$prefill_payload_bytes" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_prefill_keys" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_payload_bytes" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_delete_events" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_write_events" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_write_payload_bytes" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_percent" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_churn_keys" =~ ^[1-9][0-9]*$ &&
+  "$maxmemory_churn_rounds" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAXLEN, persistence, replication, background, prefill, or maxmemory controls are invalid" >&2
   exit 2
 fi
 if ((persistence_probe_events > maxlen || replication_probe_events > maxlen)); then
   echo "probe event counts must not exceed SATURATION_MAXLEN" >&2
   exit 2
+fi
+if [[ "$maxmemory_probe" == on ]]; then
+  if ((maxmemory_percent >= 100)); then
+    echo "SATURATION_MAXMEMORY_PERCENT must be less than 100" >&2
+    exit 2
+  fi
+  if ((maxmemory_delete_events >= maxmemory_prefill_keys)); then
+    echo "SATURATION_MAXMEMORY_DELETE_EVENTS must be smaller than the maxmemory prefill" >&2
+    exit 2
+  fi
+  if ((maxmemory_delete_events > maxlen || maxmemory_write_events > maxlen)); then
+    echo "maxmemory event counts must not exceed SATURATION_MAXLEN" >&2
+    exit 2
+  fi
+  if [[ "$persistence_mode" != off || "$replication_mode" != off ]]; then
+    echo "SATURATION_MAXMEMORY_PROBE=on requires persistence and replication off" >&2
+    exit 2
+  fi
 fi
 
 if [[ "$plan_only" == yes ]]; then
@@ -379,6 +421,34 @@ chmod 0700 /tmp/eventstream-remote-saturation.sh
 /tmp/eventstream-remote-saturation.sh '$server_ip' '$redis_image' '$memtier_image' '/usr/local/lib/redis/modules/libredis_event_stream_module.so' '$harness_url' '$remote_result_dir' '$remote_replica_ip'" \
   "$results_dir/raw/saturation"
 
+printf 'null\n' >"$results_dir/maxmemory-probe.json"
+if [[ "$maxmemory_probe" == on ]]; then
+  maxmemory_harness_url="${module_source_repo%/}/raw/${module_source_commit}/bench/maxmemory-pressure.sh"
+  maxmemory_remote_b64="$(encode_file "$root_dir/scripts/remote-maxmemory-probe.sh")"
+  run_remote "$server_id" maxmemory-pressure-probe \
+    "printf '%s' '$maxmemory_remote_b64' | base64 --decode >/tmp/eventstream-remote-maxmemory-probe.sh
+chmod 0700 /tmp/eventstream-remote-maxmemory-probe.sh
+export PRESSURE_PREFILL_KEYS='$maxmemory_prefill_keys'
+export PRESSURE_PAYLOAD_BYTES='$maxmemory_payload_bytes'
+export PRESSURE_DELETE_EVENTS='$maxmemory_delete_events'
+export PRESSURE_WRITE_EVENTS='$maxmemory_write_events'
+export PRESSURE_WRITE_PAYLOAD_BYTES='$maxmemory_write_payload_bytes'
+export PRESSURE_MAXMEMORY_PERCENT='$maxmemory_percent'
+export PRESSURE_CHURN_KEYS='$maxmemory_churn_keys'
+export PRESSURE_CHURN_ROUNDS='$maxmemory_churn_rounds'
+export PRESSURE_MAXLEN='$maxlen'
+/tmp/eventstream-remote-maxmemory-probe.sh \
+  '$maxmemory_harness_url' \
+  /usr/local/lib/redis/modules/libredis_event_stream_module.so \
+  /var/lib/eventstream-smoke/maxmemory-pressure.json" \
+    "$results_dir/raw/maxmemory-pressure-probe"
+  fetch_remote_file "$server_id" maxmemory-pressure \
+    /var/lib/eventstream-smoke/maxmemory-pressure.json \
+    "$results_dir/maxmemory-probe.json"
+  jq -e '.passed == true and (.cases | length) == 4' \
+    "$results_dir/maxmemory-probe.json" >/dev/null
+fi
+
 printf 'null\n' >"$results_dir/replication-probe.json"
 if [[ "$replication_mode" == replica ]]; then
   replication_probe_b64="$(encode_file "$root_dir/scripts/remote-replication-probe.sh")"
@@ -429,6 +499,7 @@ jq \
   --slurpfile environment "$results_dir/environment.json" \
   --slurpfile restart_probe "$results_dir/restart-probe.json" \
   --slurpfile replication_probe "$results_dir/replication-probe.json" \
+  --slurpfile maxmemory_probe "$results_dir/maxmemory-probe.json" \
   '.source.git_commit = $commit |
    .source.module_sha256 = $module_sha |
    .source.replica_module_sha256 =
@@ -437,7 +508,8 @@ jq \
    .topology = {replication_mode: $replication_mode} |
    .environment = $environment[0] |
    .validation.persistence_restart = $restart_probe[0] |
-   .validation.replication_pause = $replication_probe[0]' \
+   .validation.replication_pause = $replication_probe[0] |
+   .validation.maxmemory_pressure = $maxmemory_probe[0]' \
   "$results_dir/manifest.json" >"$results_dir/manifest.enriched.json"
 mv "$results_dir/manifest.enriched.json" "$results_dir/manifest.json"
 

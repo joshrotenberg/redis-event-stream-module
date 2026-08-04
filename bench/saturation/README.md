@@ -195,6 +195,44 @@ memory snapshots through its checkpoint hook, and runs a pause/catch-up probe.
 Campaign summaries aggregate replication bytes per operation, replica CPU and
 memory, and the lag reported from both sides of the replication link.
 
+## Maxmemory pressure probe
+
+`bench/maxmemory-pressure.sh` is a deterministic companion to the time-based
+runner. It targets a reachable Redis process with dynamic module commands
+enabled and runs four bounded cases:
+
+- `noeviction` with `eventstream.verify-oom yes`: unique source deletes keep
+  succeeding while mirrored XADDs are refused above the limit, then recover as
+  the deletes restore headroom;
+- `noeviction` with `verify-oom no`: the same source deletes admit every mirror
+  write even while Redis begins above its configured limit;
+- `volatile-lru`: expiring cache keys are eviction candidates while the
+  non-expiring event stream remains protected; and
+- `allkeys-lru`: captured history is made idle and bounded churn proves whether
+  Redis can evict it without incrementing module loss counters.
+
+The probe reconciles unique successful source mutations against `forwarded`,
+`events_lost`, `dropped_oom`, and final stream length. It also records producer
+rate, used memory, RSS, allocator/fragmentation fields, eviction and OOM
+counters, policy, `eviction_risk`, registry errors, and the exact before/after
+state for every case.
+
+Run it against an isolated local endpoint:
+
+```sh
+PRESSURE_PORT=6379 \
+PRESSURE_SERVER_MODULE_PATH=/path/on/server/libredis_event_stream_module.so \
+PRESSURE_RESULT_PATH=bench/results/maxmemory-pressure.json \
+bench/maxmemory-pressure.sh
+```
+
+Defaults prefill 50,000 1 KiB keys, set `maxmemory` to 90% of the observed
+resident dataset's Redis memory, issue 15,000 source events per behavioral
+case, and allow up to six 50,000-key allkeys churn rounds. The process must be
+disposable: the probe changes maxmemory policy, loads and unloads the module,
+flushes data between cases, and leaves the endpoint empty with maxmemory
+disabled.
+
 When `SATURATION_METRICS_HOOK` emits the built-in `linux-proc-stat-v1` shape,
 the normalized trial also reports load-generator host CPU, aggregate core use,
 and headroom over the exact pre/post interval. The AWS runner installs this

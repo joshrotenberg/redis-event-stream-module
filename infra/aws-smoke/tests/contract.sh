@@ -91,6 +91,42 @@ if SATURATION_PLAN_ONLY=yes SATURATION_PERSISTENCE_MODE=rdb \
   exit 1
 fi
 SATURATION_PLAN_ONLY=yes \
+SATURATION_MAXMEMORY_PROBE=on \
+SATURATION_MAXLEN=5000 \
+SATURATION_MAXMEMORY_PREFILL_KEYS=1000 \
+SATURATION_MAXMEMORY_DELETE_EVENTS=300 \
+SATURATION_MAXMEMORY_WRITE_EVENTS=200 \
+SATURATION_MAXMEMORY_CHURN_KEYS=1000 \
+SATURATION_MAXMEMORY_CHURN_ROUNDS=2 \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_REPETITIONS=1 \
+SATURATION_RESULTS_DIR="$test_dir/maxmemory" \
+  "$root_dir/lab.sh" saturation >"$test_dir/maxmemory-plan.txt"
+if SATURATION_PLAN_ONLY=yes SATURATION_MAXMEMORY_PROBE=invalid \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "invalid maxmemory probe mode unexpectedly passed" >&2
+  exit 1
+fi
+if SATURATION_PLAN_ONLY=yes SATURATION_MAXMEMORY_PROBE=on \
+  SATURATION_MAXLEN=100 SATURATION_MAXMEMORY_WRITE_EVENTS=101 \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "maxmemory event count above MAXLEN unexpectedly passed" >&2
+  exit 1
+fi
+if SATURATION_PLAN_ONLY=yes SATURATION_MAXMEMORY_PROBE=on \
+  SATURATION_MAXLEN=5000 SATURATION_MAXMEMORY_PERCENT=100 \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "maxmemory percent at 100 unexpectedly passed" >&2
+  exit 1
+fi
+if SATURATION_PLAN_ONLY=yes SATURATION_MAXMEMORY_PROBE=on \
+  SATURATION_MAXLEN=5000 SATURATION_PERSISTENCE_MODE=rdb \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "maxmemory probe with persistence unexpectedly passed" >&2
+  exit 1
+fi
+SATURATION_PLAN_ONLY=yes \
 SATURATION_REPLICATION_MODE=replica \
 SATURATION_REPLICATION_PROBE_EVENTS=100 \
 SATURATION_REPLICATION_PAUSE_SECONDS=1 \
@@ -129,6 +165,10 @@ grep -Fq 'SATURATION_BACKGROUND_ACTION' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'persistence-restart-probe' \
   "$root_dir/scripts/saturation.sh"
+grep -Fq 'maxmemory-pressure-probe' \
+  "$root_dir/scripts/saturation.sh"
+grep -Fq '.validation.maxmemory_pressure' \
+  "$root_dir/scripts/saturation.sh"
 grep -Fq 'replication-pause-probe' \
   "$root_dir/scripts/saturation.sh"
 # shellcheck disable=SC2016
@@ -144,6 +184,13 @@ grep -Fq 'off | rdb | aof-everysec | aof-always' \
 grep -Fq 'background_latest_fork_usec:' "$root_dir/../../bench/saturation.sh"
 grep -Fq '.overlap_proven == true' "$root_dir/../../bench/saturation.sh"
 grep -Fq 'redis_raw BGSAVE' "$root_dir/scripts/remote-persistence-probe.sh"
+# shellcheck disable=SC2016
+grep -Fq '($forwarded + $lost == $expected_events)' \
+  "$root_dir/../../bench/maxmemory-pressure.sh"
+grep -Fq 'silent_history_loss:' \
+  "$root_dir/../../bench/maxmemory-pressure.sh"
+grep -Fq 'docker exec -i eventstream-server redis-cli' \
+  "$root_dir/scripts/remote-maxmemory-probe.sh"
 # shellcheck disable=SC2016
 grep -Fq '($after_module.forwarded == 0)' \
   "$root_dir/scripts/remote-persistence-probe.sh"

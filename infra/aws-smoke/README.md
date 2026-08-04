@@ -190,6 +190,40 @@ summaries include wall and Redis-reported action duration, copy-on-write bytes,
 latest fork time, status, and proven overlap. Keep automatic AOF rewrite
 disabled so the controller owns the only rewrite in the window.
 
+## Maxmemory pressure campaign
+
+Enable the deterministic pressure probe after a small standalone saturation
+matrix to exercise the memory-limit contract on the same versioned module and
+hardware. The probe requires persistence and replication to be off. Event
+counts must fit inside `SATURATION_MAXLEN`, so retained-entry reconciliation is
+not confused with ordinary MAXLEN trimming.
+
+```sh
+SATURATION_MAXMEMORY_PROBE=on \
+SATURATION_MAXLEN=50000 \
+SATURATION_MAXMEMORY_PREFILL_KEYS=50000 \
+SATURATION_MAXMEMORY_PAYLOAD_BYTES=1024 \
+SATURATION_MAXMEMORY_DELETE_EVENTS=15000 \
+SATURATION_MAXMEMORY_WRITE_EVENTS=15000 \
+SATURATION_MAXMEMORY_PERCENT=90 \
+SATURATION_MAXMEMORY_CHURN_KEYS=50000 \
+SATURATION_MAXMEMORY_CHURN_ROUNDS=6 \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_RATE_LIMIT_LEVELS=500 \
+SATURATION_REPETITIONS=1 \
+SATURATION_WARMUP_SECONDS=5 \
+SATURATION_MEASUREMENT_SECONDS=15 \
+./lab.sh saturation
+```
+
+The result is saved as `maxmemory-probe.json` and embedded at
+`manifest.validation.maxmemory_pressure`. The four cases distinguish counted
+OOM refusal, the `verify-oom no` opt-out, protected stream history under a
+volatile policy, and uncounted history eviction under an allkeys policy. Every
+case records exact source/capture accounting, memory and RSS, fragmentation,
+evictions, policy risk, and producer outcomes.
+
 ## Single-replica campaign
 
 Create the optional third host and select the replica-aware runner together;
