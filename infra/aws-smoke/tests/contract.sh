@@ -65,6 +65,9 @@ grep -Fq 'SATURATION_WORKLOAD_NAME SATURATION_PRECISE_TIMER' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'export SATURATION_COMMANDS_FILE=/tmp/eventstream-saturation-commands.json' \
   "$root_dir/scripts/saturation.sh"
+grep -Fq 'run_remote_for_fetch' "$root_dir/scripts/saturation.sh"
+grep -Fq 'saturation-summary.tar.gz' "$root_dir/scripts/saturation.sh"
+grep -Fq 'saturation-summary.tar.gz' "$root_dir/scripts/remote-saturation.sh"
 
 SOAK_PLAN_ONLY=yes RUN_ID=contract-soak-test \
   "$root_dir/lab.sh" soak >"$test_dir/soak-plan.json"

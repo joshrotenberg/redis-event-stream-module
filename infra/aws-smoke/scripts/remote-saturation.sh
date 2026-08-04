@@ -91,4 +91,6 @@ export SATURATION_METRICS_HOOK=/tmp/eventstream-saturation-metrics.sh
 export SATURATION_RESULTS_DIR="$result_dir"
 
 /tmp/eventstream-saturation.sh
+tar -C "$result_dir" -czf /var/lib/eventstream-smoke/saturation-summary.tar.gz \
+  manifest.json trials.json summary.json knee.json result.json
 tar -C "$result_dir" -czf /var/lib/eventstream-smoke/saturation-results.tar.gz .

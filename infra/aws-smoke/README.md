@@ -159,6 +159,13 @@ oscillation documented in
 The manifest records this setting; use `SATURATION_PRECISE_TIMER=0` only to
 produce an explicit control.
 
+After a campaign, the controller first fetches and verifies a compact archive
+containing `manifest.json`, `trials.json`, `summary.json`, `knee.json`, and
+`result.json`. It then fetches the full raw/checkpoint archive. Each metadata
+and data chunk is retried up to five times, so a transient SSM error does not
+discard a completed run; the compact evidence remains local even if the larger
+raw transfer ultimately fails.
+
 Choose the absolute p99 budget from a coarse matched S0 run on the same client
 geometry. A budget below the paced S0 tail makes every module comparison
 unhealthy and does not describe a module knee; the 6 ms example reflects the

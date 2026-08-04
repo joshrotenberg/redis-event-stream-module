@@ -106,7 +106,7 @@ decode_base64() {
 fetch_remote_file() {
   local instance_id="$1" label="$2" remote_path="$3" local_path="$4"
   local metadata size expected_sha actual_sha offset=0 chunk_size=15000 chunk_base
-  run_remote "$instance_id" "fetch-$label-metadata" \
+  run_remote_for_fetch "$instance_id" "fetch-$label-metadata" \
     "stat -c '%s' '$remote_path'
 sha256sum '$remote_path' | awk '{ print \$1 }'" \
     "$results_dir/raw/fetch-$label-metadata"
@@ -116,7 +116,7 @@ sha256sum '$remote_path' | awk '{ print \$1 }'" \
   : >"$local_path"
   while ((offset < size)); do
     chunk_base="$results_dir/raw/fetch-$label-$offset"
-    run_remote "$instance_id" "fetch-$label-$offset" \
+    run_remote_for_fetch "$instance_id" "fetch-$label-$offset" \
       "dd if='$remote_path' iflag=skip_bytes,count_bytes skip='$offset' count='$chunk_size' 2>/dev/null | base64 -w0" \
       "$chunk_base"
     decode_base64 <"$chunk_base.stdout" >>"$local_path"
@@ -127,6 +127,22 @@ sha256sum '$remote_path' | awk '{ print \$1 }'" \
     echo "checksum mismatch fetching $remote_path" >&2
     return 1
   }
+}
+
+run_remote_for_fetch() {
+  local instance_id="$1" label="$2" command="$3" output_base="$4"
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if run_remote "$instance_id" "$label" "$command" "$output_base"; then
+      return 0
+    fi
+    if ((attempt < 5)); then
+      echo "retrying remote fetch ($label), attempt $((attempt + 1)) of 5" >&2
+      sleep $((attempt * 2))
+    fi
+  done
+  echo "remote fetch exhausted retries ($label)" >&2
+  return 1
 }
 
 echo "waiting for EC2 health and SSM..." >&2
@@ -242,6 +258,11 @@ printf '%s' '$remote_saturation_b64' | base64 --decode >/tmp/eventstream-remote-
 chmod 0700 /tmp/eventstream-remote-saturation.sh
 /tmp/eventstream-remote-saturation.sh '$server_ip' '$redis_image' '$memtier_image' '/usr/local/lib/redis/modules/libredis_event_stream_module.so' '$harness_url' '$remote_result_dir'" \
   "$results_dir/raw/saturation"
+
+fetch_remote_file "$loadgen_id" saturation-summary \
+  /var/lib/eventstream-smoke/saturation-summary.tar.gz \
+  "$results_dir/raw/saturation-summary.tar.gz"
+tar -xzf "$results_dir/raw/saturation-summary.tar.gz" -C "$results_dir"
 
 fetch_remote_file "$loadgen_id" saturation-results \
   /var/lib/eventstream-smoke/saturation-results.tar.gz \
