@@ -507,6 +507,7 @@ The runner fails unless:
 - [2026-07-30: Preview envelope soak and restart-loss probe][envelope-soak]
 - [2026-08-04: single-node persistence baseline][persistence-baseline]
 - [2026-08-04: one-replica baseline and catch-up probe][replication-baseline]
+- [2026-08-04: background persistence interference][background-persistence]
 
 [first-run]: observations/2026-07-30.md
 [ramp]: observations/2026-07-30-ramp.md
@@ -517,6 +518,7 @@ The runner fails unless:
 [envelope-soak]: observations/2026-07-30-envelope-soak.md
 [persistence-baseline]: observations/2026-08-04-persistence-baseline.md
 [replication-baseline]: observations/2026-08-04-replication-baseline.md
+[background-persistence]: observations/2026-08-04-background-persistence.md
 
 ## Image pins
 

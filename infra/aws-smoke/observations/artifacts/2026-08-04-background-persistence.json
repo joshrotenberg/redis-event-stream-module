@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "campaign": "background-persistence-interference",
+  "issue": 259,
+  "source": {
+    "git_commit": "237bad8348a8250f9158d329405a8f28ac42d781",
+    "module_sha256": "47f0e6f8e32c60e84b62df5f6209e05d8dc7d279d17337cb1467707bcb29f3d5"
+  },
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "instance_type": "c7i.large",
+    "hosts": 2,
+    "root_volume": {
+      "type": "gp3",
+      "gib": 16,
+      "iops": 3000,
+      "throughput_mib_per_second": 125
+    },
+    "redis_version": "8.8.0",
+    "memtier_version": "2.5.1"
+  },
+  "workload": {
+    "commands": "SET only",
+    "payload_bytes": 64,
+    "keyspace": 100000,
+    "capture": "events set",
+    "maxlen": 10000,
+    "clients": 200,
+    "pipeline": 1,
+    "offered_ops_per_sec": 100000,
+    "repetitions": 3,
+    "warmup_seconds": 10,
+    "measurement_seconds": 30,
+    "prefill": {
+      "keys": 250000,
+      "payload_bytes": 1024
+    },
+    "background_delay_seconds": 5,
+    "background_timeout_seconds": 120
+  },
+  "totals": {
+    "campaigns": 4,
+    "trials": 24,
+    "operations": 70882379,
+    "expected_selected_events": 35267744,
+    "forwarded_events": 35267744,
+    "events_lost": 0,
+    "dropped": 0,
+    "handler_panics": 0,
+    "registry_errors": 0,
+    "command_errors": 0,
+    "connection_errors": 0,
+    "aof_delayed_fsync_max": 0
+  },
+  "campaigns": [
+    {
+      "run_id": "20260804-background-rdb-control",
+      "persistence_mode": "rdb",
+      "background_action": "none",
+      "trials": 6,
+      "operations": 17808028,
+      "expected_selected_events": 8891993,
+      "forwarded_events": 8891993
+    },
+    {
+      "run_id": "20260804-background-rdb-bgsave",
+      "persistence_mode": "rdb",
+      "background_action": "bgsave",
+      "trials": 6,
+      "operations": 17754533,
+      "expected_selected_events": 8847047,
+      "forwarded_events": 8847047
+    },
+    {
+      "run_id": "20260804-background-aof-control",
+      "persistence_mode": "aof-everysec",
+      "background_action": "none",
+      "trials": 6,
+      "operations": 17693980,
+      "expected_selected_events": 8794388,
+      "forwarded_events": 8794388
+    },
+    {
+      "run_id": "20260804-background-aof-rewrite",
+      "persistence_mode": "aof-everysec",
+      "background_action": "bgrewriteaof",
+      "trials": 6,
+      "operations": 17625838,
+      "expected_selected_events": 8734316,
+      "forwarded_events": 8734316
+    }
+  ],
+  "cells": [
+    {
+      "persistence_mode": "rdb",
+      "background_action": "bgsave",
+      "scenario": "s0",
+      "control": {
+        "median_ops_per_sec": 98999.15,
+        "median_p99_ms": 5.215,
+        "median_p99_9_ms": 11.007,
+        "median_max_ms": 25.471,
+        "median_cpu_us_per_operation": 5.15060676707297
+      },
+      "action": {
+        "median_ops_per_sec": 98966.45,
+        "median_p99_ms": 4.863,
+        "median_p99_9_ms": 11.263,
+        "median_max_ms": 28.927,
+        "median_cpu_us_per_operation": 5.213371072091058,
+        "median_duration_ms": 978,
+        "median_cow_bytes": 1589248,
+        "median_fork_usec": 6246
+      },
+      "delta": {
+        "ops_percent": -0.03303058662624814,
+        "p99_ms": -0.3519999999999994,
+        "p99_9_ms": 0.2560000000000002,
+        "max_ms": 3.4559999999999995,
+        "cpu_us_per_operation_percent": 1.2185807974961271
+      }
+    },
+    {
+      "persistence_mode": "rdb",
+      "background_action": "bgsave",
+      "scenario": "s2",
+      "control": {
+        "median_ops_per_sec": 98730.72,
+        "median_p99_ms": 2.623,
+        "median_p99_9_ms": 11.583,
+        "median_max_ms": 30.847,
+        "median_cpu_us_per_operation": 8.543113101903696
+      },
+      "action": {
+        "median_ops_per_sec": 98233.64,
+        "median_p99_ms": 2.927,
+        "median_p99_9_ms": 12.031,
+        "median_max_ms": 36.351,
+        "median_cpu_us_per_operation": 8.620182274092105,
+        "median_duration_ms": 952,
+        "median_cow_bytes": 2768896,
+        "median_fork_usec": 6187
+      },
+      "delta": {
+        "ops_percent": -0.5034704497242637,
+        "p99_ms": 0.3039999999999998,
+        "p99_9_ms": 0.4480000000000004,
+        "max_ms": 5.503999999999998,
+        "cpu_us_per_operation_percent": 0.90212047141498
+      }
+    },
+    {
+      "persistence_mode": "aof-everysec",
+      "background_action": "bgrewriteaof",
+      "scenario": "s0",
+      "control": {
+        "median_ops_per_sec": 98810.58,
+        "median_p99_ms": 4.799,
+        "median_p99_9_ms": 11.839,
+        "median_max_ms": 33.279,
+        "median_cpu_us_per_operation": 5.787094243537113,
+        "median_aof_bytes_per_operation": 143.88850180911936
+      },
+      "action": {
+        "median_ops_per_sec": 98724.26,
+        "median_p99_ms": 4.991,
+        "median_p99_9_ms": 12.671,
+        "median_max_ms": 44.543,
+        "median_cpu_us_per_operation": 5.8940204292359155,
+        "median_duration_ms": 952,
+        "median_cow_bytes": 1781760,
+        "median_fork_usec": 6896
+      },
+      "delta": {
+        "ops_percent": -0.08735906620526146,
+        "p99_ms": 0.19199999999999928,
+        "p99_9_ms": 0.831999999999999,
+        "max_ms": 11.263999999999996,
+        "cpu_us_per_operation_percent": 1.847666224171407
+      }
+    },
+    {
+      "persistence_mode": "aof-everysec",
+      "background_action": "bgrewriteaof",
+      "scenario": "s2",
+      "control": {
+        "median_ops_per_sec": 97671.76,
+        "median_p99_ms": 2.959,
+        "median_p99_9_ms": 11.839,
+        "median_max_ms": 33.279,
+        "median_cpu_us_per_operation": 10.035451204748794,
+        "median_aof_bytes_per_operation": 361.7209543419838
+      },
+      "action": {
+        "median_ops_per_sec": 96998.12,
+        "median_p99_ms": 3.391,
+        "median_p99_9_ms": 11.903,
+        "median_max_ms": 33.535,
+        "median_cpu_us_per_operation": 10.003684230408638,
+        "median_duration_ms": 920,
+        "median_cow_bytes": 3096576,
+        "median_fork_usec": 6865
+      },
+      "delta": {
+        "ops_percent": -0.689697820536872,
+        "p99_ms": 0.43199999999999994,
+        "p99_9_ms": 0.06400000000000006,
+        "max_ms": 0.2559999999999931,
+        "cpu_us_per_operation_percent": -0.3165475442212684
+      }
+    }
+  ],
+  "background_actions": {
+    "trials": 12,
+    "completed": 12,
+    "status_ok": 12,
+    "overlap_proven": 12,
+    "duration_ms": {
+      "min": 900,
+      "median": 952,
+      "max": 1047
+    },
+    "cow_bytes": {
+      "min": 1576960,
+      "median": 2768896,
+      "max": 3125248
+    },
+    "fork_usec": {
+      "min": 6057,
+      "median": 6653,
+      "max": 10415
+    }
+  },
+  "restart_probes": {
+    "campaigns": 4,
+    "passed": 4,
+    "attempted_events_each": 5000,
+    "before_restart_source_keys_each": 5000,
+    "before_restart_stream_entries_each": 5000,
+    "before_restart_forwarded_each": 5000,
+    "after_restart_source_keys_each": 5000,
+    "after_restart_stream_entries_each": 5000,
+    "after_restart_forwarded_each": 0,
+    "events_lost": 0,
+    "dropped": 0
+  },
+  "notes": {
+    "rewrite_aof_bytes_per_operation_valid": false,
+    "rewrite_aof_bytes_reason": "The rewrite replaced a larger AOF with a compacted file inside the measurement window, making start-to-end file growth negative."
+  },
+  "cleanup": {
+    "terraform_state_empty": true,
+    "instances_terminated": 2,
+    "volumes_deleted": 2,
+    "verified_directly_with_ec2": true
+  }
+}
