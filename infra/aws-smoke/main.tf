@@ -45,6 +45,7 @@ locals {
     systemctl enable --now docker
     systemctl enable --now amazon-ssm-agent
     docker pull '${var.loadgen_image}'
+    docker pull '${var.memtier_image}'
     install -d -m 0755 /var/lib/eventstream-smoke
     touch /var/lib/eventstream-smoke/ready
   USER_DATA

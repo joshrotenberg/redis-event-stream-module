@@ -11,3 +11,4 @@ dump.rdb
 *.tfplan
 crash.log
 /infra/aws-smoke/results/
+/bench/results/

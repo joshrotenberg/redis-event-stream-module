@@ -23,6 +23,7 @@ server_args=(
   --protected-mode no
   --save ""
   --appendonly no
+  --enable-module-command yes
 )
 
 case "$scenario" in

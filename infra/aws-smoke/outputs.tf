@@ -32,6 +32,10 @@ output "loadgen_image" {
   value = var.loadgen_image
 }
 
+output "memtier_image" {
+  value = var.memtier_image
+}
+
 output "root_volume_gib" {
   value = var.root_volume_gib
 }

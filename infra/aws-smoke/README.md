@@ -79,12 +79,57 @@ cd infra/aws-smoke
 ./lab.sh plan
 ./lab.sh up
 ./lab.sh run
+./lab.sh saturation
 ./lab.sh down
 ./lab.sh orphans
 ```
 
 `plan`, `up`, and `down` accept additional Terraform arguments. For unattended
 execution, explicitly add `-auto-approve`; it is never implied by the wrapper.
+
+## Time-based saturation campaign
+
+`./lab.sh saturation` runs the endpoint-agnostic memtier harness from
+[`bench/saturation/README.md`](../../bench/saturation/README.md) across the same
+two-host private network. It builds the exact checked-out commit on the server,
+starts an unloaded Redis baseline with dynamic module commands enabled, and
+uses the pinned memtier 2.5.1 image on the load-generator host.
+
+Review the full randomized S0/S1/S2, selectivity, and mass-expiry plan without
+AWS access:
+
+```sh
+SATURATION_PLAN_ONLY=yes ./lab.sh saturation
+```
+
+After `./lab.sh up`, a short cloud smoke run is:
+
+```sh
+SATURATION_SCENARIOS="s0 s1 s2 expiry-s0 expiry-s2" \
+SATURATION_SELECTIVITIES="0 10 100" \
+SATURATION_REPETITIONS=1 \
+SATURATION_WARMUP_SECONDS=5 \
+SATURATION_MEASUREMENT_SECONDS=15 \
+SATURATION_EXPIRY_KEYS=50000 \
+./lab.sh saturation
+```
+
+Omit the overrides for the evidence-producing defaults: five independent
+repetitions, 10-second warmups, and 60-second measurement windows. The cloud
+artifact embeds the existing versioned hardware/environment manifest, the
+exact module commit and artifact digest, and the pinned generator image. It
+otherwise has the same raw/normalized/summary layout and hard reconciliation
+checks as a local or non-AWS run.
+
+The one-command disposable form applies the lab, runs saturation, destroys the
+resources even when the workload fails, and performs the orphan check:
+
+```sh
+SATURATION_REPETITIONS=1 \
+SATURATION_WARMUP_SECONDS=5 \
+SATURATION_MEASUREMENT_SECONDS=15 \
+./lab.sh saturation-campaign -auto-approve
+```
 
 For a disposable smoke campaign, use the combined path. The explicit
 `-auto-approve` opts into unattended provisioning and cleanup; an exit trap
@@ -318,6 +363,7 @@ The defaults use manifest digests, not moving tags:
 
 - `ghcr.io/joshrotenberg/redis-event-stream-module:0.4.0`
 - `redis:8.8.0` for `redis-cli` and `redis-benchmark`
+- `redislabs/memtier_benchmark` 2.5.1 for time-based saturation runs
 
 The module image contains the same vanilla Redis 8.8.0-from-source build used by
 the release and integration workflows. In `s0`, its command is overridden to
