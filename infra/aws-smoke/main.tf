@@ -49,6 +49,18 @@ locals {
     install -d -m 0755 /var/lib/eventstream-smoke
     touch /var/lib/eventstream-smoke/ready
   USER_DATA
+
+  bootstrap_replica = <<-USER_DATA
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    dnf install -y docker jq
+    systemctl enable --now docker
+    systemctl enable --now amazon-ssm-agent
+    docker pull '${var.module_image}'
+    docker pull '${var.loadgen_image}'
+    install -d -m 0755 /var/lib/eventstream-smoke
+    touch /var/lib/eventstream-smoke/ready
+  USER_DATA
 }
 
 resource "aws_vpc" "lab" {
@@ -100,7 +112,7 @@ resource "aws_route_table_association" "lab" {
 
 resource "aws_security_group" "server" {
   name_prefix = "${local.name}-server-"
-  description = "Redis ingress only from the smoke load generator"
+  description = "Redis ingress from the load generator and optional replica"
   vpc_id      = aws_vpc.lab.id
 
   tags = merge(local.common_tags, {
@@ -133,6 +145,18 @@ resource "aws_vpc_security_group_ingress_rule" "redis_from_loadgen" {
   from_port                    = 6379
   ip_protocol                  = "tcp"
   referenced_security_group_id = aws_security_group.loadgen.id
+  security_group_id            = aws_security_group.server.id
+  to_port                      = 6379
+  tags                         = local.common_tags
+}
+
+resource "aws_vpc_security_group_ingress_rule" "redis_between_servers" {
+  count = var.replica_enabled ? 1 : 0
+
+  description                  = "Redis replication between the primary and replica"
+  from_port                    = 6379
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.server.id
   security_group_id            = aws_security_group.server.id
   to_port                      = 6379
   tags                         = local.common_tags
@@ -213,6 +237,38 @@ resource "aws_instance" "server" {
   })
 }
 
+resource "aws_instance" "replica" {
+  count = var.replica_enabled ? 1 : 0
+
+  ami                         = data.aws_ssm_parameter.amazon_linux_2023.value
+  associate_public_ip_address = true
+  availability_zone           = local.availability_zone
+  iam_instance_profile        = aws_iam_instance_profile.ssm.name
+  instance_type               = var.replica_instance_type
+  subnet_id                   = aws_subnet.lab.id
+  user_data                   = local.bootstrap_replica
+  user_data_replace_on_change = true
+  vpc_security_group_ids      = [aws_security_group.server.id]
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  root_block_device {
+    delete_on_termination = true
+    encrypted             = true
+    volume_size           = var.root_volume_gib
+    volume_type           = "gp3"
+    tags                  = local.common_tags
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name}-replica"
+    Role = "replica"
+  })
+}
+
 resource "aws_instance" "loadgen" {
   ami                         = data.aws_ssm_parameter.amazon_linux_2023.value
   associate_public_ip_address = true
@@ -245,7 +301,7 @@ resource "aws_instance" "loadgen" {
 
 # A controller interruption must not leave billable compute running until a
 # human notices the expiry tag. EventBridge Scheduler invokes the EC2
-# StopInstances API at ExpiresAt using a role restricted to these two instance
+# StopInstances API at ExpiresAt using a role restricted to the lab instance
 # ARNs. Terraform destroy remains the resource-cleanup path; this is the hard
 # runtime backstop for the dominant compute and public-IPv4 charges.
 resource "aws_iam_role" "expiry_stop" {
@@ -277,10 +333,10 @@ resource "aws_iam_role_policy" "expiry_stop" {
       {
         Action = "ec2:StopInstances"
         Effect = "Allow"
-        Resource = [
-          aws_instance.server.arn,
-          aws_instance.loadgen.arn,
-        ]
+        Resource = concat(
+          [aws_instance.server.arn, aws_instance.loadgen.arn],
+          aws_instance.replica[*].arn,
+        )
       },
     ]
   })
@@ -308,10 +364,10 @@ resource "aws_scheduler_schedule" "expiry_stop" {
     arn      = "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
     role_arn = aws_iam_role.expiry_stop.arn
     input = jsonencode({
-      InstanceIds = [
-        aws_instance.server.id,
-        aws_instance.loadgen.id,
-      ]
+      InstanceIds = concat(
+        [aws_instance.server.id, aws_instance.loadgen.id],
+        aws_instance.replica[*].id,
+      )
     })
 
     retry_policy {

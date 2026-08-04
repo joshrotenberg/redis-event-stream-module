@@ -10,8 +10,11 @@ module_source_commit="${SATURATION_MODULE_SOURCE_COMMIT:-HEAD}"
 module_source_repo="${SATURATION_MODULE_SOURCE_REPO:-https://github.com/joshrotenberg/redis-event-stream-module}"
 environment_network_samples="${SATURATION_ENVIRONMENT_NETWORK_SAMPLES:-10000}"
 persistence_mode="${SATURATION_PERSISTENCE_MODE:-off}"
+replication_mode="${SATURATION_REPLICATION_MODE:-off}"
 maxlen="${SATURATION_MAXLEN:-10000}"
 persistence_probe_events="${SATURATION_PERSISTENCE_PROBE_EVENTS:-5000}"
+replication_probe_events="${SATURATION_REPLICATION_PROBE_EVENTS:-5000}"
+replication_pause_seconds="${SATURATION_REPLICATION_PAUSE_SECONDS:-2}"
 
 case "$persistence_mode" in
   off | aof-everysec | aof-always) ;;
@@ -20,12 +23,20 @@ case "$persistence_mode" in
     exit 2
     ;;
 esac
-if ! [[ "$maxlen" =~ ^[1-9][0-9]*$ && "$persistence_probe_events" =~ ^[1-9][0-9]*$ ]]; then
-  echo "SATURATION_MAXLEN and SATURATION_PERSISTENCE_PROBE_EVENTS must be positive integers" >&2
+case "$replication_mode" in
+  off | replica) ;;
+  *)
+    echo "SATURATION_REPLICATION_MODE must be off or replica" >&2
+    exit 2
+    ;;
+esac
+if ! [[ "$maxlen" =~ ^[1-9][0-9]*$ && "$persistence_probe_events" =~ ^[1-9][0-9]*$ &&
+  "$replication_probe_events" =~ ^[1-9][0-9]*$ && "$replication_pause_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAXLEN, probe event counts, and replication pause seconds must be positive integers" >&2
   exit 2
 fi
-if ((persistence_probe_events > maxlen)); then
-  echo "SATURATION_PERSISTENCE_PROBE_EVENTS must not exceed SATURATION_MAXLEN" >&2
+if ((persistence_probe_events > maxlen || replication_probe_events > maxlen)); then
+  echo "probe event counts must not exceed SATURATION_MAXLEN" >&2
   exit 2
 fi
 
@@ -53,9 +64,27 @@ region="$(jq -r '.region.value' <<<"$terraform_output")"
 server_id="$(jq -r '.server_instance_id.value' <<<"$terraform_output")"
 server_ip="$(jq -r '.server_private_ip.value' <<<"$terraform_output")"
 loadgen_id="$(jq -r '.loadgen_instance_id.value' <<<"$terraform_output")"
+replica_enabled="$(jq -r '.replica_enabled.value' <<<"$terraform_output")"
+replica_id="$(jq -r '.replica_instance_id.value // empty' <<<"$terraform_output")"
+replica_ip="$(jq -r '.replica_private_ip.value // empty' <<<"$terraform_output")"
 module_image="$(jq -r '.module_image.value' <<<"$terraform_output")"
 redis_image="$(jq -r '.loadgen_image.value' <<<"$terraform_output")"
 memtier_image="$(jq -r '.memtier_image.value' <<<"$terraform_output")"
+
+if [[ "$replication_mode" == replica && "$replica_enabled" != true ]]; then
+  echo "SATURATION_REPLICATION_MODE=replica requires TF_VAR_replica_enabled=true" >&2
+  exit 2
+fi
+if [[ "$replication_mode" == off && "$replica_enabled" != false ]]; then
+  echo "SATURATION_REPLICATION_MODE=off requires TF_VAR_replica_enabled=false" >&2
+  exit 2
+fi
+
+instance_ids=("$server_id" "$loadgen_id")
+if [[ "$replication_mode" == replica ]]; then
+  instance_ids+=("$replica_id")
+fi
+instance_ids_csv="$(IFS=,; printf '%s' "${instance_ids[*]}")"
 
 aws_args=(--region "$region")
 if [[ -n "${AWS_PROFILE:-}" ]]; then aws_args+=(--profile "$AWS_PROFILE"); fi
@@ -165,12 +194,18 @@ run_remote_for_fetch() {
 }
 
 echo "waiting for EC2 health and SSM..." >&2
-aws_cli ec2 wait instance-status-ok --instance-ids "$server_id" "$loadgen_id"
+aws_cli ec2 wait instance-status-ok --instance-ids "${instance_ids[@]}"
 wait_for_ssm "$server_id"
 wait_for_ssm "$loadgen_id"
+if [[ "$replication_mode" == replica ]]; then
+  wait_for_ssm "$replica_id"
+fi
 bootstrap="cloud-init status --wait && test -f /var/lib/eventstream-smoke/ready"
 run_remote "$server_id" bootstrap-server "$bootstrap" "$results_dir/raw/bootstrap-server"
 run_remote "$loadgen_id" bootstrap-loadgen "$bootstrap" "$results_dir/raw/bootstrap-loadgen"
+if [[ "$replication_mode" == replica ]]; then
+  run_remote "$replica_id" bootstrap-replica "$bootstrap" "$results_dir/raw/bootstrap-replica"
+fi
 
 git_commit="$(git -C "$repo_dir" rev-parse HEAD)"
 if [[ "$module_source_commit" == HEAD ]]; then module_source_commit="$git_commit"; fi
@@ -185,12 +220,34 @@ chmod 0700 /tmp/eventstream-module-build.sh
 module_artifact_json="$(cat "$results_dir/raw/module-build.stdout")"
 jq -e '.sha256 | test("^[0-9a-f]{64}$")' <<<"$module_artifact_json" >/dev/null
 
+replica_module_artifact_json=null
+if [[ "$replication_mode" == replica ]]; then
+  replica_module_override=/var/lib/eventstream-smoke/libredis_event_stream_module.so
+  run_remote "$replica_id" module-build-replica \
+    "printf '%s' '$module_build_b64' | base64 --decode >/tmp/eventstream-module-build.sh
+chmod 0700 /tmp/eventstream-module-build.sh
+/tmp/eventstream-module-build.sh '$module_archive' '$replica_module_override'" \
+    "$results_dir/raw/module-build-replica"
+  replica_module_artifact_json="$(cat "$results_dir/raw/module-build-replica.stdout")"
+  jq -e --arg primary_sha "$(jq -r '.sha256' <<<"$module_artifact_json")" \
+    '.sha256 == $primary_sha' <<<"$replica_module_artifact_json" >/dev/null
+fi
+
 server_b64="$(encode_file "$root_dir/scripts/remote-server.sh")"
 run_remote "$server_id" server-start \
   "printf '%s' '$server_b64' | base64 --decode >/tmp/eventstream-server.sh
 chmod 0700 /tmp/eventstream-server.sh
 /tmp/eventstream-server.sh s0 '$module_image' '$maxlen' '$module_override' 65536 64 1 '$persistence_mode' reset" \
   "$results_dir/raw/server-start"
+
+if [[ "$replication_mode" == replica ]]; then
+  replica_server_b64="$(encode_file "$root_dir/scripts/remote-replica-server.sh")"
+  run_remote "$replica_id" replica-start \
+    "printf '%s' '$replica_server_b64' | base64 --decode >/tmp/eventstream-replica-server.sh
+chmod 0700 /tmp/eventstream-replica-server.sh
+/tmp/eventstream-replica-server.sh '$server_ip' '$module_image' '$replica_module_override'" \
+    "$results_dir/raw/replica-start"
+fi
 
 # Capture the same versioned physical environment manifest as the request-counted
 # and soak runners before introducing benchmark load.
@@ -205,26 +262,37 @@ run_remote "$loadgen_id" environment-loadgen \
 chmod 0700 /tmp/eventstream-environment.sh
 /tmp/eventstream-environment.sh loadgen '$server_ip' '$redis_image' '$environment_network_samples'" \
   "$results_dir/raw/environment-loadgen"
-aws_cli ec2 describe-instances --instance-ids "$server_id" "$loadgen_id" \
+printf 'null\n' >"$results_dir/raw/environment-replica.stdout"
+if [[ "$replication_mode" == replica ]]; then
+  run_remote "$replica_id" environment-replica \
+    "printf '%s' '$environment_b64' | base64 --decode >/tmp/eventstream-environment.sh
+chmod 0700 /tmp/eventstream-environment.sh
+/tmp/eventstream-environment.sh replica '$server_ip' '$redis_image' '$environment_network_samples'" \
+    "$results_dir/raw/environment-replica"
+fi
+aws_cli ec2 describe-instances --instance-ids "${instance_ids[@]}" \
   --output json >"$results_dir/raw/ec2-instances.json"
 aws_cli ec2 describe-volumes \
-  --filters "Name=attachment.instance-id,Values=$server_id,$loadgen_id" \
+  --filters "Name=attachment.instance-id,Values=$instance_ids_csv" \
   --output json >"$results_dir/raw/ec2-volumes.json"
 jq -n \
   --arg schema_version 1 \
   --arg collected_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg server_id "$server_id" --arg loadgen_id "$loadgen_id" \
+  --arg replica_id "$replica_id" \
   --arg region "$region" \
   --arg availability_zone "$(jq -r '.availability_zone.value' <<<"$terraform_output")" \
   --arg vpc_id "$(jq -r '.vpc_id.value' <<<"$terraform_output")" \
   --arg subnet_id "$(jq -r '.subnet_id.value' <<<"$terraform_output")" \
   --arg server_private_ip "$server_ip" \
+  --arg replica_private_ip "$replica_ip" \
   --arg expiry_stop_schedule_arn "$(jq -r '.expiry_stop_schedule_arn.value' <<<"$terraform_output")" \
   --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
   --arg root_volume_type "$(jq -r '.root_volume_type.value' <<<"$terraform_output")" \
   --argjson root_volume_gib "$(jq -r '.root_volume_gib.value' <<<"$terraform_output")" \
   --slurpfile server_host "$results_dir/raw/environment-server.stdout" \
   --slurpfile loadgen_host "$results_dir/raw/environment-loadgen.stdout" \
+  --slurpfile replica_host "$results_dir/raw/environment-replica.stdout" \
   --slurpfile instances "$results_dir/raw/ec2-instances.json" \
   --slurpfile volumes "$results_dir/raw/ec2-volumes.json" \
   -f "$root_dir/scripts/assemble-environment.jq" >"$results_dir/environment.json"
@@ -232,6 +300,10 @@ jq -n \
 harness_url="${module_source_repo%/}/raw/${module_source_commit}/bench/saturation.sh"
 remote_saturation_b64="$(encode_file "$root_dir/scripts/remote-saturation.sh")"
 remote_result_dir=/var/lib/eventstream-smoke/saturation
+remote_replica_ip=-
+if [[ "$replication_mode" == replica ]]; then
+  remote_replica_ip="$replica_ip"
+fi
 
 # Forward only documented workload controls. Connection, binaries, module path,
 # and output location are owned by remote-saturation.sh.
@@ -276,8 +348,22 @@ run_remote "$loadgen_id" saturation \
 $remote_workload_setup
 printf '%s' '$remote_saturation_b64' | base64 --decode >/tmp/eventstream-remote-saturation.sh
 chmod 0700 /tmp/eventstream-remote-saturation.sh
-/tmp/eventstream-remote-saturation.sh '$server_ip' '$redis_image' '$memtier_image' '/usr/local/lib/redis/modules/libredis_event_stream_module.so' '$harness_url' '$remote_result_dir'" \
+/tmp/eventstream-remote-saturation.sh '$server_ip' '$redis_image' '$memtier_image' '/usr/local/lib/redis/modules/libredis_event_stream_module.so' '$harness_url' '$remote_result_dir' '$remote_replica_ip'" \
   "$results_dir/raw/saturation"
+
+printf 'null\n' >"$results_dir/replication-probe.json"
+if [[ "$replication_mode" == replica ]]; then
+  replication_probe_b64="$(encode_file "$root_dir/scripts/remote-replication-probe.sh")"
+  run_remote "$replica_id" replication-pause-probe \
+    "printf '%s' '$replication_probe_b64' | base64 --decode >/tmp/eventstream-replication-probe.sh
+chmod 0700 /tmp/eventstream-replication-probe.sh
+/tmp/eventstream-replication-probe.sh '$server_ip' '$redis_image' '$maxlen' '$replication_probe_events' '$replication_pause_seconds'" \
+    "$results_dir/raw/replication-pause-probe"
+  jq -e '.passed == true' \
+    "$results_dir/raw/replication-pause-probe.stdout" >/dev/null
+  cp "$results_dir/raw/replication-pause-probe.stdout" \
+    "$results_dir/replication-probe.json"
+fi
 
 persistence_probe_b64="$(encode_file "$root_dir/scripts/remote-persistence-probe.sh")"
 run_remote "$server_id" persistence-restart-probe \
@@ -302,17 +388,28 @@ fetch_remote_file "$loadgen_id" saturation-results \
 tar -xzf "$results_dir/raw/saturation-results.tar.gz" -C "$results_dir"
 
 module_sha="$(jq -r '.sha256' <<<"$module_artifact_json")"
+replica_module_sha=""
+if [[ "$replication_mode" == replica ]]; then
+  replica_module_sha="$(jq -r '.sha256' <<<"$replica_module_artifact_json")"
+fi
 jq \
   --arg commit "$module_source_commit" \
   --arg module_sha "$module_sha" \
+  --arg replica_module_sha "$replica_module_sha" \
+  --arg replication_mode "$replication_mode" \
   --arg image "$memtier_image" \
   --slurpfile environment "$results_dir/environment.json" \
   --slurpfile restart_probe "$results_dir/restart-probe.json" \
+  --slurpfile replication_probe "$results_dir/replication-probe.json" \
   '.source.git_commit = $commit |
    .source.module_sha256 = $module_sha |
+   .source.replica_module_sha256 =
+     (if $replica_module_sha == "" then null else $replica_module_sha end) |
    .generator.image = $image |
+   .topology = {replication_mode: $replication_mode} |
    .environment = $environment[0] |
-   .validation.persistence_restart = $restart_probe[0]' \
+   .validation.persistence_restart = $restart_probe[0] |
+   .validation.replication_pause = $replication_probe[0]' \
   "$results_dir/manifest.json" >"$results_dir/manifest.enriched.json"
 mv "$results_dir/manifest.enriched.json" "$results_dir/manifest.json"
 

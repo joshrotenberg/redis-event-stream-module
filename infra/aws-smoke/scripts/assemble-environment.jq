@@ -6,7 +6,8 @@
   network: {
     vpc_id: $vpc_id,
     subnet_id: $subnet_id,
-    server_private_ip: $server_private_ip
+    server_private_ip: $server_private_ip,
+    replica_private_ip: (if $replica_private_ip == "" then null else $replica_private_ip end)
   },
   storage_contract: {
     root_volume_type: $root_volume_type,
@@ -19,19 +20,24 @@
     scheduler_arn: $expiry_stop_schedule_arn
   },
   topology: {
-    kind: "standalone",
-    server_nodes: 1,
+    kind: (if $replica_id == "" then "standalone" else "primary-replica" end),
+    server_nodes: (if $replica_id == "" then 1 else 2 end),
     load_generator_nodes: 1
   },
-  hosts: {
-    server: $server_host[0],
-    load_generator: $loadgen_host[0]
-  },
+  hosts:
+    ({
+      server: $server_host[0],
+      load_generator: $loadgen_host[0]
+    } +
+    (if $replica_id == "" then {}
+     else {replica: $replica_host[0]}
+     end)),
   instances:
     [$instances[0].Reservations[].Instances[] | {
       role:
         (if .InstanceId == $server_id then "server"
          elif .InstanceId == $loadgen_id then "load_generator"
+         elif .InstanceId == $replica_id then "replica"
          else "unknown"
          end),
       instance_id: .InstanceId,

@@ -149,6 +149,14 @@ AOF state cannot vary inside a randomized matrix. With
 remote server to match `SATURATION_PERSISTENCE_MODE`; the harness verifies the
 reported AOF state on every trial.
 
+Every checkpoint also captures `INFO replication`. Normalized trials report
+the primary replication-offset delta, connected replica count, first replica
+state and offset, and the post-trial byte/seconds lag. A connected replica must
+remain online with a nonnegative offset delta or the trial fails. The portable
+harness does not create replicas; the caller owns topology, while the AWS
+runner provides the reproducible one-replica setup, adds replica Redis CPU and
+memory snapshots through its checkpoint hook, and runs a pause/catch-up probe.
+
 When `SATURATION_METRICS_HOOK` emits the built-in `linux-proc-stat-v1` shape,
 the normalized trial also reports load-generator host CPU, aggregate core use,
 and headroom over the exact pre/post interval. The AWS runner installs this

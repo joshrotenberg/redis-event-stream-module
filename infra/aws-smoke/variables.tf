@@ -49,6 +49,18 @@ variable "loadgen_instance_type" {
   default     = "c7i.large"
 }
 
+variable "replica_enabled" {
+  description = "Create a separate Redis replica host for replication campaigns."
+  type        = bool
+  default     = false
+}
+
+variable "replica_instance_type" {
+  description = "Non-burstable x86 instance used for the optional Redis replica."
+  type        = string
+  default     = "c7i.large"
+}
+
 variable "root_volume_gib" {
   description = "Encrypted gp3 root volume size for each host."
   type        = number

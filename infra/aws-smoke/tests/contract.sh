@@ -67,6 +67,20 @@ if SATURATION_PLAN_ONLY=yes SATURATION_PERSISTENCE_MODE=invalid \
   echo "invalid persistence mode unexpectedly passed" >&2
   exit 1
 fi
+SATURATION_PLAN_ONLY=yes \
+SATURATION_REPLICATION_MODE=replica \
+SATURATION_REPLICATION_PROBE_EVENTS=100 \
+SATURATION_REPLICATION_PAUSE_SECONDS=1 \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_REPETITIONS=1 \
+SATURATION_RESULTS_DIR="$test_dir/replication" \
+  "$root_dir/lab.sh" saturation >"$test_dir/replication-plan.txt"
+if SATURATION_PLAN_ONLY=yes SATURATION_REPLICATION_MODE=invalid \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "invalid replication mode unexpectedly passed" >&2
+  exit 1
+fi
 # These are literal wrapper source assertions; expansion would invalidate them.
 # shellcheck disable=SC2016
 grep -Fq 'if [[ "$arg" == --pipe ]]; then' \
@@ -90,6 +104,14 @@ grep -Fq 'SATURATION_PERSISTENCE_MODE' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'persistence-restart-probe' \
   "$root_dir/scripts/saturation.sh"
+grep -Fq 'replication-pause-probe' \
+  "$root_dir/scripts/saturation.sh"
+# shellcheck disable=SC2016
+grep -Fq 'docker pause "$replica_container"' \
+  "$root_dir/scripts/remote-replication-probe.sh"
+grep -Fq 'replica_module.forwarded == 0' \
+  "$root_dir/scripts/remote-replication-probe.sh"
+grep -Fq 'connected_replicas' "$root_dir/../../bench/saturation.sh"
 grep -Fq 'aof-everysec | aof-always' \
   "$root_dir/scripts/remote-server.sh"
 # shellcheck disable=SC2016
@@ -137,17 +159,20 @@ jq -n \
   --arg collected_at 2026-08-03T12:00:00Z \
   --arg server_id i-server \
   --arg loadgen_id i-loadgen \
+  --arg replica_id "" \
   --arg region us-west-2 \
   --arg availability_zone us-west-2a \
   --arg vpc_id vpc-test \
   --arg subnet_id subnet-test \
   --arg server_private_ip 10.87.0.10 \
+  --arg replica_private_ip "" \
   --arg expiry_stop_schedule_arn arn:aws:scheduler:test \
   --arg expires_at 2026-08-03T16:00:00Z \
   --arg root_volume_type gp3 \
   --argjson root_volume_gib 16 \
   --slurpfile server_host "$fixture_dir/server-host.json" \
   --slurpfile loadgen_host "$fixture_dir/loadgen-host.json" \
+  --slurpfile replica_host "$fixture_dir/replica-host.json" \
   --slurpfile instances "$fixture_dir/instances.json" \
   --slurpfile volumes "$fixture_dir/volumes.json" \
   -f "$root_dir/scripts/assemble-environment.jq" \
@@ -162,3 +187,61 @@ jq -e '
   (.volumes | length) == 2 and
   .hard_stop.scheduler_arn == "arn:aws:scheduler:test"
 ' "$test_dir/environment.json" >/dev/null
+
+jq '
+  .Reservations[0].Instances += [{
+    InstanceId: "i-replica",
+    InstanceType: "c7i.large",
+    ImageId: "ami-test",
+    Architecture: "x86_64",
+    PrivateIpAddress: "10.87.0.12",
+    VpcId: "vpc-test",
+    SubnetId: "subnet-test",
+    Placement: {AvailabilityZone: "us-west-2a"},
+    CpuOptions: {CoreCount: 1, ThreadsPerCore: 2}
+  }]
+' "$fixture_dir/instances.json" >"$test_dir/replica-instances.json"
+jq '
+  .Volumes += [{
+    VolumeId: "vol-replica",
+    Attachments: [{InstanceId: "i-replica", Device: "/dev/xvda"}],
+    VolumeType: "gp3",
+    Size: 16,
+    Iops: 3000,
+    Throughput: 125,
+    Encrypted: true
+  }]
+' "$fixture_dir/volumes.json" >"$test_dir/replica-volumes.json"
+
+jq -n \
+  --arg schema_version 1 \
+  --arg collected_at 2026-08-04T12:00:00Z \
+  --arg server_id i-server \
+  --arg loadgen_id i-loadgen \
+  --arg replica_id i-replica \
+  --arg region us-west-2 \
+  --arg availability_zone us-west-2a \
+  --arg vpc_id vpc-test \
+  --arg subnet_id subnet-test \
+  --arg server_private_ip 10.87.0.10 \
+  --arg replica_private_ip 10.87.0.12 \
+  --arg expiry_stop_schedule_arn arn:aws:scheduler:test \
+  --arg expires_at 2026-08-04T16:00:00Z \
+  --arg root_volume_type gp3 \
+  --argjson root_volume_gib 16 \
+  --slurpfile server_host "$fixture_dir/server-host.json" \
+  --slurpfile loadgen_host "$fixture_dir/loadgen-host.json" \
+  --slurpfile replica_host "$fixture_dir/replica-host.json" \
+  --slurpfile instances "$test_dir/replica-instances.json" \
+  --slurpfile volumes "$test_dir/replica-volumes.json" \
+  -f "$root_dir/scripts/assemble-environment.jq" \
+  >"$test_dir/replica-environment.json"
+
+jq -e '
+  .topology.kind == "primary-replica" and
+  .topology.server_nodes == 2 and
+  .network.replica_private_ip == "10.87.0.12" and
+  .hosts.replica.role == "replica" and
+  ([.instances[].role] | sort) == ["load_generator", "replica", "server"] and
+  (.volumes | length) == 3
+' "$test_dir/replica-environment.json" >/dev/null

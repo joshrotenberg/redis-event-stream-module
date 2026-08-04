@@ -126,6 +126,10 @@ server_ip="$(jq -r '.server_private_ip.value' <<<"$terraform_output")"
 loadgen_id="$(jq -r '.loadgen_instance_id.value' <<<"$terraform_output")"
 module_image="$(jq -r '.module_image.value' <<<"$terraform_output")"
 loadgen_image="$(jq -r '.loadgen_image.value' <<<"$terraform_output")"
+if [[ "$(jq -r '.replica_enabled.value' <<<"$terraform_output")" == true ]]; then
+  echo "the soak runner requires TF_VAR_replica_enabled=false" >&2
+  exit 2
+fi
 
 aws_args=(--region "$region")
 if [[ -n "${AWS_PROFILE:-}" ]]; then
@@ -371,11 +375,13 @@ jq -n \
   --arg collected_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg server_id "$server_id" \
   --arg loadgen_id "$loadgen_id" \
+  --arg replica_id "" \
   --arg region "$region" \
   --arg availability_zone "$(jq -r '.availability_zone.value' <<<"$terraform_output")" \
   --arg vpc_id "$(jq -r '.vpc_id.value' <<<"$terraform_output")" \
   --arg subnet_id "$(jq -r '.subnet_id.value' <<<"$terraform_output")" \
   --arg server_private_ip "$server_ip" \
+  --arg replica_private_ip "" \
   --arg expiry_stop_schedule_arn \
     "$(jq -r '.expiry_stop_schedule_arn.value' <<<"$terraform_output")" \
   --arg expires_at "$(jq -r '.expires_at.value' <<<"$terraform_output")" \
@@ -384,6 +390,7 @@ jq -n \
     "$(jq -r '.root_volume_gib.value' <<<"$terraform_output")" \
   --slurpfile server_host "$results_dir/raw/environment-server.stdout" \
   --slurpfile loadgen_host "$results_dir/raw/environment-loadgen.stdout" \
+  --slurpfile replica_host "$results_dir/raw/environment-server.stdout" \
   --slurpfile instances "$results_dir/raw/ec2-instances.json" \
   --slurpfile volumes "$results_dir/raw/ec2-volumes.json" \
   -f "$root_dir/scripts/assemble-environment.jq" \
