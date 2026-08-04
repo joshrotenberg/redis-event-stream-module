@@ -1,0 +1,648 @@
+{
+  "schema_version": 1,
+  "campaign": {
+    "run_id": "20260804T0320-precise-knee",
+    "started_at": "2026-08-04T03:17:32Z",
+    "completed_at": "2026-08-04T03:57:37Z",
+    "passed": true,
+    "trial_count": 120,
+    "source_commit": "14d7bc665ed30d7d4ac225e28657ae0ddbe91e2c",
+    "module_sha256": "47f0e6f8e32c60e84b62df5f6209e05d8dc7d279d17337cb1467707bcb29f3d5",
+    "full_archive_sha256": "eb448c64b18233f78e81dd8a99599d3e75f90dbf330229777f7bcb09d0ba7449",
+    "summary_archive_sha256": "e1c86e87ec6466d875802d65a6adcf0d21bc57e7f62d684ce6564bf36b9434ae"
+  },
+  "environment": {
+    "region": "us-west-2",
+    "availability_zone": "us-west-2a",
+    "topology": {
+      "kind": "standalone",
+      "server_nodes": 1,
+      "load_generator_nodes": 1
+    },
+    "server_instance_type": "c7i.large",
+    "load_generator_instance_type": "c7i.large",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+    "logical_cpus_per_host": 2,
+    "operating_system": {
+      "id": "amzn",
+      "version": "2023"
+    },
+    "kernel": "6.1.176-223.369.amzn2023.x86_64",
+    "redis_version": "8.8.0",
+    "memtier_version": "2.5.1",
+    "precise_timer": 1,
+    "server_intrinsic_latency_max_us": 24,
+    "private_network_ping_p99_ms": 0.607
+  },
+  "workload": {
+    "command": "SET",
+    "value_bytes": 64,
+    "keyspace": 100000,
+    "clients_per_thread": 50,
+    "threads": 4,
+    "connections": 200,
+    "pipeline": 1,
+    "warmup_seconds": 3,
+    "measurement_seconds": 12,
+    "repetitions": 3,
+    "target_ops_per_sec": [
+      50000,
+      80000,
+      100000,
+      110000,
+      120000,
+      130000,
+      140000,
+      160000
+    ],
+    "stream_maxlen": 10000
+  },
+  "criterion": {
+    "p99_budget_ms": 6,
+    "minimum_target_achievement_ratio": 0.98
+  },
+  "classifications": [
+    {
+      "name": "module-not-loaded",
+      "scenario": "s0",
+      "selectivity_percent": 100,
+      "status": "ceiling-not-reached",
+      "highest_healthy": {
+        "target_ops_per_sec": 160000,
+        "ops_per_sec": 158021.74,
+        "target_achievement_ratio": 0.9876358749999999,
+        "p50_ms": 0.823,
+        "p95_ms": 1.511,
+        "p99_ms": 2.719,
+        "p99_9_ms": 7.935,
+        "max_ms": 25.087,
+        "main_thread_core_percent": 75.985775,
+        "cpu_us_per_operation": 4.799984945165661,
+        "load_generator_headroom_percent": 35.43173117822204,
+        "retained_stream_entries": 0,
+        "stream_memory_bytes": 0,
+        "memory_bytes_per_retained_entry": null,
+        "healthy": true
+      },
+      "first_unhealthy": null
+    },
+    {
+      "name": "module-loaded-disabled",
+      "scenario": "s1",
+      "selectivity_percent": 100,
+      "status": "ceiling-not-reached",
+      "highest_healthy": {
+        "target_ops_per_sec": 160000,
+        "ops_per_sec": 157726.49,
+        "target_achievement_ratio": 0.9857905625,
+        "p50_ms": 0.879,
+        "p95_ms": 1.599,
+        "p99_ms": 2.671,
+        "p99_9_ms": 8.511,
+        "max_ms": 28.799,
+        "main_thread_core_percent": 79.7181,
+        "cpu_us_per_operation": 5.047164943558445,
+        "load_generator_headroom_percent": 37.384412153236454,
+        "retained_stream_entries": 0,
+        "stream_memory_bytes": 0,
+        "memory_bytes_per_retained_entry": null,
+        "healthy": true
+      },
+      "first_unhealthy": null
+    },
+    {
+      "name": "capture-0-percent",
+      "scenario": "s2",
+      "selectivity_percent": 0,
+      "status": "ceiling-not-reached",
+      "highest_healthy": {
+        "target_ops_per_sec": 160000,
+        "ops_per_sec": 157727.90,
+        "target_achievement_ratio": 0.9857993749999999,
+        "p50_ms": 0.895,
+        "p95_ms": 1.615,
+        "p99_ms": 2.655,
+        "p99_9_ms": 8.511,
+        "max_ms": 27.647,
+        "main_thread_core_percent": 79.89543333333334,
+        "cpu_us_per_operation": 5.063379987620642,
+        "load_generator_headroom_percent": 37.022222222222226,
+        "retained_stream_entries": 0,
+        "stream_memory_bytes": 0,
+        "memory_bytes_per_retained_entry": null,
+        "healthy": true
+      },
+      "first_unhealthy": null
+    },
+    {
+      "name": "capture-10-percent",
+      "scenario": "s2",
+      "selectivity_percent": 10,
+      "status": "ceiling-not-reached",
+      "highest_healthy": {
+        "target_ops_per_sec": 160000,
+        "ops_per_sec": 156835.75,
+        "target_achievement_ratio": 0.9802234375,
+        "p50_ms": 0.967,
+        "p95_ms": 1.695,
+        "p99_ms": 2.463,
+        "p99_9_ms": 8.895,
+        "max_ms": 33.279,
+        "main_thread_core_percent": 85.89946666666667,
+        "cpu_us_per_operation": 5.472124972196372,
+        "load_generator_headroom_percent": 25.904578930515527,
+        "retained_stream_entries": 10012,
+        "stream_memory_bytes": 707949,
+        "memory_bytes_per_retained_entry": 70.66566686662668,
+        "healthy": true
+      },
+      "first_unhealthy": null
+    },
+    {
+      "name": "capture-100-percent",
+      "scenario": "s2",
+      "selectivity_percent": 100,
+      "status": "bracketed",
+      "highest_healthy": {
+        "target_ops_per_sec": 120000,
+        "ops_per_sec": 117776.04,
+        "target_achievement_ratio": 0.981467,
+        "p50_ms": 1.591,
+        "p95_ms": 2.063,
+        "p99_ms": 2.335,
+        "p99_9_ms": 10.239,
+        "max_ms": 29.695,
+        "main_thread_core_percent": 95.78798333333333,
+        "cpu_us_per_operation": 8.12267627473586,
+        "load_generator_headroom_percent": 49.205788916343096,
+        "retained_stream_entries": 10013,
+        "stream_memory_bytes": 714963,
+        "memory_bytes_per_retained_entry": 71.41879060469765,
+        "healthy": true
+      },
+      "first_unhealthy": {
+        "target_ops_per_sec": 130000,
+        "ops_per_sec": 122061.73,
+        "target_achievement_ratio": 0.9389363846153845,
+        "p50_ms": 1.615,
+        "p95_ms": 2.007,
+        "p99_ms": 2.255,
+        "p99_9_ms": 11.263,
+        "max_ms": 31.231,
+        "main_thread_core_percent": 98.77938333333334,
+        "cpu_us_per_operation": 8.082666032202251,
+        "load_generator_headroom_percent": 47.525447525447525,
+        "retained_stream_entries": 10020,
+        "stream_memory_bytes": 715834,
+        "memory_bytes_per_retained_entry": 71.44051896207584,
+        "healthy": false
+      }
+    }
+  ],
+  "representative_levels": [
+    {
+      "scenario": "s0",
+      "selectivity_percent": 100,
+      "levels": [
+        {
+          "target_ops_per_sec": 100000,
+          "ops_per_sec": 99041.21,
+          "target_achievement_ratio": 0.9904121,
+          "p50_ms": 0.887,
+          "p95_ms": 1.727,
+          "p99_ms": 3.247,
+          "p99_9_ms": 10.431,
+          "max_ms": 29.695,
+          "main_thread_core_percent": 51.36586666666666,
+          "cpu_us_per_operation": 5.1771160967219325,
+          "load_generator_headroom_percent": 55.56399544246107,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 118776.77,
+          "target_achievement_ratio": 0.9898064166666667,
+          "p50_ms": 0.823,
+          "p95_ms": 1.623,
+          "p99_ms": 3.119,
+          "p99_9_ms": 8.511,
+          "max_ms": 24.191,
+          "main_thread_core_percent": 59.506933333333336,
+          "cpu_us_per_operation": 5.00302725439726,
+          "load_generator_headroom_percent": 49.637389202256244,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 158021.74,
+          "target_achievement_ratio": 0.9876358749999999,
+          "p50_ms": 0.823,
+          "p95_ms": 1.511,
+          "p99_ms": 2.719,
+          "p99_9_ms": 7.935,
+          "max_ms": 25.087,
+          "main_thread_core_percent": 75.985775,
+          "cpu_us_per_operation": 4.799984945165661,
+          "load_generator_headroom_percent": 35.43173117822204,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ]
+    },
+    {
+      "scenario": "s1",
+      "selectivity_percent": 100,
+      "levels": [
+        {
+          "target_ops_per_sec": 100000,
+          "ops_per_sec": 99019.77,
+          "target_achievement_ratio": 0.9901977000000001,
+          "p50_ms": 0.927,
+          "p95_ms": 1.783,
+          "p99_ms": 3.199,
+          "p99_9_ms": 10.879,
+          "max_ms": 29.183,
+          "main_thread_core_percent": 53.778825,
+          "cpu_us_per_operation": 5.422090393391718,
+          "load_generator_headroom_percent": 54.372906587272055,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 118656.52,
+          "target_achievement_ratio": 0.9888043333333334,
+          "p50_ms": 0.911,
+          "p95_ms": 1.743,
+          "p99_ms": 3.231,
+          "p99_9_ms": 9.791,
+          "max_ms": 27.007,
+          "main_thread_core_percent": 63.12924166666667,
+          "cpu_us_per_operation": 5.311888755199174,
+          "load_generator_headroom_percent": 47.36625514403292,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 157726.49,
+          "target_achievement_ratio": 0.9857905625,
+          "p50_ms": 0.879,
+          "p95_ms": 1.599,
+          "p99_ms": 2.671,
+          "p99_9_ms": 8.511,
+          "max_ms": 28.799,
+          "main_thread_core_percent": 79.7181,
+          "cpu_us_per_operation": 5.047164943558445,
+          "load_generator_headroom_percent": 37.384412153236454,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ]
+    },
+    {
+      "scenario": "s2",
+      "selectivity_percent": 0,
+      "levels": [
+        {
+          "target_ops_per_sec": 100000,
+          "ops_per_sec": 99011.69,
+          "target_achievement_ratio": 0.9901169000000001,
+          "p50_ms": 0.935,
+          "p95_ms": 1.807,
+          "p99_ms": 3.231,
+          "p99_9_ms": 10.879,
+          "max_ms": 30.207,
+          "main_thread_core_percent": 54.59959166666667,
+          "cpu_us_per_operation": 5.505148723153627,
+          "load_generator_headroom_percent": 52.2478277295051,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 118605.71,
+          "target_achievement_ratio": 0.9883809166666667,
+          "p50_ms": 0.927,
+          "p95_ms": 1.751,
+          "p99_ms": 2.991,
+          "p99_9_ms": 10.111,
+          "max_ms": 26.367,
+          "main_thread_core_percent": 63.879625000000004,
+          "cpu_us_per_operation": 5.38520954941449,
+          "load_generator_headroom_percent": 49.88132911392405,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 157727.90,
+          "target_achievement_ratio": 0.9857993749999999,
+          "p50_ms": 0.895,
+          "p95_ms": 1.615,
+          "p99_ms": 2.655,
+          "p99_9_ms": 8.511,
+          "max_ms": 27.647,
+          "main_thread_core_percent": 79.89543333333334,
+          "cpu_us_per_operation": 5.063379987620642,
+          "load_generator_headroom_percent": 37.022222222222226,
+          "retained_stream_entries": 0,
+          "stream_memory_bytes": 0,
+          "memory_bytes_per_retained_entry": null,
+          "healthy": true
+        }
+      ]
+    },
+    {
+      "scenario": "s2",
+      "selectivity_percent": 10,
+      "levels": [
+        {
+          "target_ops_per_sec": 100000,
+          "ops_per_sec": 98815.07,
+          "target_achievement_ratio": 0.9881507,
+          "p50_ms": 1.047,
+          "p95_ms": 1.895,
+          "p99_ms": 2.879,
+          "p99_9_ms": 11.199,
+          "max_ms": 34.047,
+          "main_thread_core_percent": 59.521499999999996,
+          "cpu_us_per_operation": 6.013036538675233,
+          "load_generator_headroom_percent": 54.17607223476298,
+          "retained_stream_entries": 10014,
+          "stream_memory_bytes": 708693,
+          "memory_bytes_per_retained_entry": 70.79738887781542,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 118397.01,
+          "target_achievement_ratio": 0.98664175,
+          "p50_ms": 1.023,
+          "p95_ms": 1.831,
+          "p99_ms": 2.527,
+          "p99_9_ms": 10.111,
+          "max_ms": 31.487,
+          "main_thread_core_percent": 69.22676666666666,
+          "cpu_us_per_operation": 5.84112918365582,
+          "load_generator_headroom_percent": 49.26866820631255,
+          "retained_stream_entries": 10030,
+          "stream_memory_bytes": 709604,
+          "memory_bytes_per_retained_entry": 70.7481555333998,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 156835.75,
+          "target_achievement_ratio": 0.9802234375,
+          "p50_ms": 0.967,
+          "p95_ms": 1.695,
+          "p99_ms": 2.463,
+          "p99_9_ms": 8.895,
+          "max_ms": 33.279,
+          "main_thread_core_percent": 85.89946666666667,
+          "cpu_us_per_operation": 5.472124972196372,
+          "load_generator_headroom_percent": 25.904578930515527,
+          "retained_stream_entries": 10012,
+          "stream_memory_bytes": 707949,
+          "memory_bytes_per_retained_entry": 70.66566686662668,
+          "healthy": true
+        }
+      ]
+    },
+    {
+      "scenario": "s2",
+      "selectivity_percent": 100,
+      "levels": [
+        {
+          "target_ops_per_sec": 100000,
+          "ops_per_sec": 98814.57,
+          "target_achievement_ratio": 0.9881457,
+          "p50_ms": 1.647,
+          "p95_ms": 2.303,
+          "p99_ms": 2.655,
+          "p99_9_ms": 10.751,
+          "max_ms": 28.927,
+          "main_thread_core_percent": 85.66419166666667,
+          "cpu_us_per_operation": 8.657982217288662,
+          "load_generator_headroom_percent": 60.5294825511432,
+          "retained_stream_entries": 10032,
+          "stream_memory_bytes": 716953,
+          "memory_bytes_per_retained_entry": 71.46660685805422,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 120000,
+          "ops_per_sec": 117776.04,
+          "target_achievement_ratio": 0.981467,
+          "p50_ms": 1.591,
+          "p95_ms": 2.063,
+          "p99_ms": 2.335,
+          "p99_9_ms": 10.239,
+          "max_ms": 29.695,
+          "main_thread_core_percent": 95.78798333333333,
+          "cpu_us_per_operation": 8.12267627473586,
+          "load_generator_headroom_percent": 49.205788916343096,
+          "retained_stream_entries": 10013,
+          "stream_memory_bytes": 714963,
+          "memory_bytes_per_retained_entry": 71.41879060469765,
+          "healthy": true
+        },
+        {
+          "target_ops_per_sec": 160000,
+          "ops_per_sec": 123066.18,
+          "target_achievement_ratio": 0.7691636249999999,
+          "p50_ms": 1.607,
+          "p95_ms": 1.991,
+          "p99_ms": 2.223,
+          "p99_9_ms": 11.455,
+          "max_ms": 30.335,
+          "main_thread_core_percent": 98.76363333333332,
+          "cpu_us_per_operation": 8.016671435345174,
+          "load_generator_headroom_percent": 45.66493955094991,
+          "retained_stream_entries": 10035,
+          "stream_memory_bytes": 716753,
+          "memory_bytes_per_retained_entry": 71.42531141006478,
+          "healthy": false
+        }
+      ]
+    }
+  ],
+  "full_capture_boundary": {
+    "cross_campaign_operating_band_ops_per_sec": [
+      110000,
+      120000
+    ],
+    "final_campaign": {
+      "supporting_healthy": {
+        "target_ops_per_sec": 110000,
+        "ops_per_sec": 108259.99,
+        "target_achievement_ratio": 0.9841817272727273,
+        "p50_ms": 1.631,
+        "p95_ms": 2.207,
+        "p99_ms": 2.527,
+        "p99_9_ms": 10.047,
+        "max_ms": 29.183,
+        "main_thread_core_percent": 91.15907499999999,
+        "cpu_us_per_operation": 8.41520924890708,
+        "load_generator_headroom_percent": 44.36795994993742,
+        "retained_stream_entries": 10024,
+        "stream_memory_bytes": 716741,
+        "memory_bytes_per_retained_entry": 71.50249401436552,
+        "healthy": true
+      },
+      "last_healthy": {
+        "target_ops_per_sec": 120000,
+        "ops_per_sec": 117776.04,
+        "target_achievement_ratio": 0.981467,
+        "p50_ms": 1.591,
+        "p95_ms": 2.063,
+        "p99_ms": 2.335,
+        "p99_9_ms": 10.239,
+        "max_ms": 29.695,
+        "main_thread_core_percent": 95.78798333333333,
+        "cpu_us_per_operation": 8.12267627473586,
+        "load_generator_headroom_percent": 49.205788916343096,
+        "retained_stream_entries": 10013,
+        "stream_memory_bytes": 714963,
+        "memory_bytes_per_retained_entry": 71.41879060469765,
+        "healthy": true
+      },
+      "first_unhealthy": {
+        "target_ops_per_sec": 130000,
+        "ops_per_sec": 122061.73,
+        "target_achievement_ratio": 0.9389363846153845,
+        "p50_ms": 1.615,
+        "p95_ms": 2.007,
+        "p99_ms": 2.255,
+        "p99_9_ms": 11.263,
+        "max_ms": 31.231,
+        "main_thread_core_percent": 98.77938333333334,
+        "cpu_us_per_operation": 8.082666032202251,
+        "load_generator_headroom_percent": 47.525447525447525,
+        "retained_stream_entries": 10020,
+        "stream_memory_bytes": 715834,
+        "memory_bytes_per_retained_entry": 71.44051896207584,
+        "healthy": false
+      }
+    },
+    "context": "An earlier completed precise-timer campaign bracketed 110000/120000 but its raw archive was lost during an SSM chunk-fetch failure. The hardened rerun formally bracketed 120000/130000. Report the reproducible operating band, not a single universal capacity number."
+  },
+  "cpu_cost_comparison": [
+    {
+      "target_ops_per_sec": 100000,
+      "groups": [
+        {
+          "scenario": "s0",
+          "selectivity_percent": 100,
+          "cpu_us_per_operation": 5.1771160967219325,
+          "change_from_s0_percent": 0
+        },
+        {
+          "scenario": "s1",
+          "selectivity_percent": 100,
+          "cpu_us_per_operation": 5.422090393391718,
+          "change_from_s0_percent": 4.731867937535705
+        },
+        {
+          "scenario": "s2",
+          "selectivity_percent": 0,
+          "cpu_us_per_operation": 5.505148723153627,
+          "change_from_s0_percent": 6.336203791902584
+        },
+        {
+          "scenario": "s2",
+          "selectivity_percent": 10,
+          "cpu_us_per_operation": 6.013036538675233,
+          "change_from_s0_percent": 16.14644961279876
+        },
+        {
+          "scenario": "s2",
+          "selectivity_percent": 100,
+          "cpu_us_per_operation": 8.657982217288662,
+          "change_from_s0_percent": 67.2356202861813
+        }
+      ]
+    },
+    {
+      "target_ops_per_sec": 120000,
+      "groups": [
+        {
+          "scenario": "s0",
+          "selectivity_percent": 100,
+          "cpu_us_per_operation": 5.00302725439726,
+          "change_from_s0_percent": 0
+        },
+        {
+          "scenario": "s1",
+          "selectivity_percent": 100,
+          "cpu_us_per_operation": 5.311888755199174,
+          "change_from_s0_percent": 6.173492269714287
+        },
+        {
+          "scenario": "s2",
+          "selectivity_percent": 0,
+          "cpu_us_per_operation": 5.38520954941449,
+          "change_from_s0_percent": 7.639020848453737
+        },
+        {
+          "scenario": "s2",
+          "selectivity_percent": 10,
+          "cpu_us_per_operation": 5.84112918365582,
+          "change_from_s0_percent": 16.751896134923825
+        },
+        {
+          "scenario": "s2",
+          "selectivity_percent": 100,
+          "cpu_us_per_operation": 8.12267627473586,
+          "change_from_s0_percent": 62.35522737951662
+        }
+      ]
+    }
+  ],
+  "correctness": {
+    "operations": 156439048,
+    "expected_selected_events": 32775025,
+    "forwarded": 32775025,
+    "skipped_filtered": 91916641,
+    "events_lost": 0,
+    "dropped": 0,
+    "handler_panics": 0,
+    "async_worker_errors": 0,
+    "command_errors": 0,
+    "connection_errors": 0,
+    "maximum_trial_p99_ms": 4.127,
+    "maximum_trial_p99_9_ms": 15.295,
+    "maximum_trial_latency_ms": 37.887,
+    "minimum_load_generator_headroom_percent": 22.649983958934868,
+    "maximum_server_main_thread_core_percent": 98.79904166666668
+  },
+  "measurement_controls": {
+    "rate_limit_scope": "memtier --rate-limiting is per connection; aggregate target is rate times clients per thread times threads",
+    "precise_timer_reason": "Amazon Linux 2023 uses CONFIG_HZ=100; EVENT_PRECISE_TIMER=1 avoids coarse rate-limiter oscillation",
+    "result_preservation": "The controller now retries SSM chunks and fetches a compact summary archive before the full raw archive"
+  },
+  "cleanup": {
+    "terraform_resources_remaining": 0,
+    "instances_terminated": 2,
+    "attached_volumes_remaining": 0
+  }
+}
