@@ -68,6 +68,29 @@ if SATURATION_PLAN_ONLY=yes SATURATION_PERSISTENCE_MODE=invalid \
   exit 1
 fi
 SATURATION_PLAN_ONLY=yes \
+SATURATION_PERSISTENCE_MODE=rdb \
+SATURATION_BACKGROUND_ACTION=bgsave \
+SATURATION_BACKGROUND_DELAY_SECONDS=1 \
+SATURATION_PREFILL_KEYS=100 \
+SATURATION_PREFILL_PAYLOAD_BYTES=256 \
+SATURATION_SCENARIOS="s0 s2" \
+SATURATION_SELECTIVITIES=100 \
+SATURATION_REPETITIONS=1 \
+SATURATION_RESULTS_DIR="$test_dir/background-persistence" \
+  "$root_dir/lab.sh" saturation >"$test_dir/background-persistence-plan.txt"
+if SATURATION_PLAN_ONLY=yes SATURATION_PERSISTENCE_MODE=off \
+  SATURATION_BACKGROUND_ACTION=bgsave \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "BGSAVE with persistence off unexpectedly passed" >&2
+  exit 1
+fi
+if SATURATION_PLAN_ONLY=yes SATURATION_PERSISTENCE_MODE=rdb \
+  SATURATION_BACKGROUND_ACTION=bgrewriteaof \
+  "$root_dir/lab.sh" saturation >/dev/null 2>&1; then
+  echo "BGREWRITEAOF with RDB persistence unexpectedly passed" >&2
+  exit 1
+fi
+SATURATION_PLAN_ONLY=yes \
 SATURATION_REPLICATION_MODE=replica \
 SATURATION_REPLICATION_PROBE_EVENTS=100 \
 SATURATION_REPLICATION_PAUSE_SECONDS=1 \
@@ -102,6 +125,8 @@ grep -Fq 'SATURATION_WORKLOAD_NAME SATURATION_PRECISE_TIMER' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'SATURATION_PERSISTENCE_MODE' \
   "$root_dir/scripts/saturation.sh"
+grep -Fq 'SATURATION_BACKGROUND_ACTION' \
+  "$root_dir/scripts/saturation.sh"
 grep -Fq 'persistence-restart-probe' \
   "$root_dir/scripts/saturation.sh"
 grep -Fq 'replication-pause-probe' \
@@ -114,8 +139,11 @@ grep -Fq 'replica_module.forwarded == 0' \
 grep -Fq 'connected_replicas' "$root_dir/../../bench/saturation.sh"
 grep -Fq 'replication_bytes_per_operation:' "$root_dir/../../bench/saturation.sh"
 grep -Fq 'replica_core_percent:' "$root_dir/../../bench/saturation.sh"
-grep -Fq 'aof-everysec | aof-always' \
+grep -Fq 'off | rdb | aof-everysec | aof-always' \
   "$root_dir/scripts/remote-server.sh"
+grep -Fq 'background_latest_fork_usec:' "$root_dir/../../bench/saturation.sh"
+grep -Fq '.overlap_proven == true' "$root_dir/../../bench/saturation.sh"
+grep -Fq 'redis_raw BGSAVE' "$root_dir/scripts/remote-persistence-probe.sh"
 # shellcheck disable=SC2016
 grep -Fq '($after_module.forwarded == 0)' \
   "$root_dir/scripts/remote-persistence-probe.sh"

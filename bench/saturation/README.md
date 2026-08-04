@@ -84,7 +84,12 @@ All lists are whitespace-separated:
 | `SATURATION_PIPELINE_LEVELS` | `1` | Requests in flight per connection |
 | `SATURATION_RATE_LIMIT_LEVELS` | `0` | Requests/s per connection; `0` is unlimited |
 | `SATURATION_PRECISE_TIMER` | `1` | Set memtier/libevent's `EVENT_PRECISE_TIMER` for paced runs |
-| `SATURATION_PERSISTENCE_MODE` | `off` | Fixed server policy: `off`, `aof-everysec`, or `aof-always` |
+| `SATURATION_PERSISTENCE_MODE` | `off` | Fixed server policy: `off`, `rdb`, `aof-everysec`, or `aof-always` |
+| `SATURATION_BACKGROUND_ACTION` | `none` | Measured action: `none`, `bgsave`, or `bgrewriteaof` |
+| `SATURATION_BACKGROUND_DELAY_SECONDS` | `5` | Delay from measurement start to the background command |
+| `SATURATION_BACKGROUND_TIMEOUT_SECONDS` | `120` | Hard completion bound for the background command |
+| `SATURATION_PREFILL_KEYS` | `0` | Persistent keys loaded before warmup; `0` disables prefill |
+| `SATURATION_PREFILL_PAYLOAD_BYTES` | `1024` | Value size for every prefilled key |
 | `SATURATION_REPETITIONS` | `5` | Independent trials per matrix cell |
 | `SATURATION_WARMUP_SECONDS` | `10` | Warmup duration |
 | `SATURATION_MEASUREMENT_SECONDS` | `60` | Measured duration |
@@ -148,6 +153,37 @@ AOF state cannot vary inside a randomized matrix. With
 `SATURATION_START_SERVER=no`, the caller is responsible for configuring the
 remote server to match `SATURATION_PERSISTENCE_MODE`; the harness verifies the
 reported AOF state on every trial.
+
+## Background persistence contract
+
+Use `SATURATION_BACKGROUND_ACTION=bgsave` only with the `rdb` persistence mode,
+or `bgrewriteaof` with either AOF mode. The action starts after
+`SATURATION_BACKGROUND_DELAY_SECONDS` inside every ordinary measured window.
+The trial fails unless the command starts, completes successfully before the
+foreground measurement ends, and reports a successful Redis persistence
+status. Mass-expiry trials deliberately reject background actions because they
+have a separate variable-duration overlap contract.
+
+`SATURATION_PREFILL_KEYS` creates a resident dataset before warmup so the fork
+does meaningful work. The harness unloads the module while it writes those
+keys, reloads the selected scenario without flushing them, then reloads again
+after warmup to reset measured module counters. Prefill commands therefore do
+not appear in the capture total.
+
+Each trial and campaign summary records the action's wall duration, Redis's
+reported duration, copy-on-write bytes, latest fork time, command response,
+status, and proven foreground overlap. Compare a complete `none` campaign with
+an otherwise identical action campaign; do not mix actions inside one result.
+
+```sh
+SATURATION_PERSISTENCE_MODE=rdb \
+SATURATION_BACKGROUND_ACTION=bgsave \
+SATURATION_BACKGROUND_DELAY_SECONDS=5 \
+SATURATION_PREFILL_KEYS=250000 \
+SATURATION_PREFILL_PAYLOAD_BYTES=1024 \
+SATURATION_SCENARIOS="s0 s2" \
+bench/saturation.sh
+```
 
 Every checkpoint also captures `INFO replication`. Normalized trials report
 the primary replication-offset delta, connected replica count, first replica
