@@ -601,6 +601,7 @@ normalize_trial() {
   local before_main after_main before_total after_total main_cpu total_cpu
   local used_memory used_memory_rss used_memory_peak
   local retained_stream_entries stream_memory_bytes
+  local load_generator_metrics
   command_errors="$(command_error_count "$trial_dir/memtier.stderr")"
   connection_errors="$(connection_error_count "$trial_dir/memtier.json")"
   if [[ "$scenario" == custom-* ]]; then
@@ -680,6 +681,42 @@ normalize_trial() {
     awk -F'\t' '{ total += $3 } END { print total + 0 }' \
       "$trial_dir/checkpoints/post/eventstream-stream-memory.tsv"
   )"
+  load_generator_metrics=null
+  if [[ -s "$trial_dir/checkpoints/pre/metrics-hook.stdout" &&
+    -s "$trial_dir/checkpoints/post/metrics-hook.stdout" ]] &&
+    jq -e '.schema == "linux-proc-stat-v1"' \
+      "$trial_dir/checkpoints/pre/metrics-hook.stdout" >/dev/null 2>&1 &&
+    jq -e '.schema == "linux-proc-stat-v1"' \
+      "$trial_dir/checkpoints/post/metrics-hook.stdout" >/dev/null 2>&1; then
+    load_generator_metrics="$(
+      jq -n \
+        --slurpfile before "$trial_dir/checkpoints/pre/metrics-hook.stdout" \
+        --slurpfile after "$trial_dir/checkpoints/post/metrics-hook.stdout" '
+          def total_ticks:
+            .cpu_ticks | .user + .nice + .system + .idle + .iowait + .irq + .softirq + .steal;
+          def idle_ticks: .cpu_ticks | .idle + .iowait;
+          ($before[0] | total_ticks) as $before_total |
+          ($after[0] | total_ticks) as $after_total |
+          ($before[0] | idle_ticks) as $before_idle |
+          ($after[0] | idle_ticks) as $after_idle |
+          ($after_total - $before_total) as $total_delta |
+          ($after_idle - $before_idle) as $idle_delta |
+          (if $total_delta > 0 then
+             (($total_delta - $idle_delta) / $total_delta) * 100
+           else 0 end) as $host_cpu_percent |
+          {
+            schema: "linux-proc-stat-v1",
+            logical_cpus: $after[0].logical_cpus,
+            observed_duration_seconds:
+              (($after[0].epoch_ms - $before[0].epoch_ms) / 1000),
+            host_cpu_percent: $host_cpu_percent,
+            core_percent: $host_cpu_percent * $after[0].logical_cpus,
+            headroom_percent: 100 - $host_cpu_percent,
+            total_tick_delta: $total_delta
+          }
+        '
+    )"
+  fi
 
   jq -n \
     --argjson schema_version "$schema_version" \
@@ -703,6 +740,7 @@ normalize_trial() {
     --argjson used_memory_peak_bytes "${used_memory_peak:-0}" \
     --argjson retained_stream_entries "$retained_stream_entries" \
     --argjson stream_memory_bytes "$stream_memory_bytes" \
+    --argjson load_generator_metrics "$load_generator_metrics" \
     --argjson command_errors "$command_errors" \
     --argjson connection_errors "$connection_errors" \
     --argjson module_loaded "$module_loaded_json" \
@@ -777,6 +815,7 @@ normalize_trial() {
                $stream_memory_bytes / $retained_stream_entries
              else null end)
         },
+        load_generator: $load_generator_metrics,
         module: (
           if $module_loaded then
             $module_stats + {loaded: true}
@@ -1101,6 +1140,12 @@ jq '
       ($trials | map(.server.stream_memory_bytes) | distribution),
     memory_bytes_per_retained_entry:
       ($trials | map(.server.memory_bytes_per_retained_entry) | distribution),
+    load_generator_host_cpu_percent:
+      ($trials | map(.load_generator.host_cpu_percent) | distribution),
+    load_generator_core_percent:
+      ($trials | map(.load_generator.core_percent) | distribution),
+    load_generator_headroom_percent:
+      ($trials | map(.load_generator.headroom_percent) | distribution),
     expiry_drain_seconds: ($trials | map(.expiry.drain_seconds) | distribution)
   })
 ' "$results_dir/trials.json" >"$results_dir/summary.json"

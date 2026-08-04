@@ -135,7 +135,8 @@ For an equal-offered-load knee sweep, keep the connection geometry fixed and
 set per-connection rate levels. With 50 clients on four threads, the following
 targets 50k, 100k, 125k, 150k, and 180k requests/s. The harness writes the
 repeated health classification and adjacent below/at/above points to
-`knee.json`:
+`knee.json`. The AWS wrapper also records load-generator CPU and headroom
+around every trial:
 
 ```sh
 SATURATION_SCENARIOS="s0 s1 s2" \
@@ -146,10 +147,16 @@ SATURATION_RATE_LIMIT_LEVELS="250 500 625 750 900" \
 SATURATION_REPETITIONS=3 \
 SATURATION_WARMUP_SECONDS=10 \
 SATURATION_MEASUREMENT_SECONDS=30 \
-SATURATION_P99_BUDGET_MS=2 \
+SATURATION_P99_BUDGET_MS=6 \
 SATURATION_ACHIEVEMENT_RATIO=0.98 \
 ./lab.sh saturation-campaign -auto-approve
 ```
+
+Choose the absolute p99 budget from a coarse matched S0 run on the same client
+geometry. A budget below the paced S0 tail makes every module comparison
+unhealthy and does not describe a module knee; the 6 ms example reflects the
+observed coarse S0 envelope on the documented `c7i.large` lab, not a portable
+service-level objective.
 
 Use `SATURATION_WORKLOAD_NAME` to label separate campaigns and
 `SATURATION_PAYLOAD_BYTES` for matched value-size points. The portable harness

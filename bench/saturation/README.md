@@ -128,6 +128,12 @@ them, main-thread CPU deltas, CPU per operation, and post-trial memory/RSS.
 These values are meaningful only for a sufficiently long measured window;
 short smoke runs validate artifact shape rather than capacity.
 
+When `SATURATION_METRICS_HOOK` emits the built-in `linux-proc-stat-v1` shape,
+the normalized trial also reports load-generator host CPU, aggregate core use,
+and headroom over the exact pre/post interval. The AWS runner installs this
+hook automatically so a missed offered-load target cannot be attributed to
+Redis without first ruling out generator saturation.
+
 ## Mass-expiry contract
 
 The expiry cases preload `SATURATION_EXPIRY_KEYS` keys with TTLs distributed
