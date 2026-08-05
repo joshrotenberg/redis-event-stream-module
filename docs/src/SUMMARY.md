@@ -16,7 +16,7 @@
 
 # Run it
 
-- [Production checklist](production.md)
+- [Capacity and operations](production.md)
 - [Monitoring](monitoring.md)
 - [Upgrading](upgrading.md)
 - [Deployment topologies](topologies.md)

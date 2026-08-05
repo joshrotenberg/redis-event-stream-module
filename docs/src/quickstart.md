@@ -100,4 +100,4 @@ for Linux and macOS are attached to every
 - [Try the observatory](observatory.md) for an interactive workflow.
 - [Configure capture](configure.md) to add events and filters.
 - [Consume events](consume.md) with live readers or consumer groups.
-- Review the [production checklist](production.md) before deployment.
+- Review [Capacity and operations](production.md) before deployment.
