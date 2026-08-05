@@ -133,7 +133,7 @@ events for production work.
 - [Configure capture](docs/src/configure.md)
 - [Consume events](docs/src/consume.md)
 - [Forward streams to a webhook](docs/src/sink-connector.md)
-- [Production checklist](docs/src/production.md)
+- [Capacity and operations](docs/src/production.md)
 - [Deployment topologies](docs/src/topologies.md)
 - [Configuration reference](docs/src/reference/configuration.md)
 - [Commands and observability](docs/src/reference/commands-observability.md)
