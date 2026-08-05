@@ -1,12 +1,12 @@
 // Part of the module split from the former single `src/lib.rs` (#86):
 // behavior-preserving code movement only -- see CONTRIBUTING.md "Source layout".
-//! Observability counters and per-stream accounting (#86): the process-lifetime
+//! Observability counters and per-stream accounting (#86): the generation-scoped
 //! `AtomicU64`/`AtomicBool` counters and latches (SPEC.md section 13), the
 //! per-stream `StreamStats` record behind the WITHSTATS join, the drop-counting
 //! helpers, and the `INFO eventstream` section handler.
 
 use lazy_static::lazy_static;
-use redis_module::{Context, RedisGILGuard};
+use redis_module::{Context, RedisGILGuard, RedisLockIndicator};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -24,7 +24,9 @@ use redis_module::{InfoContext, RedisResult};
 #[cfg(not(test))]
 use redis_module_macros::info_command_handler;
 
-// Counters (SPEC.md section 13): process-lifetime, monotonic, reset on load.
+// Counters (SPEC.md section 13): monotonic within one loaded generation and
+// explicitly reset on every load, including in-process reloads where dlclose
+// may retain the module image and its statics.
 pub(crate) static FORWARDED: AtomicU64 = AtomicU64::new(0);
 
 /// Selected events that produced no canonical per-event entry (issue #218):
@@ -194,6 +196,59 @@ pub(crate) static ASYNC_DRAIN_EVENTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_ENVELOPES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_ENVELOPE_EVENTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ASYNC_WORKER_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// Reset every in-process observability value owned by this module for a new
+/// loaded generation. Redis does not guarantee that `MODULE UNLOAD` actually
+/// unmaps a dynamic library on every platform, so static initializers alone do
+/// not define lifecycle semantics (issue #291).
+pub(crate) fn reset_generation_stats<G: RedisLockIndicator>(lock: &G) {
+    for counter in [
+        &FORWARDED,
+        &EVENTS_LOST,
+        &FIREHOSE_FORWARDED,
+        &AUTOGROUP_CREATED,
+        &AUTOGROUP_FAILED,
+        &DROPPED_XADD_ERROR,
+        &DROPPED_OOM,
+        &DROPPED_DEFER_ERROR,
+        &DROPPED_ENCODE_ERROR,
+        &SKIPPED_SELF,
+        &SKIPPED_FILTERED,
+        &SKIPPED_KEY_FILTERED,
+        &SKIPPED_DB,
+        &SKIPPED_INVALID,
+        &DROPPED_MAX_STREAMS,
+        &ACTIVE_STREAMS,
+        &REGISTRY_ERRORS,
+        &LAST_ERROR_TIME,
+        &HANDLER_PANICS,
+        &ASYNC_ENQUEUED,
+        &ASYNC_FALLBACKS,
+        &ASYNC_QUEUE_HIGH_WATER,
+        &ASYNC_DRAINS,
+        &ASYNC_DRAIN_EVENTS,
+        &ASYNC_ENVELOPES,
+        &ASYNC_ENVELOPE_EVENTS,
+        &ASYNC_WORKER_ERRORS,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    CURRENT_STREAMS.store(0, Ordering::Relaxed);
+    ASYNC_QUEUE_DEPTH.store(0, Ordering::Relaxed);
+    for latch in [
+        &EVICTION_RISK,
+        &LOGGED_MAX_STREAMS,
+        &LOGGED_REGISTRY,
+        &LOGGED_XADD_ERROR,
+        &LOGGED_DEFER_ERROR,
+        &LOGGED_PANIC,
+        &LOGGED_ENCODE_ERROR,
+        &LOGGED_AUTOGROUP,
+    ] {
+        latch.store(false, Ordering::Relaxed);
+    }
+    STREAM_STATS.lock(lock).clear();
+}
 
 /// Per-stream in-process state (issues #68 and #71), keyed by destination
 /// stream name in `STREAM_STATS`. One record carries the per-stream counters

@@ -132,6 +132,18 @@ fn version_supported(major: i32, minor: i32) -> bool {
     (major, minor) >= (7, 2)
 }
 
+/// Establish one clean in-process generation even on platforms whose loader
+/// retains the module image and all Rust statics across UNLOAD/LOAD (#291).
+#[cfg(not(test))]
+fn reset_generation_state(ctx: &Context) {
+    reset_generation_stats(ctx);
+    cluster::reset_cluster_generation();
+    capture::reset_capture_generation();
+    markers::reset_marker_generation(ctx);
+    dispatch::reset_dispatch_generation();
+    config::begin_generation();
+}
+
 /// Register the `@eventstream` ACL category (issues #69, #107) and tag the
 /// module's commands into it. Done here rather than through the redis_module!
 /// macro's `acl_categories` field because the macro makes an RM_AddACLCategory
@@ -231,6 +243,8 @@ fn init(ctx: &Context, _args: &[RedisString]) -> Status {
         );
         return Status::Err;
     }
+
+    reset_generation_state(ctx);
 
     if ctx.get_flags().contains(ContextFlags::CLUSTER) {
         // `eventstream.cluster-streams` decides: `refuse` (default) keeps the
@@ -469,6 +483,10 @@ fn deinit(ctx: &Context) -> Status {
         .collect::<Vec<_>>()
         .join(" ");
     ctx.log_notice(&format!("eventstream unloading: {counters}"));
+    // Load-time configuration callbacks run before `init`; restore the
+    // sentinel only after the final snapshot has been emitted so a retained
+    // dynamic-library image behaves like a fresh one on its next load.
+    config::finish_generation();
     Status::Ok
 }
 

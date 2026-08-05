@@ -35,6 +35,10 @@ use std::os::raw::{c_char, c_int, c_void};
 /// 9).
 pub(crate) static SEQ: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn reset_capture_generation() {
+    SEQ.store(0, Ordering::Relaxed);
+}
+
 /// Sanitize an event name into a stream-key suffix (SPEC.md section 5):
 /// `A-Z a-z 0-9 _ . : -` pass through, anything else becomes `_`, truncated
 /// to 128 bytes. Every built-in and known module event name passes through
