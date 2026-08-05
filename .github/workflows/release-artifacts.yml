@@ -22,14 +22,26 @@ on:
         description: "Release tag to upload artifacts to."
         required: true
         type: string
+      publish:
+        description: "Publish artifacts and images; false performs a native dry run."
+        required: false
+        default: true
+        type: boolean
   # Recovery path for rebuilding or reattaching artifacts to an existing
-  # release without recreating its tag or release notes.
+  # release without recreating its tag or release notes. `publish: false`
+  # exercises the same native builds and smoke tests without writing a release
+  # or GHCR, which makes latency changes measurable before rollout (#272).
   workflow_dispatch:
     inputs:
       tag:
         description: "Existing release tag to upload artifacts to."
         required: true
         type: string
+      publish:
+        description: "Publish artifacts and images; disable for a release-equivalent dry run."
+        required: false
+        default: true
+        type: boolean
   # Self-validation: build (but do not upload to a release or push an image)
   # whenever this workflow, the Dockerfile, or the RAMP manifest changes in a
   # PR, so runner, build, image, and packaging breakage is caught before a
@@ -42,6 +54,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Passed explicitly to the Docker build and included in its cache scope so
+  # changing the image toolchain cannot accidentally reuse an older compiler
+  # layer (issue #272). Keep this aligned with Dockerfile's default.
+  IMAGE_RUST_VERSION: "1.88"
 
 jobs:
   build:
@@ -133,11 +149,10 @@ jobs:
 
       # Attest each uploaded artifact so consumers can trace the .so/.dylib and
       # the client binary back to this repo, commit, and workflow run (#104).
-      # Skipped on the PR self-validation path, which builds but never uploads:
-      # attesting a throwaway artifact is noise and the OIDC claims would name
-      # the PR ref.
+      # Skipped on PR and publish=false validation paths, which build but never
+      # upload: attesting a throwaway artifact is noise.
       - name: Attest build provenance
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && inputs.publish
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
@@ -172,9 +187,8 @@ jobs:
           echo "artifact loads cleanly"
 
       - name: Upload to the release
-        # workflow_call from Release Please or a manual recovery dispatch; the
-        # only non-uploading path is the PR self-validation build.
-        if: github.event_name != 'pull_request'
+        # workflow_call from Release Please or a publishing recovery dispatch.
+        if: github.event_name != 'pull_request' && inputs.publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
@@ -186,41 +200,214 @@ jobs:
             "dist/${{ steps.client.outputs.name }}.sha256" \
             --clobber
 
-      - name: Upload as workflow artifact (PR validation runs)
-        if: github.event_name == 'pull_request'
+      - name: Upload as workflow artifact (validation runs)
+        if: github.event_name == 'pull_request' || inputs.publish == false
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
           path: dist/
           retention-days: 5
 
-  # Preloaded container image (issue #102). Multi-arch (amd64+arm64) to match
-  # the linux-x86_64/linux-aarch64 binary matrix; the macOS .dylib is out of
-  # scope for images. On release: build and push to GHCR. On PR: build a single
-  # native-arch image, load it, and run the load smoke test without pushing.
+  # Preloaded container image (issues #102, #272). Each server/architecture is
+  # built on its native runner, in parallel: compiling Rust and the server
+  # under QEMU made the v0.5.0 release tail 28-46 minutes. Publishing builds
+  # push unnamed content-addressed images; `docker-manifest` assembles their
+  # two digests under the versioned and moving tags only after both native
+  # module-load smoke tests pass. PRs and publish=false dispatches load and
+  # smoke the same four native builds locally without touching GHCR.
   docker:
-    name: docker image (${{ matrix.name }})
+    name: docker image (${{ matrix.image }}, ${{ matrix.arch }})
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Server versions pinned to the CI integration matrix (SPEC.md
-          # section 14), built from source in the image (see Dockerfile).
-          - name: redis
+          # Server versions remain pinned to the CI integration matrix (SPEC.md
+          # section 14). Explicit entries make runner/architecture provenance
+          # and the final digest grouping unambiguous.
+          - image: redis
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-22.04
             server_kind: redis
             server_version: "8.8.0"
-            suffix: ""
-          - name: valkey8
+          - image: redis
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-22.04-arm
+            server_kind: redis
+            server_version: "8.8.0"
+          - image: valkey8
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-22.04
             server_kind: valkey
             server_version: "8.1.6"
+          - image: valkey8
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-22.04-arm
+            server_kind: valkey
+            server_version: "8.1.6"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Derive image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "image=${IMAGE}"
+            echo "local-tag=eventstream-ci:${{ matrix.image }}-${{ matrix.arch }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Start image timing
+        id: timing
+        run: echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        # Release Please and normal recovery dispatches publish. PRs and
+        # publish=false recovery dry runs never log in or write registry data.
+        if: github.event_name != 'pull_request' && inputs.publish
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Validation uses one native platform per runner, so buildx can load the
+      # result into Docker without QEMU or a multi-platform image store.
+      - name: Build image (validation, load locally)
+        id: build-validation
+        if: github.event_name == 'pull_request' || inputs.publish == false
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          build-args: |
+            RUST_VERSION=${{ env.IMAGE_RUST_VERSION }}
+            SERVER_KIND=${{ matrix.server_kind }}
+            SERVER_VERSION=${{ matrix.server_version }}
+          tags: ${{ steps.meta.outputs.local-tag }}
+          cache-from: type=gha,scope=image-${{ matrix.server_kind }}-${{ matrix.server_version }}-${{ matrix.arch }}-rust-${{ env.IMAGE_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.server_kind }}-${{ matrix.server_version }}-${{ matrix.arch }}-rust-${{ env.IMAGE_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
+
+      # Release builds push by digest, not tag. That lets four native jobs run
+      # independently while preventing a partially tested architecture from
+      # becoming the versioned/moving image. Explicit max-mode provenance is
+      # at least as strong as the former one-shot build-push-action invocation.
+      - name: Build and push image by digest (release)
+        id: build-release
+        if: github.event_name != 'pull_request' && inputs.publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            RUST_VERSION=${{ env.IMAGE_RUST_VERSION }}
+            SERVER_KIND=${{ matrix.server_kind }}
+            SERVER_VERSION=${{ matrix.server_version }}
+          outputs: type=image,name=${{ steps.meta.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          cache-from: type=gha,scope=image-${{ matrix.server_kind }}-${{ matrix.server_version }}-${{ matrix.arch }}-rust-${{ env.IMAGE_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.server_kind }}-${{ matrix.server_version }}-${{ matrix.arch }}-rust-${{ env.IMAGE_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
+
+      - name: Pull release digest for native smoke test
+        if: github.event_name != 'pull_request' && inputs.publish
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build-release.outputs.digest }}
+        run: docker pull "${IMAGE}@${DIGEST}"
+
+      - name: Smoke test the native image loads the module
+        id: smoke
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build-release.outputs.digest }}
+          LOCAL_TAG: ${{ steps.meta.outputs.local-tag }}
+          PUBLISH: ${{ github.event_name != 'pull_request' && inputs.publish }}
+        run: |
+          set -euo pipefail
+          container="es-smoke-${{ matrix.image }}-${{ matrix.arch }}"
+          if [ "$PUBLISH" = "true" ]; then
+            image_ref="${IMAGE}@${DIGEST}"
+          else
+            image_ref="$LOCAL_TAG"
+          fi
+          # On failure, preserve the server's own loadmodule diagnostics.
+          trap 'echo "=== native image smoke logs ==="; docker logs "$container" 2>&1 || true; docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run --platform "${{ matrix.platform }}" -d --name "$container" "$image_ref"
+          for _ in $(seq 1 20); do
+            if docker exec "$container" redis-cli PING 2>/dev/null | grep -q PONG; then
+              break
+            fi
+            sleep 0.5
+          done
+          docker exec "$container" redis-cli MODULE LIST | grep -q eventstream
+          echo "${{ matrix.platform }} image loads the module cleanly"
+
+      - name: Export release digest
+        if: github.event_name != 'pull_request' && inputs.publish
+        env:
+          DIGEST: ${{ steps.build-release.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload release digest
+        if: github.event_name != 'pull_request' && inputs.publish
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Record image timing
+        if: always()
+        env:
+          STARTED: ${{ steps.timing.outputs.started }}
+        run: |
+          set -euo pipefail
+          started="${STARTED:-$(date +%s)}"
+          elapsed=$(( $(date +%s) - started ))
+          {
+            echo "### ${{ matrix.image }} / ${{ matrix.arch }}"
+            echo
+            echo "- platform: \`${{ matrix.platform }}\`"
+            echo "- elapsed: ${elapsed}s"
+            echo "- validation build: \`${{ steps.build-validation.outcome }}\`"
+            echo "- release build: \`${{ steps.build-release.outcome }}\`"
+            echo "- native load smoke: \`${{ steps.smoke.outcome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Assemble only fully-built, natively smoke-tested digests. The two server
+  # variants remain independent manifests with their existing tags.
+  docker-manifest:
+    name: docker manifest (${{ matrix.image }})
+    if: github.event_name != 'pull_request' && inputs.publish
+    needs: docker
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: redis
+            suffix: ""
+          - image: valkey8
             suffix: "-valkey8"
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 
-      - name: Derive image tags
+      - name: Derive manifest metadata
         id: meta
         run: |
           set -euo pipefail
@@ -229,77 +416,69 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           SUFFIX="${{ matrix.suffix }}"
           TAGS="${IMAGE}:${VERSION}${SUFFIX}"
-          # `latest` (and the bare `-valkey8` moving tag) on any publishing
-          # run: workflow_call from Release Please or manual recovery. Never
-          # on the PR self-validation build.
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            if [ -n "$SUFFIX" ]; then
-              TAGS="${TAGS},${IMAGE}:latest${SUFFIX}"
-            else
-              TAGS="${TAGS},${IMAGE}:latest"
-            fi
+          if [ -n "$SUFFIX" ]; then
+            TAGS="${TAGS},${IMAGE}:latest${SUFFIX}"
+          else
+            TAGS="${TAGS},${IMAGE}:latest"
           fi
           {
             echo "image=${IMAGE}"
-            echo "version=${VERSION}"
+            echo "version-tag=${IMAGE}:${VERSION}${SUFFIX}"
             echo "tags=${TAGS}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Download architecture digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: image-digest-${{ matrix.image }}-*
+          merge-multiple: true
+
       - name: Log in to GHCR
-        # Any non-PR run publishes: the Release Please workflow_call or a
-        # manual recovery dispatch. PR self-validation never logs in or pushes.
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # PR validation: single-arch build loaded into the local daemon so the
-      # smoke test can run it. buildx --load supports one platform only.
-      - name: Build image (PR validation, load locally)
-        if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          push: false
-          build-args: |
-            SERVER_KIND=${{ matrix.server_kind }}
-            SERVER_VERSION=${{ matrix.server_version }}
-          tags: eventstream-ci:${{ matrix.name }}
-
-      - name: Smoke test the image loads the module
-        if: github.event_name == 'pull_request'
+      - name: Create versioned and moving manifests
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          # On any failure below, dump the server's own output before the
-          # container is reaped: a fatal loadmodule error (ABI/glibc mismatch,
-          # bad path) exits redis-server immediately, and its stderr is the
-          # only place that says why.
-          trap 'echo "=== es-smoke logs ==="; docker logs es-smoke 2>&1 || true' EXIT
-          docker run -d --name es-smoke -p 6399:6379 "eventstream-ci:${{ matrix.name }}"
-          for _ in $(seq 1 20); do
-            if docker exec es-smoke redis-cli PING 2>/dev/null | grep -q PONG; then
-              break
-            fi
-            sleep 0.5
+          mapfile -t digests < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo "expected two architecture digests, found ${#digests[@]}" >&2
+            exit 1
+          fi
+          tag_args=()
+          IFS=',' read -ra tags <<< "$TAGS"
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
           done
-          docker exec es-smoke redis-cli MODULE LIST | grep -q eventstream
-          echo "image loads the module cleanly"
+          sources=()
+          for digest in "${digests[@]}"; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
 
-      # Release: multi-arch manifest pushed to GHCR on any non-PR run.
-      - name: Build and push image (release)
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            SERVER_KIND=${{ matrix.server_kind }}
-            SERVER_VERSION=${{ matrix.server_version }}
-          tags: ${{ steps.meta.outputs.tags }}
+      - name: Verify both published architectures
+        env:
+          VERSION_TAG: ${{ steps.meta.outputs.version-tag }}
+        run: |
+          set -euo pipefail
+          actual="$(docker buildx imagetools inspect --raw "$VERSION_TAG" \
+            | jq -r '.manifests[] | select(.platform.os == "linux") | "\(.platform.os)/\(.platform.architecture)"' \
+            | sort -u)"
+          expected="$(printf 'linux/amd64\nlinux/arm64')"
+          if [ "$actual" != "$expected" ]; then
+            echo "unexpected manifest platforms:" >&2
+            printf '%s\n' "$actual" >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "$VERSION_TAG"
 
   # Redis Enterprise RAMP bundle (issue #103). Enterprise is linux-only and
   # does not load a bare .so; `ramp pack` wraps it with a generated module.json
@@ -371,7 +550,7 @@ jobs:
 
       - name: Upload to the release
         # Mirror the .so upload for Release Please and manual recovery runs.
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && inputs.publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
@@ -381,8 +560,8 @@ jobs:
             "dist/${{ steps.pkg.outputs.zip }}.sha256" \
             --clobber
 
-      - name: Upload as workflow artifact (PR validation runs)
-        if: github.event_name == 'pull_request'
+      - name: Upload as workflow artifact (validation runs)
+        if: github.event_name == 'pull_request' || inputs.publish == false
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.zip }}
