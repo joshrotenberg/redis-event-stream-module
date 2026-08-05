@@ -30,16 +30,26 @@ use std::hint::spin_loop;
 use std::ops::Deref;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-static EVENT_QUEUE: OnceLock<Arc<EventQueue>> = OnceLock::new();
+// Unlike a OnceLock, this slot can be cleared on unload and initialized again
+// when the same dynamic-library image is loaded in-process (issue #291).
+static EVENT_QUEUE: Mutex<Option<Arc<EventQueue>>> = Mutex::new(None);
 static WORKER: Mutex<Option<JoinHandle<Vec<Arc<PendingEvent>>>>> = Mutex::new(None);
 static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_MODE: AtomicU8 = AtomicU8::new(WriteMode::sync as u8);
 static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(0);
 const QUEUE_LOCK_SPINS: usize = 64;
+
+pub(crate) fn reset_dispatch_generation() {
+    debug_assert!(WORKER.lock().unwrap().is_none());
+    *EVENT_QUEUE.lock().unwrap() = None;
+    STOP_WORKER.store(false, Ordering::Relaxed);
+    ACTIVE_MODE.store(WriteMode::sync as u8, Ordering::Relaxed);
+    NEXT_EVENT_ID.store(0, Ordering::Relaxed);
+}
 
 struct QueuedEvent {
     id: u64,
@@ -329,15 +339,18 @@ pub(crate) fn start_dispatch_worker(ctx: &Context) -> Result<(), String> {
     let max_wait = Duration::from_millis(ASYNC_MAX_WAIT_MS.value.load(Ordering::Relaxed) as u64);
     let queue = Arc::new(EventQueue::new(capacity));
 
+    let mut queue_slot = EVENT_QUEUE.lock().unwrap();
+    if queue_slot.is_some() || WORKER.lock().unwrap().is_some() {
+        return Err("async writer from a previous generation is still active".to_owned());
+    }
     STOP_WORKER.store(false, Ordering::Release);
     let worker_queue = Arc::clone(&queue);
     let handle = thread::Builder::new()
         .name("eventstream-writer".to_owned())
         .spawn(move || worker_main(worker_queue, batch_size, max_wait, mode))
         .map_err(|e| format!("failed to spawn async writer: {e}"))?;
-    EVENT_QUEUE
-        .set(queue)
-        .map_err(|_| "async writer queue was already initialized".to_owned())?;
+    *queue_slot = Some(queue);
+    drop(queue_slot);
     *WORKER.lock().unwrap() = Some(handle);
     ACTIVE_MODE.store(mode as u8, Ordering::Release);
     Ok(())
@@ -350,7 +363,7 @@ pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
         return;
     }
 
-    let Some(queue) = EVENT_QUEUE.get() else {
+    let Some(queue) = EVENT_QUEUE.lock().unwrap().as_ref().cloned() else {
         ASYNC_FALLBACKS.fetch_add(1, Ordering::Relaxed);
         defer_pending_event(ctx, event);
         return;
@@ -363,7 +376,7 @@ pub(crate) fn dispatch_pending_event(ctx: &Context, event: PendingEvent) {
         }
         Err(event) => {
             ASYNC_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-            defer_ordered_fallback(ctx, Arc::clone(queue), id, event);
+            defer_ordered_fallback(ctx, queue, id, event);
         }
     }
 }
@@ -472,25 +485,26 @@ pub(crate) fn stop_dispatch_worker(ctx: &Context) {
 
     STOP_WORKER.store(true, Ordering::Release);
     ACTIVE_MODE.store(WriteMode::sync as u8, Ordering::Release);
-    if let Some(queue) = EVENT_QUEUE.get() {
+    let queue = EVENT_QUEUE.lock().unwrap().as_ref().cloned();
+    if let Some(queue) = &queue {
         queue.wake();
     }
-    let Some(handle) = WORKER.lock().unwrap().take() else {
-        return;
-    };
-    match handle.join() {
-        Ok(pending) => {
-            ASYNC_QUEUE_DEPTH.store(0, Ordering::Relaxed);
-            for event in pending {
-                guard_job(|| process_pending_event(ctx, event.as_ref()));
+    if let Some(handle) = WORKER.lock().unwrap().take() {
+        match handle.join() {
+            Ok(pending) => {
+                ASYNC_QUEUE_DEPTH.store(0, Ordering::Relaxed);
+                for event in pending {
+                    guard_job(|| process_pending_event(ctx, event.as_ref()));
+                }
+            }
+            Err(_) => {
+                ASYNC_WORKER_ERRORS.fetch_add(1, Ordering::Relaxed);
+                let unaccounted = ASYNC_QUEUE_DEPTH.swap(0, Ordering::Relaxed).max(0) as u64;
+                EVENTS_LOST.fetch_add(unaccounted, Ordering::Relaxed);
             }
         }
-        Err(_) => {
-            ASYNC_WORKER_ERRORS.fetch_add(1, Ordering::Relaxed);
-            let unaccounted = ASYNC_QUEUE_DEPTH.swap(0, Ordering::Relaxed).max(0) as u64;
-            EVENTS_LOST.fetch_add(unaccounted, Ordering::Relaxed);
-        }
     }
+    *EVENT_QUEUE.lock().unwrap() = None;
 }
 
 #[cfg(test)]

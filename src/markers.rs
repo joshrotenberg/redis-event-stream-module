@@ -17,7 +17,9 @@ use crate::stats::{
     LOGGED_XADD_ERROR, STREAM_STATS,
 };
 use lazy_static::lazy_static;
-use redis_module::{raw, CallResult, Context, ContextFlags, RedisGILGuard, Status};
+use redis_module::{
+    raw, CallResult, Context, ContextFlags, RedisGILGuard, RedisLockIndicator, Status,
+};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -82,6 +84,18 @@ pub(crate) fn initialize_generation(ctx: &Context) {
     }
     *GENERATION_ID.lock(ctx) = String::from_utf8(bytes.to_vec())
         .expect("RedisModule_GetRandomHexChars must return ASCII hex");
+}
+
+/// Clear lifecycle state retained by an in-process dynamic-library reload.
+/// `initialize_generation` immediately assigns the new opaque identity after
+/// dispatch startup succeeds (issue #291).
+pub(crate) fn reset_marker_generation<G: RedisLockIndicator>(lock: &G) {
+    CONTROL_MARKERS.store(0, Ordering::Relaxed);
+    CONTROL_CHECKPOINTS.store(0, Ordering::Relaxed);
+    LAST_CHECKPOINT_MS.store(0, Ordering::Relaxed);
+    MARKERS_DIRTY.store(false, Ordering::Relaxed);
+    GENERATION_ID.lock(lock).clear();
+    PENDING_MARKERS.lock(lock).clear();
 }
 
 fn control_retention<G: redis_module::RedisLockIndicator>(lock: &G) -> Retention {

@@ -12,7 +12,7 @@ use redis::Commands;
 
 #[test]
 fn in_place_unload_load_swap() {
-    let s = TestServer::start(&["events", "set"]);
+    let s = TestServer::start(&["events", "set,del", "max-streams", "1"]);
     let mut c = s.conn();
 
     // --- Before the swap: capture some history and register a stream. ---
@@ -20,6 +20,15 @@ fn in_place_unload_load_swap() {
     wait_until(CAPTURE_WAIT, "pre-upgrade capture", || {
         info_field(&mut c, "forwarded") == 1
     });
+    let _: i64 = c.del("before").expect("DEL before");
+    wait_until(CAPTURE_WAIT, "pre-upgrade max-streams drop", || {
+        info_field(&mut c, "events_lost") == 1
+    });
+    let before = stats_map(&mut c);
+    assert_eq!(before["forwarded"], "1");
+    assert_eq!(before["events_lost"], "1");
+    assert_eq!(before["dropped_max_streams"], "1");
+    assert_ne!(before["skipped_self"], "0");
     assert_eq!(marker_actions(&mut c), vec!["loaded"]);
     assert!(
         redis::cmd("EVENTSTREAM.STREAMS")
@@ -45,28 +54,30 @@ fn in_place_unload_load_swap() {
     // captured and is not recoverable (SPEC.md sections 9, 12). ---
     let _: () = c.set("during_gap", "1").expect("SET during the gap");
 
-    // --- Load the same .so again with the same args (a real upgrade points at
-    // a new path; the mechanics are identical). ---
+    // --- Load the same .so again (a real upgrade points at a new path; the
+    // lifecycle mechanics are identical). ---
     let _: () = redis::cmd("MODULE")
         .arg("LOAD")
         .arg(module_path().to_str().expect("module path is utf-8"))
         .arg("events")
-        .arg("set")
+        // Widen the extra-class subscription too: the previous generation's
+        // fixed subscription mask must not make this load-time setter look
+        // like a forbidden runtime CONFIG SET (#291).
+        .arg("set,del,@missed")
+        .arg("max-streams")
+        .arg("1")
         .query(&mut c)
         .expect("MODULE LOAD");
 
-    // Counters are process-lifetime statics that reset when the module image is
-    // actually unloaded (SPEC.md section 13). Redis unloads the image on Linux
-    // (the CI platform), so the counter is back to zero there. macOS dlclose
-    // does not truly unload a dylib, so the statics survive an in-process
-    // UNLOAD/LOAD locally — assert the reset only where the platform unloads,
-    // and assert the universal property (capture resumes) everywhere.
-    let forwarded_after_load = info_field(&mut c, "forwarded");
-    if cfg!(target_os = "linux") {
-        assert_eq!(
-            forwarded_after_load, 0,
-            "counters must reset to zero when the module image is unloaded"
-        );
+    // Every observable value belongs to the new loaded generation even when
+    // the platform retains the dylib and its statics across dlclose (#291).
+    let after = stats_map(&mut c);
+    for (name, value) in &after {
+        match name.as_str() {
+            "enabled" => assert_eq!(value, "1"),
+            "cluster_pinned_tag" => assert!(value.is_empty()),
+            _ => assert_eq!(value, "0", "{name} leaked across module reload"),
+        }
     }
     // The registry set is ordinary keyspace and survives the swap, so
     // discovery is continuous across it.
@@ -77,11 +88,16 @@ fn in_place_unload_load_swap() {
             .contains(&"events:set".to_string()),
         "the registry must survive the swap"
     );
+    assert_eq!(
+        streams_withstats(&mut c).get("events:set"),
+        Some(&(0, 0)),
+        "persisted discovery must not retain per-generation stream counters"
+    );
 
     // --- After the swap: capture resumes. ---
     let _: () = c.set("after", "1").expect("SET after");
     wait_until(CAPTURE_WAIT, "post-upgrade capture resumes", || {
-        info_field(&mut c, "forwarded") > forwarded_after_load
+        info_field(&mut c, "forwarded") == 1
     });
 
     // The control stream now shows the full pair: the pre-upgrade loaded, the
@@ -121,4 +137,60 @@ fn in_place_unload_load_swap() {
         !captured.contains(&"during_gap".to_string()),
         "the event fired while unloaded must be absent (loss window)"
     );
+}
+
+#[test]
+fn async_dispatch_can_unload_and_reload_in_process() {
+    let args = [
+        "events",
+        "set",
+        "write-mode",
+        "individual",
+        "async-batch-size",
+        "8",
+        "async-max-wait-ms",
+        "1",
+    ];
+    let s = TestServer::start(&args);
+    let mut c = s.conn();
+
+    for i in 0..64 {
+        let _: () = c.set(format!("before:{i}"), i).expect("pre-reload SET");
+    }
+    wait_until(CAPTURE_WAIT, "async pre-reload drain", || {
+        info_field(&mut c, "forwarded") == 64
+    });
+    assert!(info_field(&mut c, "async_enqueued") > 0);
+
+    let _: () = redis::cmd("MODULE")
+        .arg("UNLOAD")
+        .arg("eventstream")
+        .query(&mut c)
+        .expect("MODULE UNLOAD");
+    let mut load = redis::cmd("MODULE");
+    load.arg("LOAD")
+        .arg(module_path().to_str().expect("module path is utf-8"));
+    for arg in args {
+        load.arg(arg);
+    }
+    let _: () = load.query(&mut c).expect("MODULE LOAD in async mode");
+
+    let after = stats_map(&mut c);
+    for name in [
+        "forwarded",
+        "async_enqueued",
+        "async_fallbacks",
+        "async_queue_depth",
+        "async_queue_high_water",
+        "async_drains",
+        "async_drain_events",
+        "async_worker_errors",
+    ] {
+        assert_eq!(after[name], "0", "{name} leaked across async reload");
+    }
+
+    let _: () = c.set("after", "1").expect("post-reload SET");
+    wait_until(CAPTURE_WAIT, "async capture resumes after reload", || {
+        info_field(&mut c, "forwarded") == 1
+    });
 }

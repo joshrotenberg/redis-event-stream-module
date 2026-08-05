@@ -34,6 +34,18 @@ pub(crate) const EXTRA_UNINIT: i64 = i64::MIN;
 
 pub(crate) static SUBSCRIBED_EXTRA: AtomicI64 = AtomicI64::new(EXTRA_UNINIT);
 
+/// Align transition tracking with the effective load-time configuration after
+/// the module macro has applied its arguments (issue #291).
+pub(crate) fn begin_generation() {
+    LAST_ENABLED.store(ENABLED.load(Ordering::Relaxed), Ordering::Relaxed);
+}
+
+/// Make the next in-process load's filter setter recognize that it is running
+/// before the new keyspace subscription has been established.
+pub(crate) fn finish_generation() {
+    SUBSCRIBED_EXTRA.store(EXTRA_UNINIT, Ordering::Relaxed);
+}
+
 /// The `MISSED`/`NEW` bits a parsed filter explicitly names via `@class`
 /// tokens (not `*`, which adapts to whatever is subscribed).
 pub(crate) fn extra_classes_named(f: &ParsedFilter) -> NotifyEvent {

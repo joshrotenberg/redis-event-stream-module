@@ -75,6 +75,21 @@ pub(crate) static PROBE_VERIFIED_TAG: Mutex<Option<String>> = Mutex::new(None);
 /// exhaustive unit test proves completion and coverage of all 16384 slots.
 pub(crate) static FALLBACK_SLOT_TAGS: OnceLock<Vec<u32>> = OnceLock::new();
 
+/// Clear the per-generation cluster state on every module load. The fallback
+/// slot table is deliberately retained: it is a deterministic, immutable CRC
+/// lookup cache, not topology or observability state (issue #291).
+pub(crate) fn reset_cluster_generation() {
+    PER_NODE.store(false, Ordering::Relaxed);
+    DROPPED_NO_OWNED_SLOT.store(0, Ordering::Relaxed);
+    REPINS.store(0, Ordering::Relaxed);
+    REPINS_PROBE_DETECTED.store(0, Ordering::Relaxed);
+    DROPPED_MIGRATING.store(0, Ordering::Relaxed);
+    LOGGED_NO_OWNED_SLOT.store(false, Ordering::Relaxed);
+    LOGGED_MIGRATING.store(false, Ordering::Relaxed);
+    *NODE_TAG.lock().unwrap() = None;
+    *PROBE_VERIFIED_TAG.lock().unwrap() = None;
+}
+
 /// The hash-tag segment inserted between the prefix and the rest of a
 /// destination key so all of a node's keys co-locate on a slot it owns (issue
 /// #45). Empty in standalone/refuse mode. In per-node cluster mode, `{tag}`,
