@@ -4,6 +4,43 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.5.0...v0.6.0) (2026-08-10)
+
+
+### Added
+
+* add time-based saturation harness ([#284](https://github.com/joshrotenberg/redis-event-stream-module/issues/284)) ([9af2452](https://github.com/joshrotenberg/redis-event-stream-module/commit/9af245273fb4cc7458215bfe6484932ad8d952e4))
+* complete the disposable AWS lab contract ([#283](https://github.com/joshrotenberg/redis-event-stream-module/issues/283)) ([6c71039](https://github.com/joshrotenberg/redis-event-stream-module/commit/6c710397ca7a713d3eaa9030a74ed543893c4cc6))
+* **eventstream-client:** decode mixed fixed and batch-v1 entries ([#273](https://github.com/joshrotenberg/redis-event-stream-module/issues/273)) ([30a67b5](https://github.com/joshrotenberg/redis-event-stream-module/commit/30a67b5bcb9a8acebe10131d16bbceb3e8bc2bb8))
+* expose restart uncertainty with control checkpoints ([#282](https://github.com/joshrotenberg/redis-event-stream-module/issues/282)) ([9dcf36e](https://github.com/joshrotenberg/redis-event-stream-module/commit/9dcf36ee792d996251fcf9ee5270ab13eeb6c079))
+
+
+### Fixed
+
+* reset observability state on module reload ([#292](https://github.com/joshrotenberg/redis-event-stream-module/issues/292)) ([51d8546](https://github.com/joshrotenberg/redis-event-stream-module/commit/51d85460010c9a651acd58c74672e9c501422949))
+
+
+### Performance
+
+* characterize background persistence interference ([#289](https://github.com/joshrotenberg/redis-event-stream-module/issues/289)) ([c0f4227](https://github.com/joshrotenberg/redis-event-stream-module/commit/c0f422794c4a180b6118cc14669ba066f4cabcaa))
+* characterize maxmemory pressure and verify-oom ([#290](https://github.com/joshrotenberg/redis-event-stream-module/issues/290)) ([09e3e7c](https://github.com/joshrotenberg/redis-event-stream-module/commit/09e3e7cd804c5c5f47fb0b683bdebc6fea3bd02c))
+* compare workload-mix and payload knees ([#286](https://github.com/joshrotenberg/redis-event-stream-module/issues/286)) ([a1f197c](https://github.com/joshrotenberg/redis-event-stream-module/commit/a1f197c6f5d9814fb638f8790d8ebf640c4f850c))
+* establish single-node AOF baseline ([#287](https://github.com/joshrotenberg/redis-event-stream-module/issues/287)) ([175f99e](https://github.com/joshrotenberg/redis-event-stream-module/commit/175f99e5cb3953d46230058461a4d4c234aeaab1))
+* establish single-replica baseline ([#288](https://github.com/joshrotenberg/redis-event-stream-module/issues/288)) ([cf815b7](https://github.com/joshrotenberg/redis-event-stream-module/commit/cf815b7a7837ed7b7ca38c991f94d27e49899341))
+* locate the representative single-node knee ([#285](https://github.com/joshrotenberg/redis-event-stream-module/issues/285)) ([85f9f7a](https://github.com/joshrotenberg/redis-event-stream-module/commit/85f9f7afa24d995254f772e8a12a3da076406ec2))
+* run Preview envelope soak and restart-loss probe ([#276](https://github.com/joshrotenberg/redis-event-stream-module/issues/276)) ([15c920e](https://github.com/joshrotenberg/redis-event-stream-module/commit/15c920e9653c4425accb7e40ca0d3c9517d3369a))
+* tune Preview envelope batch size and drain wait ([#275](https://github.com/joshrotenberg/redis-event-stream-module/issues/275)) ([c8fa455](https://github.com/joshrotenberg/redis-event-stream-module/commit/c8fa4555a0811cbbedc99c0114209d4d896b40bc))
+
+
+### Documentation
+
+* publish the tested capacity and operations guide ([#294](https://github.com/joshrotenberg/redis-event-stream-module/issues/294)) ([0f95a10](https://github.com/joshrotenberg/redis-event-stream-module/commit/0f95a10c1929bb83a5623d496ff1171bcd4be0e7))
+
+
+### Continuous Integration
+
+* reduce multi-architecture release image latency ([#293](https://github.com/joshrotenberg/redis-event-stream-module/issues/293)) ([46d99e1](https://github.com/joshrotenberg/redis-event-stream-module/commit/46d99e13e154d4ea282ad0587bad3e038a061982))
+
 ## [0.5.0](https://github.com/joshrotenberg/redis-event-stream-module/compare/v0.4.0...v0.5.0) (2026-07-30)
 
 This release adds Preview asynchronous write modes while keeping `sync` as the
